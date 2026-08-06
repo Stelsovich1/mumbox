@@ -3,6 +3,7 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  base: "/mumbox/",
   build: {
     rollupOptions: {
       output: {
@@ -26,9 +27,11 @@ export default defineConfig({
         background_color: "#05070d",
         display: "standalone",
         orientation: "landscape",
+        start_url: "./",
+        scope: "./",
         icons: [
           {
-            src: "/icon-192.svg",
+            src: "icon-192.svg",
             sizes: "192x192",
             type: "image/svg+xml",
             purpose: "any"
