@@ -25,7 +25,7 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { KeyboardEvent, useMemo, useState } from "react";
+import { KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
@@ -79,6 +79,12 @@ export function CellSettingsDrawer({
       }),
     [colorFilter, media, query]
   );
+
+  useEffect(() => {
+    if (open && cell && !selectedMedia) {
+      setPickerOpen(true);
+    }
+  }, [cell, open, selectedMedia]);
 
   if (!open || !cell) {
     return null;
@@ -162,16 +168,7 @@ export function CellSettingsDrawer({
           <Typography variant="h6">Настройки ячейки</Typography>
         </Box>
 
-        {!selectedMedia ? (
-          <Button
-            variant="contained"
-            onClick={() => {
-              setPickerOpen(true);
-            }}
-          >
-            Выбрать медиа
-          </Button>
-        ) : (
+        {selectedMedia ? (
           <>
             <Box
               role="button"
@@ -380,10 +377,10 @@ export function CellSettingsDrawer({
               />
             </Box>
           </>
-        )}
+        ) : null}
 
         {pickerOpen ? (
-          <Box sx={{ display: "grid", gap: 1 }}>
+          <Box sx={{ display: "grid", gap: 1, minWidth: 0 }}>
             <TextField
               label="Поиск"
               value={query}
@@ -428,8 +425,8 @@ export function CellSettingsDrawer({
                 </Button>
               </Box>
             </Box>
-            <Box role="table" aria-label="Выбор медиа" sx={{ overflowX: "auto" }}>
-              <Box sx={{ minWidth: 720 }}>
+            <Box role="table" aria-label="Выбор медиа" sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
+              <Box sx={{ width: 720, maxWidth: "max-content" }}>
               <Box
                 role="row"
                 sx={{
@@ -554,6 +551,21 @@ export function CellSettingsDrawer({
                     </Box>
                   </Box>
                 ))}
+                {filteredMedia.length === 0 ? (
+                  <Box
+                    role="row"
+                    sx={{
+                      minHeight: MEDIA_PICKER_ROW_HEIGHT,
+                      display: "flex",
+                      alignItems: "center",
+                      px: 1,
+                      borderBottom: 1,
+                      borderColor: "rgba(169, 183, 207, 0.12)"
+                    }}
+                  >
+                    <Typography color="text.secondary">Нет аудио</Typography>
+                  </Box>
+                ) : null}
                 </Box>
               </Box>
               </Box>

@@ -143,13 +143,13 @@ async function importAudio(page: Page, alias: string) {
 async function assignFirstCell(page: Page) {
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
-  await page.getByRole("button", { name: "Выбрать медиа" }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
   await page.getByRole("button", { name: "Выбрать launch.wav" }).click();
 }
 
 async function assignCell(page: Page, cellNumber: number, fileName = "launch.wav") {
   await page.getByRole("button", { name: `Пустая ячейка ${String(cellNumber)}`, exact: true }).click();
-  await page.getByRole("button", { name: "Выбрать медиа" }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
   await page.getByRole("button", { name: `Выбрать ${fileName}` }).click();
 }
 
@@ -324,6 +324,30 @@ test("imports audio and assigns it to a grid cell", async ({ page }) => {
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
 
   await expect(page.getByRole("button", { name: "Ячейка 1 Launch Pad" })).toBeVisible();
+});
+
+test("opens media picker immediately for an empty cell", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Launch Pad");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Выбрать медиа", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Выбрать launch.wav" })).toBeVisible();
+});
+
+test("shows empty media placeholder for an empty library", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Выбрать медиа", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Нет аудио")).toBeVisible();
 });
 
 test("imports one file, multiple files, and an audio folder", async ({ page }) => {
@@ -555,7 +579,7 @@ test("deletes media from the edit picker with confirmation", async ({ page }) =>
   await page.getByRole("button", { name: "Сохранить" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
-  await page.getByRole("button", { name: "Выбрать медиа" }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
   await expect(page.getByText("alarm.mp3")).toBeVisible();
   await page.getByLabel("Поиск медиа").fill("alarm");
   await expect(page.getByText("alarm.mp3")).toBeVisible();
