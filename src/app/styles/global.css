@@ -1,0 +1,50 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background:
+    radial-gradient(circle at 18% 14%, rgba(140, 248, 255, 0.08), transparent 28%),
+    radial-gradient(circle at 78% 24%, rgba(255, 204, 102, 0.08), transparent 24%),
+    #05070d;
+}
+
+[data-noselect],
+[data-noselect] * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+[data-noselect] input,
+[data-noselect] textarea,
+[data-noselect] [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

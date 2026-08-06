@@ -1,0 +1,176 @@
+import AppsIcon from "@mui/icons-material/Apps";
+import EditNoteIcon from "@mui/icons-material/EditNote";
+import Filter1Icon from "@mui/icons-material/Filter1";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
+import VolumeOffIcon from "@mui/icons-material/VolumeOff";
+import VolumeUpIcon from "@mui/icons-material/VolumeUp";
+import {
+  Box,
+  IconButton,
+  Popover,
+  Slider,
+  Stack,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip
+} from "@mui/material";
+import { MouseEvent, useState } from "react";
+
+import { AppAction } from "../../../app/model/appState";
+import { GridSize } from "../../../entities/panel/model/types";
+
+const gridSizes: GridSize[] = [6, 8, 10, 12];
+
+type RightToolbarProps = {
+  masterVolume: number;
+  masterMuted: boolean;
+  editMode: boolean;
+  stopOthers: boolean;
+  gridSize: GridSize;
+  panelId: string;
+  dispatch: React.Dispatch<AppAction>;
+  onStopAll: () => void;
+};
+
+export function RightToolbar({
+  masterVolume,
+  masterMuted,
+  editMode,
+  stopOthers,
+  gridSize,
+  panelId,
+  dispatch,
+  onStopAll
+}: RightToolbarProps) {
+  const [gridAnchor, setGridAnchor] = useState<HTMLElement | null>(null);
+
+  const openGridMenu = (event: MouseEvent<HTMLButtonElement>) => {
+    setGridAnchor(event.currentTarget);
+  };
+
+  return (
+    <Stack
+      data-noselect
+      component="aside"
+      aria-label="Панель управления"
+      alignItems="center"
+      spacing={1.5}
+      sx={{
+        minWidth: 0,
+        minHeight: 0,
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 2,
+        py: 1.5,
+        backgroundColor: "rgba(13, 18, 31, 0.82)",
+        backdropFilter: "blur(18px)"
+      }}
+    >
+      <Tooltip title={masterMuted ? "Включить звук" : "Отключить звук"}>
+        <IconButton
+          aria-label={masterMuted ? "Включить звук" : "Отключить звук"}
+          color={masterMuted ? "default" : "primary"}
+          aria-pressed={masterMuted}
+          onClick={() => {
+            dispatch({ type: "volume/muteToggle" });
+          }}
+        >
+          {masterMuted ? <VolumeOffIcon /> : <VolumeUpIcon />}
+        </IconButton>
+      </Tooltip>
+      <Box sx={{ height: 180, display: "flex", alignItems: "center" }}>
+        <Slider
+          aria-label="Общая громкость"
+          orientation="vertical"
+          value={masterVolume}
+          disabled={masterMuted}
+          min={0}
+          max={100}
+          onChange={(_, value: number | number[]) => {
+            const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
+            dispatch({
+              type: "volume/master",
+              value: nextVolume
+            });
+          }}
+          sx={{
+            width: 44,
+            "& .MuiSlider-thumb": {
+              width: 28,
+              height: 28
+            },
+            "& .MuiSlider-track, & .MuiSlider-rail": {
+              width: 10
+            }
+          }}
+        />
+      </Box>
+      <Tooltip title="Режим редактирования">
+        <IconButton
+          aria-label="Режим редактирования"
+          color={editMode ? "secondary" : "primary"}
+          aria-pressed={editMode}
+          onClick={() => {
+            dispatch({ type: "editMode/toggle" });
+          }}
+        >
+          <EditNoteIcon />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Размер сетки">
+        <IconButton aria-label="Размер сетки" onClick={openGridMenu}>
+          <AppsIcon />
+        </IconButton>
+      </Tooltip>
+      <Popover
+        open={Boolean(gridAnchor)}
+        anchorEl={gridAnchor}
+        onClose={() => {
+          setGridAnchor(null);
+        }}
+        anchorOrigin={{ vertical: "center", horizontal: "left" }}
+        transformOrigin={{ vertical: "center", horizontal: "right" }}
+      >
+        <ToggleButtonGroup
+          exclusive
+          value={gridSize}
+          aria-label="Выбор размера сетки"
+          sx={{ p: 1, display: "grid", gridTemplateColumns: "repeat(2, 72px)", gap: 1 }}
+          onChange={(_, value: GridSize | null) => {
+            if (value) {
+              dispatch({ type: "panel/gridSize", panelId, gridSize: value });
+              setGridAnchor(null);
+            }
+          }}
+        >
+          {gridSizes.map((size) => (
+            <ToggleButton key={size} value={size} aria-label={`${String(size)}x${String(size)}`}>
+              {String(size)}x{String(size)}
+            </ToggleButton>
+          ))}
+        </ToggleButtonGroup>
+      </Popover>
+      <Tooltip title="Останавливать другие ячейки">
+        <IconButton
+          aria-label="Останавливать другие ячейки"
+          color={stopOthers ? "secondary" : "default"}
+          aria-pressed={stopOthers}
+          onClick={() => {
+            dispatch({ type: "stopOthers/toggle" });
+          }}
+        >
+          <Filter1Icon />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Остановить все аудио">
+        <IconButton
+          aria-label="Остановить все аудио"
+          color="error"
+          onClick={onStopAll}
+        >
+          <StopCircleIcon />
+        </IconButton>
+      </Tooltip>
+    </Stack>
+  );
+}
