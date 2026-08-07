@@ -160,12 +160,26 @@ async function openFileMenu(page: Page) {
 test("renders the MUMBOX shell", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByText("MUMBOX")).toBeVisible();
+  await expect(page.getByText("MUMBOX", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Файл" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Panel 1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Добавить панель" })).toBeVisible();
   await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
   await expect(page.getByLabel("Общая громкость")).toBeVisible();
+});
+
+test("shows a dismissible mobile browser install recommendation", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "Install recommendation is mobile-only.");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const recommendation = page.getByText("Добавьте ярлык на главный экран, чтобы установить MUMBOX.");
+  await expect(recommendation).toBeVisible();
+  await page.getByRole("button", { name: "ОК" }).click();
+  await expect(recommendation).toHaveCount(0);
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
 });
 
 test("opens project FAQ from the file menu", async ({ page }) => {
@@ -353,6 +367,14 @@ test("shows empty media placeholder for an empty library", async ({ page }) => {
 test("imports one file, multiple files, and an audio folder", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
+
+  const audioInput = page.getByTestId("audio-file-input");
+  const audioAccept = await audioInput.getAttribute("accept");
+  await expect(audioInput).toHaveAttribute("accept", /\.mp3/);
+  await expect(audioInput).toHaveAttribute("accept", /\.wav/);
+  await expect(audioInput).toHaveAttribute("accept", /\.m4a/);
+  expect(audioAccept).not.toContain("audio/*");
+  await expect(page.getByTestId("audio-folder-input")).toHaveAttribute("accept", audioAccept ?? "");
 
   await page.getByTestId("audio-file-input").setInputFiles(audioFile);
   await expect(page.getByRole("dialog", { name: "Импорт аудио" })).toBeVisible();

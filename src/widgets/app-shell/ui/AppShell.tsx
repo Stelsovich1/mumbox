@@ -7,9 +7,6 @@ import {
   Button,
   Backdrop,
   CircularProgress,
-  Dialog,
-  DialogContent,
-  DialogTitle,
   Divider,
   Menu,
   MenuItem,
@@ -35,6 +32,20 @@ function isDefinedCell<T>(cell: T | undefined): cell is T {
 }
 
 const audioExtensions = [".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".webm"];
+const audioAcceptTypes = [
+  ...audioExtensions,
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/aac",
+  "audio/flac",
+  "audio/ogg",
+  "audio/opus",
+  "audio/webm"
+].join(",");
 
 function isAudioFile(file: File) {
   const fileName = file.name.toLowerCase();
@@ -75,6 +86,12 @@ function isEditableTarget(target: EventTarget | null) {
   return Boolean(target.closest("input, textarea, [contenteditable='true']"));
 }
 
+function isStandaloneDisplayMode() {
+  const standaloneNavigator = navigator as Navigator & { standalone?: boolean };
+
+  return window.matchMedia("(display-mode: standalone)").matches || standaloneNavigator.standalone === true;
+}
+
 export function AppShell() {
   const { state, activePanel, dispatch } = useAppStore();
   const [fileAnchor, setFileAnchor] = useState<HTMLElement | null>(null);
@@ -84,10 +101,12 @@ export function AppShell() {
   const [configImportWarningOpen, setConfigImportWarningOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
+  const [installPromptDismissed, setInstallPromptDismissed] = useState(false);
+  const [standaloneMode, setStandaloneMode] = useState(isStandaloneDisplayMode);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const audioFolderInputRef = useRef<HTMLInputElement | null>(null);
   const configInputRef = useRef<HTMLInputElement | null>(null);
-  const portraitBlocked = useMediaQuery("(orientation: portrait) and (max-width: 900px)");
+  const mobileBrowser = useMediaQuery("(hover: none) and (pointer: coarse)");
   const activeCells = useMemo(() => {
     if (!activePanel) {
       return [];
@@ -113,6 +132,71 @@ export function AppShell() {
   useEffect(() => {
     audioFolderInputRef.current?.setAttribute("webkitdirectory", "");
     audioFolderInputRef.current?.setAttribute("directory", "");
+  }, []);
+
+  useEffect(() => {
+    const standaloneQuery = window.matchMedia("(display-mode: standalone)");
+    const syncStandaloneMode = () => {
+      setStandaloneMode(isStandaloneDisplayMode());
+    };
+
+    standaloneQuery.addEventListener("change", syncStandaloneMode);
+    return () => {
+      standaloneQuery.removeEventListener("change", syncStandaloneMode);
+    };
+  }, []);
+
+  useEffect(() => {
+    let animationFrameId = 0;
+    const syncAppHeight = () => {
+      window.cancelAnimationFrame(animationFrameId);
+      animationFrameId = window.requestAnimationFrame(() => {
+        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+        document.documentElement.style.setProperty("--app-height", `${String(viewportHeight)}px`);
+      });
+    };
+    const syncAppHeightAfterRotation = () => {
+      syncAppHeight();
+      window.setTimeout(syncAppHeight, 120);
+      window.setTimeout(syncAppHeight, 360);
+    };
+
+    syncAppHeight();
+    window.visualViewport?.addEventListener("resize", syncAppHeight);
+    window.visualViewport?.addEventListener("scroll", syncAppHeight);
+    window.addEventListener("resize", syncAppHeight);
+    window.addEventListener("orientationchange", syncAppHeightAfterRotation);
+    window.addEventListener("pageshow", syncAppHeight);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.visualViewport?.removeEventListener("resize", syncAppHeight);
+      window.visualViewport?.removeEventListener("scroll", syncAppHeight);
+      window.removeEventListener("resize", syncAppHeight);
+      window.removeEventListener("orientationchange", syncAppHeightAfterRotation);
+      window.removeEventListener("pageshow", syncAppHeight);
+      document.documentElement.style.removeProperty("--app-height");
+    };
+  }, []);
+
+  useEffect(() => {
+    const preventZoomGesture = (event: Event) => {
+      event.preventDefault();
+    };
+    const preventMultiTouchZoom = (event: TouchEvent) => {
+      if (event.touches.length > 1) {
+        event.preventDefault();
+      }
+    };
+    const options = { passive: false };
+
+    document.addEventListener("gesturestart", preventZoomGesture, options);
+    document.addEventListener("gesturechange", preventZoomGesture, options);
+    document.addEventListener("touchmove", preventMultiTouchZoom, options);
+    return () => {
+      document.removeEventListener("gesturestart", preventZoomGesture);
+      document.removeEventListener("gesturechange", preventZoomGesture);
+      document.removeEventListener("touchmove", preventMultiTouchZoom);
+    };
   }, []);
 
   const closeFileMenu = () => {
@@ -204,10 +288,24 @@ export function AppShell() {
       data-noselect
       sx={{
         width: "100vw",
-        height: "100vh",
+        height: "var(--app-height)",
+        minHeight: 0,
         display: "grid",
-        gridTemplateRows: "52px minmax(0, 1fr)",
-        color: "text.primary"
+        gridTemplateRows: {
+          xs: "44px minmax(0, 1fr)",
+          sm: "52px minmax(0, 1fr)"
+        },
+        color: "text.primary",
+        overflow: "hidden",
+        pt: "var(--app-safe-area-top)",
+        pr: "var(--app-safe-area-right)",
+        pb: "var(--app-safe-area-bottom)",
+        pl: "var(--app-safe-area-left)",
+        "@media (orientation: landscape) and (max-height: 430px)": {
+          gridTemplateRows: "34px minmax(0, 1fr)",
+          pt: 0,
+          pb: 0
+        }
       }}
     >
       <Box
@@ -221,7 +319,19 @@ export function AppShell() {
           borderBottom: 1,
           borderColor: "divider",
           backgroundColor: "rgba(5, 7, 13, 0.78)",
-          backdropFilter: "blur(18px)"
+          backdropFilter: "blur(18px)",
+          "@media (orientation: landscape) and (max-height: 430px)": {
+            gap: 0.75,
+            px: 0.75,
+            "& .MuiButton-root": {
+              minWidth: 36,
+              px: 0.75,
+              py: 0.125
+            },
+            "& .MuiButton-startIcon": {
+              mr: 0.5
+            }
+          }
         }}
       >
         <Button
@@ -308,7 +418,7 @@ export function AppShell() {
           ref={audioInputRef}
           data-testid="audio-file-input"
           type="file"
-          accept="audio/*"
+          accept={audioAcceptTypes}
           multiple
           hidden
           onChange={handleAudioFiles}
@@ -317,7 +427,7 @@ export function AppShell() {
           ref={audioFolderInputRef}
           data-testid="audio-folder-input"
           type="file"
-          accept="audio/*"
+          accept={audioAcceptTypes}
           multiple
           hidden
           onChange={handleAudioFiles}
@@ -344,7 +454,10 @@ export function AppShell() {
             fontWeight: 700,
             fontSize: { xs: 18, sm: 22 },
             color: "primary.main",
-            textShadow: "0 0 18px rgba(140, 248, 255, 0.5)"
+            textShadow: "0 0 18px rgba(140, 248, 255, 0.5)",
+            "@media (orientation: landscape) and (max-height: 430px)": {
+              fontSize: 14
+            }
           }}
         >
           MUMBOX
@@ -357,17 +470,21 @@ export function AppShell() {
           minHeight: 0,
           display: "grid",
           gridTemplateColumns: cellSettingsOpen
-            ? { xs: "minmax(0, 1fr) 52px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
-            : { xs: "minmax(0, 1fr) 52px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
+            ? { xs: "minmax(0, 1fr) 58px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
+            : { xs: "minmax(0, 1fr) 58px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
           gap: { xs: 0.75, sm: 1.5 },
           p: { xs: 0.75, sm: 1.5 },
           overflow: "hidden",
           "@media (max-height: 480px)": {
             gridTemplateColumns: cellSettingsOpen
-              ? "minmax(0, 1fr) 30px minmax(190px, 34vw)"
-              : "minmax(0, 1fr) 30px",
+              ? "minmax(0, 1fr) 33px minmax(190px, 34vw)"
+              : "minmax(0, 1fr) 33px",
             gap: 0.5,
             p: 0.5
+          },
+          "@media (orientation: landscape) and (max-height: 430px)": {
+            gap: 0.375,
+            p: 0.375
           }
         }}
       >
@@ -459,17 +576,24 @@ export function AppShell() {
       >
         <CircularProgress color="inherit" />
       </Backdrop>
-      <Dialog
-        open={portraitBlocked}
-        aria-labelledby="portrait-warning-title"
-      >
-        <DialogTitle id="portrait-warning-title">Поверните устройство</DialogTitle>
-        <DialogContent>
-          <Typography>
-            MUMBOX рассчитан на горизонтальный экран, чтобы рабочая сетка помещалась без прокрутки.
-          </Typography>
-        </DialogContent>
-      </Dialog>
+      <Snackbar
+        open={mobileBrowser && !standaloneMode && !installPromptDismissed}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        message="Добавьте ярлык на главный экран, чтобы установить MUMBOX."
+        action={
+          <Button
+            color="inherit"
+            onClick={() => {
+              setInstallPromptDismissed(true);
+            }}
+          >
+            ОК
+          </Button>
+        }
+        onClose={() => {
+          setInstallPromptDismissed(true);
+        }}
+      />
       <Snackbar
         open={configImportWarningOpen}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}

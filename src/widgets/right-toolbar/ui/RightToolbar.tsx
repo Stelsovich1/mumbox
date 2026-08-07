@@ -68,23 +68,23 @@ export function RightToolbar({
         backgroundColor: "rgba(13, 18, 31, 0.82)",
         backdropFilter: "blur(18px)",
         "& .MuiIconButton-root": {
-          width: { xs: 34, sm: 40 },
-          height: { xs: 34, sm: 40 }
+          width: { xs: 38, sm: 40 },
+          height: { xs: 38, sm: 40 }
         },
         "& .MuiSvgIcon-root": {
-          fontSize: { xs: 20, sm: 24 }
+          fontSize: { xs: 22, sm: 24 }
         },
         "@media (max-height: 480px)": {
           py: 0.25,
           px: 0,
           borderRadius: 1,
           "& .MuiIconButton-root": {
-            width: 22,
-            height: 22,
+            width: 24,
+            height: 24,
             p: 0.25
           },
           "& .MuiSvgIcon-root": {
-            fontSize: 14
+            fontSize: 16
           }
         }
       }}
@@ -120,7 +120,7 @@ export function RightToolbar({
             justifyContent: "center",
             px: { xs: 0.25, sm: 0.5 },
             "@media (max-height: 480px)": {
-              height: 62,
+              height: 68,
               px: 0.25
             }
           }}
@@ -140,22 +140,22 @@ export function RightToolbar({
               });
             }}
             sx={{
-              width: { xs: 32, sm: 44 },
+              width: { xs: 35, sm: 44 },
               "& .MuiSlider-thumb": {
-                width: { xs: 20, sm: 28 },
-                height: { xs: 20, sm: 28 }
+                width: { xs: 22, sm: 28 },
+                height: { xs: 22, sm: 28 }
               },
               "& .MuiSlider-track, & .MuiSlider-rail": {
-                width: { xs: 6, sm: 10 }
+                width: { xs: 7, sm: 10 }
               },
               "@media (max-height: 480px)": {
-                width: 16,
+                width: 18,
                 "& .MuiSlider-thumb": {
-                  width: 11,
-                  height: 11
+                  width: 12,
+                  height: 12
                 },
                 "& .MuiSlider-track, & .MuiSlider-rail": {
-                  width: 3
+                  width: 4
                 }
               }
             }}

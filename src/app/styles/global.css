@@ -2,6 +2,26 @@
   box-sizing: border-box;
 }
 
+:root {
+  --app-height: 100vh;
+  --app-safe-area-top: env(safe-area-inset-top, 0px);
+  --app-safe-area-right: env(safe-area-inset-right, 0px);
+  --app-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --app-safe-area-left: env(safe-area-inset-left, 0px);
+}
+
+@supports (height: 100svh) {
+  :root {
+    --app-height: 100svh;
+  }
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --app-height: 100dvh;
+  }
+}
+
 html,
 body,
 #root {
@@ -12,10 +32,13 @@ body,
 }
 
 body {
+  min-height: var(--app-height);
   background:
     radial-gradient(circle at 18% 14%, rgba(140, 248, 255, 0.08), transparent 28%),
     radial-gradient(circle at 78% 24%, rgba(255, 204, 102, 0.08), transparent 24%),
     #05070d;
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 [data-noselect],

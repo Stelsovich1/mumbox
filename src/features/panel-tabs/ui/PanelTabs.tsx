@@ -58,6 +58,17 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
           maxWidth: "100%",
           "& .MuiTabs-scroller": {
             overflowX: "auto !important"
+          },
+          "@media (orientation: landscape) and (max-height: 430px)": {
+            minHeight: 32,
+            "& .MuiTab-root": {
+              minHeight: 32,
+              px: 0.75,
+              fontSize: 11
+            },
+            "& .MuiTabs-scrollButtons": {
+              width: 24
+            }
           }
         }}
       >
@@ -160,7 +171,14 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
               setRenamingPanelId(panel.id);
               setDraftName(panel.name);
             }}
-            sx={{ minHeight: 42, maxWidth: 180 }}
+            sx={{
+              minHeight: 42,
+              maxWidth: 180,
+              "@media (orientation: landscape) and (max-height: 430px)": {
+                minHeight: 32,
+                maxWidth: 120
+              }
+            }}
           />
         ))}
       </Tabs>
@@ -170,6 +188,13 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
           size="small"
           onClick={() => {
             dispatch({ type: "panel/add" });
+          }}
+          sx={{
+            "@media (orientation: landscape) and (max-height: 430px)": {
+              width: 28,
+              height: 28,
+              p: 0.25
+            }
           }}
         >
           <AddIcon />
