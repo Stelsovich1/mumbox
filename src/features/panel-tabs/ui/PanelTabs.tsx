@@ -142,6 +142,10 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                           "&:focus-visible": {
                             opacity: 1,
                             pointerEvents: "auto"
+                          },
+                          "@media (hover: none)": {
+                            opacity: 1,
+                            pointerEvents: "auto"
                           }
                         }}
                       >

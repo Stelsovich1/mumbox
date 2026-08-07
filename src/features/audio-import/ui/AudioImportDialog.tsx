@@ -179,10 +179,25 @@ export function AudioImportDialog({
 
   return (
     <>
-      <Dialog open={open} onClose={onCancel} fullWidth maxWidth="lg">
+      <Dialog
+        open={open}
+        onClose={onCancel}
+        fullWidth
+        maxWidth="lg"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: "calc(100vw - 64px)" },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: "1200px" },
+              maxHeight: { xs: "calc(100dvh - 24px)", sm: "calc(100dvh - 64px)" },
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
         <DialogTitle>Импорт аудио</DialogTitle>
-        <DialogContent>
-          <Box role="table" aria-label="Импортируемые аудио" sx={{ minWidth: 980 }}>
+        <DialogContent sx={{ overflowX: "auto", p: { xs: 1, sm: 3 } }}>
+          <Box role="table" aria-label="Импортируемые аудио" sx={{ minWidth: 980, maxWidth: "max-content" }}>
             <Box
               role="row"
               sx={{
@@ -357,7 +372,7 @@ export function AudioImportDialog({
             </Box>
           </Box>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ flexWrap: "wrap" }}>
           <Button onClick={onCancel}>Отменить</Button>
           <Button
             variant="contained"
@@ -378,7 +393,9 @@ export function AudioImportDialog({
           left: "50% !important",
           right: "auto !important",
           bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important"
+          transform: "translate(-50%, -50%) !important",
+          width: { xs: "calc(100vw - 24px)", sm: "auto" },
+          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
         message="Вы действительно хотите удалить выбранные аудио?"
         action={

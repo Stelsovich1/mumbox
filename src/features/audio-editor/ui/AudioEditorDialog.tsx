@@ -158,13 +158,22 @@ function Waveform({
       }}
       sx={{
         position: "relative",
-        height: 210,
+        height: { xs: 76, sm: 210 },
         overflowX: "auto",
+        touchAction: "pan-x",
         border: 1,
         borderColor: "rgba(255, 107, 138, 0.42)",
         borderRadius: 2,
         backgroundColor: "rgba(29, 5, 12, 0.72)",
-        p: 2
+        p: { xs: 1, sm: 2 },
+        "@media (max-height: 480px)": {
+          gridArea: "wave",
+          alignSelf: "stretch",
+          height: "auto",
+          minHeight: 104,
+          p: 0.5,
+          borderRadius: 1
+        }
       }}
     >
       <Box
@@ -509,19 +518,163 @@ export function AudioEditorDialog({
     });
     setResetConfirmOpen(false);
   };
+  const compactNumberFieldSx = {
+    "& .MuiInputBase-input": {
+      py: { xs: 0.55, sm: 1 },
+      fontSize: { xs: 12, sm: 14 }
+    },
+    "& .MuiInputLabel-root": {
+      fontSize: { xs: 12, sm: 14 }
+    },
+    "@media (max-height: 480px)": {
+      "& .MuiInputBase-input": {
+        py: 0.25,
+        px: 0.75,
+        fontSize: 11
+      },
+      "& .MuiInputLabel-root": {
+        fontSize: 11,
+        transform: "translate(8px, 5px) scale(1)"
+      },
+      "& .MuiInputLabel-shrink": {
+        transform: "translate(10px, -6px) scale(0.72)"
+      }
+    }
+  };
 
   return (
     <>
-      <Dialog open={open} onClose={saveAndClose} fullWidth maxWidth="lg">
+      <Dialog
+        open={open}
+        onClose={saveAndClose}
+        fullWidth
+        maxWidth="lg"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "95vw", sm: "calc(100vw - 64px)" },
+              maxWidth: { xs: "95vw", sm: "1200px" },
+              height: { xs: "95dvh", sm: "auto" },
+              maxHeight: { xs: "95dvh", sm: "calc(100dvh - 64px)" },
+              m: { xs: 0, sm: 4 },
+              "& .MuiDialogTitle-root": {
+                px: { xs: 1, sm: 3 },
+                py: { xs: 0.5, sm: 2 },
+                fontSize: { xs: 16, sm: 20 }
+              },
+              "& .MuiDialogActions-root": {
+                px: { xs: 1, sm: 3 },
+                py: { xs: 0.5, sm: 1 }
+              },
+              "& .MuiIconButton-root": {
+                width: { xs: 32, sm: 40 },
+                height: { xs: 32, sm: 40 }
+              },
+              "& .MuiSvgIcon-root": {
+                fontSize: { xs: 19, sm: 24 }
+              },
+              "@media (max-height: 480px)": {
+                width: "95vw",
+                maxWidth: "95vw",
+                height: "95dvh",
+                maxHeight: "95dvh",
+                display: "flex",
+                flexDirection: "column",
+                "& .MuiDialogTitle-root": {
+                  minHeight: 0,
+                  px: 0.75,
+                  py: 0.25,
+                  fontSize: 14,
+                  lineHeight: 1.1
+                },
+                "& .MuiDialogActions-root": {
+                  minHeight: 0,
+                  px: 0.75,
+                  py: 0.25,
+                  gap: 0.5
+                },
+                "& .MuiDialogActions-root .MuiButton-root": {
+                  minHeight: 24,
+                  px: 1,
+                  py: 0.125,
+                  fontSize: 11
+                },
+                "& .MuiIconButton-root": {
+                  width: 24,
+                  height: 24,
+                  p: 0.25
+                },
+                "& .MuiSvgIcon-root": {
+                  fontSize: 15
+                }
+              }
+            }
+          }
+        }}
+      >
         <DialogTitle sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           Редактор аудио
           <IconButton aria-label="Закрыть редактор аудио" onClick={saveAndClose}>
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent sx={{ display: "grid", gap: 2 }}>
-          <Box sx={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 2, alignItems: "center" }}>
-            <Box sx={{ display: "flex", gap: 1 }}>
+        <DialogContent
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "minmax(0, 1.15fr) minmax(200px, 0.85fr)", sm: "1fr" },
+            alignContent: "start",
+            gap: { xs: "15px", sm: 2 },
+            overflowY: { xs: "hidden", sm: "auto" },
+            px: { xs: 1, sm: 3 },
+            py: { xs: 0.75, sm: 2 },
+            "@media (max-height: 480px)": {
+              gridTemplateColumns: "minmax(0, 1.1fr) minmax(180px, 0.9fr)",
+              gridTemplateRows: "auto minmax(104px, 1.2fr) minmax(92px, 1fr)",
+              gridTemplateAreas: `
+                "controls controls"
+                "wave volume"
+                "range fades"
+              `,
+              alignContent: "stretch",
+              gap: "15px",
+              flex: 1,
+              minHeight: 0,
+              overflowY: "hidden",
+              px: 0.75,
+              py: 0.35,
+              "& .MuiSlider-root": {
+                py: 0.25
+              },
+              "& .MuiSlider-thumb": {
+                width: 10,
+                height: 10
+              },
+              "& .MuiSlider-track, & .MuiSlider-rail": {
+                height: 3
+              },
+              "& .MuiCheckbox-root": {
+                p: 0.2
+              }
+            }
+          }}
+        >
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "auto minmax(0, 1fr)",
+              gap: { xs: 0.75, sm: 2 },
+              alignItems: "stretch",
+              gridColumn: { xs: "1 / -1", sm: "auto" },
+              "@media (max-height: 480px)": {
+                gridColumn: "1 / -1",
+                gridArea: "controls",
+                gridTemplateColumns: "auto minmax(0, 0.75fr) minmax(0, 1fr)",
+                gap: 0.5,
+                minWidth: 0
+              }
+            }}
+          >
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", "@media (max-height: 480px)": { gap: 0.25 } }}>
               <Tooltip title={previewPlaying ? "Пауза" : "Плей"}>
                 <IconButton
                   aria-label={previewPlaying ? "Пауза редактора" : "Плей редактора"}
@@ -559,8 +712,17 @@ export function AudioEditorDialog({
                 </IconButton>
               </Tooltip>
             </Box>
-            <Box>
-              <Typography gutterBottom>Масштаб: {zoom.toFixed(1)}x</Typography>
+            <Box sx={{ minWidth: 0, "@media (max-height: 480px)": { pl: 0.5 } }}>
+              <Typography
+                gutterBottom
+                sx={{
+                  fontSize: { xs: 12, sm: 14 },
+                  mb: { xs: 0, sm: 0.5 },
+                  "@media (max-height: 480px)": { fontSize: 10, lineHeight: 1, mb: 0 }
+                }}
+              >
+                Масштаб: {zoom.toFixed(1)}x
+              </Typography>
               <Slider
                 aria-label="Масштаб таймлайна"
                 min={1}
@@ -570,10 +732,43 @@ export function AudioEditorDialog({
                 onChange={(_, value: number | number[]) => {
                   setZoom(Array.isArray(value) ? value[0] ?? 1 : value);
                 }}
+                size="small"
+                sx={{ "@media (max-height: 480px)": { ml: 0.75, width: "calc(100% - 12px)" } }}
               />
             </Box>
+            <Typography
+              color="text.secondary"
+              sx={{
+                display: { xs: "none", sm: "none" },
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                "@media (max-height: 480px)": {
+                  display: "block",
+                  alignSelf: "center",
+                  fontSize: 10,
+                  lineHeight: 1.1,
+                  minWidth: 0
+                }
+              }}
+            >
+              {media.fileName} · {formatDuration(durationMs)}
+            </Typography>
           </Box>
-          <Typography color="text.secondary">
+          <Typography
+            color="text.secondary"
+            sx={{
+              gridColumn: { xs: "1 / -1", sm: "auto" },
+              fontSize: { xs: 11, sm: 14 },
+              lineHeight: 1.2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              "@media (max-height: 480px)": {
+                display: "none"
+              }
+            }}
+          >
             {media.fileName} · {formatDuration(durationMs)}
           </Typography>
           <Waveform
@@ -584,8 +779,25 @@ export function AudioEditorDialog({
             playheadMs={playheadMs}
             onSeek={seekPreview}
           />
-          <Box>
-            <Typography gutterBottom>
+          <Box
+            sx={{
+              minWidth: 0,
+              "@media (max-height: 480px)": {
+                gridArea: "range",
+                display: "grid",
+                alignContent: "space-evenly",
+                minHeight: 0
+              }
+            }}
+          >
+            <Typography
+              gutterBottom
+              sx={{
+                fontSize: { xs: 12, sm: 14 },
+                mb: { xs: 0, sm: 0.5 },
+                "@media (max-height: 480px)": { fontSize: 10, lineHeight: 1, mb: 0 }
+              }}
+            >
               Диапазон: {rangeValue[0].toFixed(2)}с - {rangeValue[1].toFixed(2)}с
             </Typography>
             <Slider
@@ -602,14 +814,28 @@ export function AudioEditorDialog({
                   trimEndMs: Math.round((nextValue[1] ?? durationMs / 1000) * 1000)
                 }));
               }}
+              size="small"
             />
-            <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, mt: 1 }}>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                gap: 1,
+                mt: 1,
+                "@media (max-height: 480px)": {
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 0.5,
+                  mt: 0.25
+                }
+              }}
+            >
               <TextField
                 label="Начало сек"
                 type="number"
                 size="small"
                 value={rangeValue[0]}
                 slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
+                sx={compactNumberFieldSx}
                 onChange={(event) => {
                   setDraft((current) => ({
                     ...current,
@@ -623,6 +849,7 @@ export function AudioEditorDialog({
                 size="small"
                 value={rangeValue[1]}
                 slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
+                sx={compactNumberFieldSx}
                 onChange={(event) => {
                   setDraft((current) => ({
                     ...current,
@@ -632,8 +859,32 @@ export function AudioEditorDialog({
               />
             </Box>
           </Box>
-          <Box>
-            <Typography gutterBottom>Громкость аудио: {draft.volumeOffset}</Typography>
+          <Box
+            sx={{
+              minWidth: 0,
+              gridColumn: { xs: 2, sm: "auto" },
+              gridRow: { xs: 3, sm: "auto" },
+              "@media (max-height: 480px)": {
+                alignSelf: "stretch",
+                gridColumn: 2,
+                gridRow: 3,
+                gridArea: "volume",
+                display: "grid",
+                alignContent: "space-evenly",
+                minHeight: 0
+              }
+            }}
+          >
+            <Typography
+              gutterBottom
+              sx={{
+                fontSize: { xs: 12, sm: 14 },
+                mb: { xs: 0, sm: 0.5 },
+                "@media (max-height: 480px)": { fontSize: 10, lineHeight: 1, mb: 0 }
+              }}
+            >
+              Настройка громкости: {draft.volumeOffset}
+            </Typography>
             <Slider
               aria-label="Громкость аудио в редакторе"
               min={-100}
@@ -643,6 +894,7 @@ export function AudioEditorDialog({
                 const volumeOffset = Array.isArray(value) ? value[0] ?? 0 : value;
                 setDraft((current) => ({ ...current, volumeOffset }));
               }}
+              size="small"
             />
             <TextField
               label="Значение громкости аудио в редакторе"
@@ -651,6 +903,7 @@ export function AudioEditorDialog({
               fullWidth
               value={draft.volumeOffset}
               slotProps={{ htmlInput: { min: -100, max: 100, step: 1 } }}
+              sx={compactNumberFieldSx}
               onChange={(event) => {
                 const nextValue = Number(event.target.value);
                 if (!Number.isFinite(nextValue)) {
@@ -663,8 +916,46 @@ export function AudioEditorDialog({
               }}
             />
           </Box>
-          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+              gap: { xs: 0.75, sm: 2 },
+              gridColumn: { xs: 2, sm: "auto" },
+              gridRow: { xs: 4, sm: "auto" },
+              minWidth: 0,
+              "& .MuiFormControlLabel-label": {
+                fontSize: { xs: 12, sm: 14 }
+              },
+              "@media (max-height: 480px)": {
+                gridColumn: 2,
+                gridRow: 4,
+                gridArea: "fades",
+                display: "flex",
+                flexWrap: "wrap",
+                alignContent: "space-evenly",
+                alignItems: "center",
+                gap: "6px",
+                minHeight: 0,
+                "& .MuiFormControlLabel-label": {
+                  fontSize: 10,
+                  lineHeight: 1
+                }
+              }
+            }}
+          >
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr", sm: "auto minmax(120px, 1fr)" },
+                gap: 1,
+                alignItems: "center",
+                "@media (max-height: 480px)": {
+                  gridTemplateColumns: "78px minmax(0, 1fr)",
+                  gap: 0.4
+                }
+              }}
+            >
               <FormControlLabel
                 control={
                   <Checkbox
@@ -682,6 +973,7 @@ export function AudioEditorDialog({
                 size="small"
                 value={draft.fadeInMs / 1000}
                 slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
+                sx={compactNumberFieldSx}
                 onChange={(event) => {
                   setDraft((current) => ({
                     ...current,
@@ -690,7 +982,18 @@ export function AudioEditorDialog({
                 }}
               />
             </Box>
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: { xs: "1fr", sm: "auto minmax(120px, 1fr)" },
+                gap: 1,
+                alignItems: "center",
+                "@media (max-height: 480px)": {
+                  gridTemplateColumns: "78px minmax(0, 1fr)",
+                  gap: 0.4
+                }
+              }}
+            >
               <FormControlLabel
                 control={
                   <Checkbox
@@ -708,6 +1011,7 @@ export function AudioEditorDialog({
                 size="small"
                 value={draft.fadeOutMs / 1000}
                 slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
+                sx={compactNumberFieldSx}
                 onChange={(event) => {
                   setDraft((current) => ({
                     ...current,
@@ -718,7 +1022,7 @@ export function AudioEditorDialog({
             </Box>
           </Box>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ flexWrap: "wrap" }}>
           <Button
             color="warning"
             onClick={() => {
@@ -738,6 +1042,16 @@ export function AudioEditorDialog({
           setResetConfirmOpen(false);
         }}
         aria-labelledby="audio-reset-confirm-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: "auto" },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 520 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
       >
         <DialogTitle id="audio-reset-confirm-title">Сброс настроек аудиозаписи</DialogTitle>
         <DialogContent>

@@ -54,74 +54,154 @@ export function RightToolbar({
       component="aside"
       aria-label="Панель управления"
       alignItems="center"
-      spacing={1.5}
       sx={{
         minWidth: 0,
         minHeight: 0,
+        height: "100%",
+        overflowX: "hidden",
+        overflowY: "auto",
+        justifyContent: "space-between",
         border: 1,
         borderColor: "divider",
         borderRadius: 2,
-        py: 1.5,
+        py: { xs: 0.75, sm: 1.5 },
         backgroundColor: "rgba(13, 18, 31, 0.82)",
-        backdropFilter: "blur(18px)"
+        backdropFilter: "blur(18px)",
+        "& .MuiIconButton-root": {
+          width: { xs: 34, sm: 40 },
+          height: { xs: 34, sm: 40 }
+        },
+        "& .MuiSvgIcon-root": {
+          fontSize: { xs: 20, sm: 24 }
+        },
+        "@media (max-height: 480px)": {
+          py: 0.25,
+          px: 0,
+          borderRadius: 1,
+          "& .MuiIconButton-root": {
+            width: 22,
+            height: 22,
+            p: 0.25
+          },
+          "& .MuiSvgIcon-root": {
+            fontSize: 14
+          }
+        }
       }}
     >
-      <Tooltip title={masterMuted ? "Включить звук" : "Отключить звук"}>
-        <IconButton
-          aria-label={masterMuted ? "Включить звук" : "Отключить звук"}
-          color={masterMuted ? "default" : "primary"}
-          aria-pressed={masterMuted}
-          onClick={() => {
-            dispatch({ type: "volume/muteToggle" });
-          }}
-        >
-          {masterMuted ? <VolumeOffIcon /> : <VolumeUpIcon />}
-        </IconButton>
-      </Tooltip>
-      <Box sx={{ height: 180, display: "flex", alignItems: "center" }}>
-        <Slider
-          aria-label="Общая громкость"
-          orientation="vertical"
-          value={masterVolume}
-          disabled={masterMuted}
-          min={0}
-          max={100}
-          onChange={(_, value: number | number[]) => {
-            const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
-            dispatch({
-              type: "volume/master",
-              value: nextVolume
-            });
-          }}
+      <Box
+        sx={{
+          display: "grid",
+          justifyItems: "center",
+          alignItems: "center",
+          gap: { xs: 1, sm: 1.5 },
+          "@media (max-height: 480px)": {
+            gap: 0.75
+          }
+        }}
+      >
+        <Tooltip title={masterMuted ? "Включить звук" : "Отключить звук"}>
+          <IconButton
+            aria-label={masterMuted ? "Включить звук" : "Отключить звук"}
+            color={masterMuted ? "default" : "primary"}
+            aria-pressed={masterMuted}
+            onClick={() => {
+              dispatch({ type: "volume/muteToggle" });
+            }}
+          >
+            {masterMuted ? <VolumeOffIcon /> : <VolumeUpIcon />}
+          </IconButton>
+        </Tooltip>
+        <Box
           sx={{
-            width: 44,
-            "& .MuiSlider-thumb": {
-              width: 28,
-              height: 28
-            },
-            "& .MuiSlider-track, & .MuiSlider-rail": {
-              width: 10
+            height: { xs: 92, sm: 180 },
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            px: { xs: 0.25, sm: 0.5 },
+            "@media (max-height: 480px)": {
+              height: 62,
+              px: 0.25
             }
           }}
-        />
-      </Box>
-      <Tooltip title="Режим редактирования">
-        <IconButton
-          aria-label="Режим редактирования"
-          color={editMode ? "secondary" : "primary"}
-          aria-pressed={editMode}
-          onClick={() => {
-            dispatch({ type: "editMode/toggle" });
-          }}
         >
-          <EditNoteIcon />
-        </IconButton>
-      </Tooltip>
-      <Tooltip title="Размер сетки">
-        <IconButton aria-label="Размер сетки" onClick={openGridMenu}>
-          <AppsIcon />
-        </IconButton>
-      </Tooltip>
+          <Slider
+            aria-label="Общая громкость"
+            orientation="vertical"
+            value={masterVolume}
+            disabled={masterMuted}
+            min={0}
+            max={100}
+            onChange={(_, value: number | number[]) => {
+              const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
+              dispatch({
+                type: "volume/master",
+                value: nextVolume
+              });
+            }}
+            sx={{
+              width: { xs: 32, sm: 44 },
+              "& .MuiSlider-thumb": {
+                width: { xs: 20, sm: 28 },
+                height: { xs: 20, sm: 28 }
+              },
+              "& .MuiSlider-track, & .MuiSlider-rail": {
+                width: { xs: 6, sm: 10 }
+              },
+              "@media (max-height: 480px)": {
+                width: 16,
+                "& .MuiSlider-thumb": {
+                  width: 11,
+                  height: 11
+                },
+                "& .MuiSlider-track, & .MuiSlider-rail": {
+                  width: 3
+                }
+              }
+            }}
+          />
+        </Box>
+      </Box>
+      <Box
+        sx={{
+          display: "grid",
+          justifyItems: "center",
+          gap: { xs: 0.75, sm: 1 },
+          "@media (max-height: 480px)": {
+            gap: 0.25
+          }
+        }}
+      >
+        <Tooltip title="Режим редактирования">
+          <IconButton
+            aria-label="Режим редактирования"
+            color={editMode ? "secondary" : "primary"}
+            aria-pressed={editMode}
+            onClick={() => {
+              dispatch({ type: "editMode/toggle" });
+            }}
+          >
+            <EditNoteIcon />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="Размер сетки">
+          <IconButton aria-label="Размер сетки" onClick={openGridMenu}>
+            <AppsIcon />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="Останавливать другие ячейки">
+          <IconButton
+            aria-label="Останавливать другие ячейки"
+            color={stopOthers ? "secondary" : "default"}
+            aria-pressed={stopOthers}
+            onClick={() => {
+              dispatch({ type: "stopOthers/toggle" });
+            }}
+          >
+            <Filter1Icon />
+          </IconButton>
+        </Tooltip>
+      </Box>
       <Popover
         open={Boolean(gridAnchor)}
         anchorEl={gridAnchor}
@@ -150,27 +230,33 @@ export function RightToolbar({
           ))}
         </ToggleButtonGroup>
       </Popover>
-      <Tooltip title="Останавливать другие ячейки">
-        <IconButton
-          aria-label="Останавливать другие ячейки"
-          color={stopOthers ? "secondary" : "default"}
-          aria-pressed={stopOthers}
-          onClick={() => {
-            dispatch({ type: "stopOthers/toggle" });
-          }}
-        >
-          <Filter1Icon />
-        </IconButton>
-      </Tooltip>
-      <Tooltip title="Остановить все аудио">
-        <IconButton
-          aria-label="Остановить все аудио"
-          color="error"
-          onClick={onStopAll}
-        >
-          <StopCircleIcon />
-        </IconButton>
-      </Tooltip>
+      <Box
+        sx={{
+          display: "grid",
+          justifyItems: "center",
+          "@media (max-height: 480px)": {
+            mb: 0.25
+          }
+        }}
+      >
+        <Tooltip title="Остановить все аудио">
+          <IconButton
+            aria-label="Остановить все аудио"
+            color="error"
+            onClick={onStopAll}
+            sx={{
+              border: 1,
+              borderColor: "error.main",
+              backgroundColor: "rgba(255, 107, 138, 0.08)",
+              "&:hover": {
+                backgroundColor: "rgba(255, 107, 138, 0.18)"
+              }
+            }}
+          >
+            <StopCircleIcon />
+          </IconButton>
+        </Tooltip>
+      </Box>
     </Stack>
   );
 }

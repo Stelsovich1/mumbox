@@ -32,7 +32,23 @@ const sections = [
 
 export function ProjectFaqDialog({ open, onClose }: ProjectFaqDialogProps) {
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="lg" aria-labelledby="project-faq-title">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      fullWidth
+      maxWidth="lg"
+      aria-labelledby="project-faq-title"
+      slotProps={{
+        paper: {
+          sx: {
+            width: { xs: "calc(100vw - 24px)", sm: "calc(100vw - 64px)" },
+            maxWidth: { xs: "calc(100vw - 24px)", sm: "1200px" },
+            maxHeight: { xs: "calc(100dvh - 24px)", sm: "calc(100dvh - 64px)" },
+            m: { xs: 1.5, sm: 4 }
+          }
+        }
+      }}
+    >
       <DialogTitle
         id="project-faq-title"
         sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", pr: 1 }}
@@ -47,7 +63,8 @@ export function ProjectFaqDialog({ open, onClose }: ProjectFaqDialogProps) {
           sx={{
             height: { xs: "68vh", md: "72vh" },
             display: "grid",
-            gridTemplateColumns: { xs: "160px minmax(0, 1fr)", md: "240px minmax(0, 1fr)" },
+            gridTemplateColumns: { xs: "1fr", sm: "160px minmax(0, 1fr)", md: "240px minmax(0, 1fr)" },
+            gridTemplateRows: { xs: "auto minmax(0, 1fr)", sm: "1fr" },
             minHeight: 0
           }}
         >
@@ -58,7 +75,8 @@ export function ProjectFaqDialog({ open, onClose }: ProjectFaqDialogProps) {
               borderRight: 1,
               borderColor: "divider",
               backgroundColor: "rgba(5, 7, 13, 0.54)",
-              overflowY: "auto"
+              overflowY: "auto",
+              maxHeight: { xs: 116, sm: "none" }
             }}
           >
             <List dense disablePadding>

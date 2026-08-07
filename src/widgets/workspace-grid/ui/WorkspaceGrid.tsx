@@ -23,6 +23,7 @@ type PlaybackIndicatorProps = {
   mode: PlaybackMode;
   progress: number;
   active: boolean;
+  color: string;
 };
 
 function mixHexColor(hexColor: string, targetHexColor: string, amount: number) {
@@ -46,8 +47,8 @@ function mixHexColor(hexColor: string, targetHexColor: string, amount: number) {
   return `#${channel(red, targetRed)}${channel(green, targetGreen)}${channel(blue, targetBlue)}`;
 }
 
-function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
-  const guideOpacity = active ? 0.1 : 0.38;
+function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorProps) {
+  const guideColor = `color-mix(in srgb, ${color} ${active ? "40%" : "62%"}, transparent)`;
 
   if (mode === "loop") {
     const angle = progress * Math.PI * 2 - Math.PI / 2;
@@ -61,17 +62,17 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
         component="svg"
         viewBox="0 0 36 36"
         aria-hidden="true"
-        sx={{ width: "40%", maxWidth: 42, minWidth: 22 }}
+        sx={{ width: "clamp(12px, 34cqw, 42px)" }}
       >
         <circle
           cx="18"
           cy="18"
           r="14"
           fill="none"
-          stroke={`rgba(247, 251, 255, ${String(guideOpacity)})`}
+          stroke={guideColor}
           strokeWidth="3"
         />
-        <circle cx={dotX} cy={dotY} r="2.25" fill="#f7fbff" />
+        <circle cx={dotX} cy={dotY} r="2.25" fill={color} />
       </Box>
     );
   }
@@ -81,10 +82,8 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
       aria-hidden="true"
       sx={{
         position: "relative",
-        width: "56%",
-        maxWidth: 58,
-        minWidth: 24,
-        height: 16,
+        width: "clamp(14px, 48cqw, 58px)",
+        height: "clamp(6px, 14cqh, 16px)",
         overflow: "visible"
       }}
     >
@@ -97,7 +96,7 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
               top: 2,
               bottom: 2,
               width: 2,
-              backgroundColor: `rgba(247, 251, 255, ${String(guideOpacity)})`
+              backgroundColor: guideColor
             }}
           />
           <Box
@@ -107,7 +106,7 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
               top: 2,
               bottom: 2,
               width: 2,
-              backgroundColor: `rgba(247, 251, 255, ${String(guideOpacity)})`
+              backgroundColor: guideColor
             }}
           />
         </>
@@ -119,7 +118,7 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
           right: mode === "once" ? 2 : 0,
           top: "50%",
           height: 2,
-          backgroundColor: `rgba(247, 251, 255, ${String(guideOpacity)})`,
+          backgroundColor: guideColor,
           transform: "translateY(-50%)"
         }}
       />
@@ -128,10 +127,10 @@ function PlaybackIndicator({ mode, progress, active }: PlaybackIndicatorProps) {
           position: "absolute",
           left: `${String(progress * 100)}%`,
           top: "50%",
-          width: 5,
-          height: 5,
+          width: "clamp(3px, 5cqw, 5px)",
+          height: "clamp(3px, 5cqw, 5px)",
           borderRadius: "50%",
-          backgroundColor: "#f7fbff",
+          backgroundColor: color,
           transform: "translate(-50%, -50%)"
         }}
       />
@@ -175,11 +174,10 @@ export function WorkspaceGrid({
     >
       <Box
         sx={{
-          width: "min(100%, calc((100vh - 84px) * 1))",
-          height: "min(100%, calc(100vw - 116px))",
+          width: "100%",
+          height: "100%",
           maxWidth: "100%",
           maxHeight: "100%",
-          aspectRatio: "1 / 1",
           display: "grid",
           gridTemplateColumns: `repeat(${String(gridSize)}, minmax(0, 1fr))`,
           gridTemplateRows: `repeat(${String(gridSize)}, minmax(0, 1fr))`,
@@ -202,6 +200,7 @@ export function WorkspaceGrid({
               : mixHexColor(color, "#070b14", 0.54)
             : "rgba(34, 43, 60, 0.76)";
           const textColor = mediaAsset ? getReadableTextColor(displayColor) : "#a9b7cf";
+          const innerMutedColor = `color-mix(in srgb, ${textColor} 82%, transparent)`;
 
           return (
             <Box
@@ -270,6 +269,7 @@ export function WorkspaceGrid({
                 position: "relative",
                 minWidth: 0,
                 minHeight: 0,
+                containerType: "size",
                 overflow: "hidden",
                 border: 1,
                 borderColor:
@@ -315,8 +315,8 @@ export function WorkspaceGrid({
                     display: "grid",
                     gridTemplateRows: "minmax(0, 1fr) auto",
                     placeItems: "center",
-                    gap: 0.5,
-                    p: 0.75
+                    gap: "clamp(1px, 4cqh, 6px)",
+                    p: "clamp(2px, 6cqw, 6px)"
                   }}
                 >
                   {cell.hotkey ? (
@@ -329,13 +329,16 @@ export function WorkspaceGrid({
                         top: 4,
                         right: 4,
                         maxWidth: "68%",
-                        px: 0.5,
-                        py: 0.15,
+                        px: "clamp(2px, 4cqw, 4px)",
+                        py: "clamp(1px, 2cqh, 2px)",
                         border: "1px solid rgba(247, 251, 255, 0.18)",
                         borderRadius: 0.75,
-                        backgroundColor: "rgba(5, 7, 13, 0.42)",
-                        color: "#f7fbff",
-                        fontSize: { xs: 8, md: 9 },
+                        backgroundColor:
+                          textColor === "#031014"
+                            ? "rgba(247, 251, 255, 0.28)"
+                            : "rgba(5, 7, 13, 0.42)",
+                        color: textColor,
+                        fontSize: "clamp(5px, 9cqw, 9px)",
                         lineHeight: 1.2,
                         opacity: 0.72,
                         overflow: "hidden",
@@ -347,7 +350,12 @@ export function WorkspaceGrid({
                       {cell.hotkey}
                     </Typography>
                   ) : null}
-                  <PlaybackIndicator mode={cell.playbackMode} progress={progress} active={isPlaying} />
+                  <PlaybackIndicator
+                    mode={cell.playbackMode}
+                    progress={progress}
+                    active={isPlaying}
+                    color={innerMutedColor}
+                  />
                   <Typography
                     variant="caption"
                     sx={{
@@ -356,7 +364,8 @@ export function WorkspaceGrid({
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
-                      fontSize: { xs: 9, md: 11 }
+                      fontSize: "clamp(6px, 11cqw, 11px)",
+                      lineHeight: 1.15
                     }}
                   >
                     {label}

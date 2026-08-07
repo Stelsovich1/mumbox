@@ -25,6 +25,7 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
+import useMediaQuery from "@mui/material/useMediaQuery";
 import { KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
@@ -70,6 +71,7 @@ export function CellSettingsDrawer({
   const [hotkeyError, setHotkeyError] = useState("");
   const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
+  const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
   const selectedMedia = media.find((item) => item.id === cell?.mediaId) ?? null;
   const filteredMedia = useMemo(
     () =>
@@ -158,7 +160,16 @@ export function CellSettingsDrawer({
         borderRadius: 2
       }}
     >
-      <Box sx={{ height: "100%", p: 2, display: "grid", gap: 2, overflowY: "auto" }}>
+      <Box
+        sx={{
+          height: "100%",
+          p: { xs: 1, sm: 2 },
+          display: "grid",
+          alignContent: "start",
+          gap: { xs: 1, sm: 2 },
+          overflowY: "auto"
+        }}
+      >
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <Tooltip title="Закрыть настройки">
             <IconButton aria-label="Закрыть настройки ячейки" size="small" onClick={onClose}>
@@ -251,6 +262,7 @@ export function CellSettingsDrawer({
             <Typography color="text.secondary">
               Длительность: {formatDuration(selectedMedia.durationMs)}
             </Typography>
+            {!hideHotkeySettings ? (
             <Box sx={{ display: "grid", gap: 1 }}>
               <Typography>Комбинация клавиш</Typography>
               <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
@@ -299,6 +311,7 @@ export function CellSettingsDrawer({
                 ) : null}
               </Box>
             </Box>
+            ) : null}
             <FormControl>
               <FormLabel>Тип проигрывания</FormLabel>
               <RadioGroup
@@ -405,7 +418,7 @@ export function CellSettingsDrawer({
               <Typography variant="body2" color="text.secondary">
                 Фильтр по цвету
               </Typography>
-              <Box sx={{ display: "flex", gap: 1, alignItems: "center", minWidth: 0 }}>
+                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center", minWidth: 0 }}>
                 <ColorSwatches
                   value={colorFilter}
                   onChange={(color) => {
@@ -450,7 +463,7 @@ export function CellSettingsDrawer({
                 <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
                   Цвет
                 </Typography>
-                <Box role="columnheader" />
+                  <Box role="columnheader" />
               </Box>
               <Box
                 role="rowgroup"
@@ -511,6 +524,12 @@ export function CellSettingsDrawer({
                       "&:hover .media-delete-button, &:focus-within .media-delete-button": {
                         opacity: 1,
                         pointerEvents: "auto"
+                      },
+                      "@media (hover: none)": {
+                        "& .media-delete-button": {
+                          opacity: 1,
+                          pointerEvents: "auto"
+                        }
                       }
                     }}
                   >
@@ -573,7 +592,7 @@ export function CellSettingsDrawer({
           </Box>
         ) : null}
 
-        <Box sx={{ display: "flex", gap: 1, mt: "auto" }}>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: "auto" }}>
           <Button
             startIcon={<CheckIcon />}
             variant="contained"
@@ -598,6 +617,16 @@ export function CellSettingsDrawer({
         onClose={() => {
           setHotkeyDialogOpen(false);
         }}
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: "auto" },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 444 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
       >
         <DialogTitle>Комбинация клавиш</DialogTitle>
         <DialogContent>
@@ -609,7 +638,7 @@ export function CellSettingsDrawer({
             onKeyDown={captureHotkey}
             sx={{
               mt: 1,
-              width: 360,
+              width: { xs: "100%", sm: 360 },
               minHeight: 96,
               border: 1,
               borderColor: hotkeyError ? "error.main" : "divider",
@@ -649,7 +678,9 @@ export function CellSettingsDrawer({
           left: "50% !important",
           right: "auto !important",
           bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important"
+          transform: "translate(-50%, -50%) !important",
+          width: { xs: "calc(100vw - 24px)", sm: "auto" },
+          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
         message={
           pendingDeleteMedia

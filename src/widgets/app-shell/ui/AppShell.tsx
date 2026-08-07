@@ -357,10 +357,18 @@ export function AppShell() {
           minHeight: 0,
           display: "grid",
           gridTemplateColumns: cellSettingsOpen
-            ? { xs: "minmax(0, 1fr) 76px minmax(320px, 42vw)", lg: "minmax(0, 1fr) 76px 460px" }
-            : "minmax(0, 1fr) 76px",
-          gap: 1.5,
-          p: 1.5
+            ? { xs: "minmax(0, 1fr) 52px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
+            : { xs: "minmax(0, 1fr) 52px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
+          gap: { xs: 0.75, sm: 1.5 },
+          p: { xs: 0.75, sm: 1.5 },
+          overflow: "hidden",
+          "@media (max-height: 480px)": {
+            gridTemplateColumns: cellSettingsOpen
+              ? "minmax(0, 1fr) 30px minmax(190px, 34vw)"
+              : "minmax(0, 1fr) 30px",
+            gap: 0.5,
+            p: 0.5
+          }
         }}
       >
         <WorkspaceGrid
@@ -470,7 +478,9 @@ export function AppShell() {
           left: "50% !important",
           right: "auto !important",
           bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important"
+          transform: "translate(-50%, -50%) !important",
+          width: { xs: "calc(100vw - 24px)", sm: "auto" },
+          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
         message="Импорт конфига перезапишет текущую рабочую раскладку"
         action={
@@ -506,7 +516,9 @@ export function AppShell() {
           left: "50% !important",
           right: "auto !important",
           bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important"
+          transform: "translate(-50%, -50%) !important",
+          width: { xs: "calc(100vw - 24px)", sm: "auto" },
+          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
         message={saveMessage}
         autoHideDuration={3200}
