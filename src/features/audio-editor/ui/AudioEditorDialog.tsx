@@ -924,6 +924,11 @@ export function AudioEditorDialog({
                 setDraft((current) => ({ ...current, volumeOffset }));
               }}
               size="small"
+              sx={{
+                "& .MuiSlider-markLabel": {
+                  display: { xs: "none", sm: "block" }
+                }
+              }}
             />
             <TextField
               label="Значение громкости аудио в редакторе"

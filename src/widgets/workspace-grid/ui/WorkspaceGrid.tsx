@@ -255,6 +255,9 @@ export function WorkspaceGrid({
                 }
                 onCellClick(cell);
               }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+              }}
               onPointerDown={(event) => {
                 if (editMode) {
                   return;
