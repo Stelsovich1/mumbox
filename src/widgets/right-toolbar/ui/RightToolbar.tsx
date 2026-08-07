@@ -68,23 +68,30 @@ export function RightToolbar({
         backgroundColor: "rgba(13, 18, 31, 0.82)",
         backdropFilter: "blur(18px)",
         "& .MuiIconButton-root": {
-          width: { xs: 38, sm: 40 },
-          height: { xs: 38, sm: 40 }
+          width: { xs: "calc(100% - 12px)", sm: 44 },
+          maxWidth: { xs: 62, sm: 44 },
+          aspectRatio: "1 / 1",
+          height: "auto",
+          p: { xs: 0.75, sm: 0.75 }
         },
         "& .MuiSvgIcon-root": {
-          fontSize: { xs: 22, sm: 24 }
+          width: "72%",
+          height: "72%",
+          fontSize: "inherit"
         },
         "@media (max-height: 480px)": {
           py: 0.25,
           px: 0,
           borderRadius: 1,
           "& .MuiIconButton-root": {
-            width: 24,
-            height: 24,
-            p: 0.25
+            width: "calc(100% - 8px)",
+            maxWidth: 38,
+            height: "auto",
+            p: 0.35
           },
           "& .MuiSvgIcon-root": {
-            fontSize: 16
+            width: "74%",
+            height: "74%"
           }
         }
       }}
@@ -100,7 +107,7 @@ export function RightToolbar({
           }
         }}
       >
-        <Tooltip title={masterMuted ? "Включить звук" : "Отключить звук"}>
+        <Tooltip title={masterMuted ? "Включить звук" : "Отключить звук"} disableInteractive>
           <IconButton
             aria-label={masterMuted ? "Включить звук" : "Отключить звук"}
             color={masterMuted ? "default" : "primary"}
@@ -172,7 +179,7 @@ export function RightToolbar({
           }
         }}
       >
-        <Tooltip title="Режим редактирования">
+        <Tooltip title="Режим редактирования" disableInteractive>
           <IconButton
             aria-label="Режим редактирования"
             color={editMode ? "secondary" : "primary"}
@@ -184,12 +191,12 @@ export function RightToolbar({
             <EditNoteIcon />
           </IconButton>
         </Tooltip>
-        <Tooltip title="Размер сетки">
+        <Tooltip title="Размер сетки" disableInteractive>
           <IconButton aria-label="Размер сетки" onClick={openGridMenu}>
             <AppsIcon />
           </IconButton>
         </Tooltip>
-        <Tooltip title="Останавливать другие ячейки">
+        <Tooltip title="Останавливать другие ячейки" disableInteractive>
           <IconButton
             aria-label="Останавливать другие ячейки"
             color={stopOthers ? "secondary" : "default"}
@@ -239,7 +246,7 @@ export function RightToolbar({
           }
         }}
       >
-        <Tooltip title="Остановить все аудио">
+        <Tooltip title="Остановить все аудио" disableInteractive>
           <IconButton
             aria-label="Остановить все аудио"
             color="error"

@@ -157,6 +157,43 @@ async function openFileMenu(page: Page) {
   await page.getByRole("button", { name: "Файл" }).click();
 }
 
+async function touchDragCell(page: Page, fromCellId: string, toCellId: string) {
+  const source = page.locator(`[data-cell-id="${fromCellId}"]`);
+  const target = page.locator(`[data-cell-id="${toCellId}"]`);
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+
+  if (!sourceBox || !targetBox) {
+    throw new Error("Cell boxes are not available for touch drag");
+  }
+
+  const start = {
+    x: sourceBox.x + sourceBox.width / 2,
+    y: sourceBox.y + sourceBox.height / 2
+  };
+  const end = {
+    x: targetBox.x + targetBox.width / 2,
+    y: targetBox.y + targetBox.height / 2
+  };
+
+  await source.dispatchEvent("touchstart", {
+    touches: [{ identifier: 7, clientX: start.x, clientY: start.y }],
+    targetTouches: [{ identifier: 7, clientX: start.x, clientY: start.y }],
+    changedTouches: [{ identifier: 7, clientX: start.x, clientY: start.y }]
+  });
+  await page.waitForTimeout(220);
+  await source.dispatchEvent("touchmove", {
+    touches: [{ identifier: 7, clientX: end.x, clientY: end.y }],
+    targetTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }],
+    changedTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }]
+  });
+  await source.dispatchEvent("touchend", {
+    touches: [],
+    targetTouches: [],
+    changedTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }]
+  });
+}
+
 test("renders the MUMBOX shell", async ({ page }) => {
   await page.goto("/");
 
@@ -205,6 +242,18 @@ test("prevents selection in workspace controls and highlights edit mode", async 
   await expect(page.getByLabel("Панель управления")).toHaveCSS("user-select", "none");
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await expect(workspace).toHaveCSS("border-top-color", "rgb(255, 204, 102)");
+});
+
+test("does not keep cell selection highlighted outside edit mode", async ({ page }) => {
+  await page.goto("/");
+
+  await importAudio(page, "Select Pad");
+  await assignFirstCell(page);
+  const cell = page.locator('[data-cell-id="cell-0"]');
+  await expect(cell).toHaveAttribute("data-selected", "true");
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await expect(cell).toHaveAttribute("data-selected", "false");
 });
 
 test("saves config with a save dialog and warns before overwriting layout on import", async ({
@@ -466,7 +515,11 @@ test("switches playback mode and gate active state", async ({ page }) => {
 
   await importAudio(page, "Gate Pad");
   await assignFirstCell(page);
+  await expect(page.getByTestId("once-left-boundary")).toBeVisible();
+  await expect(page.getByTestId("once-right-boundary")).toBeVisible();
   await page.getByRole("radio", { name: "Gate" }).check();
+  await expect(page.getByTestId("once-left-boundary")).toHaveCount(0);
+  await expect(page.getByTestId("once-right-boundary")).toHaveCount(0);
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
 
@@ -659,6 +712,37 @@ test("moves a configured cell by drag and drop without resetting settings", asyn
   await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute("aria-label", "Ячейка 3 Move Pad");
   await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute("data-playback-mode", "loop");
   await expect(page.getByTestId("cell-hotkey-cell-2")).toHaveText("M");
+});
+
+test("keeps selected cell settings open after moving the selected cell", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Move Selected Pad");
+  await assignFirstCell(page);
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-selected", "true");
+
+  const source = page.locator('[data-cell-id="cell-0"]');
+  const target = page.locator('[data-cell-id="cell-2"]');
+  await source.dragTo(target);
+
+  await expect(source).toHaveAttribute("data-selected", "false");
+  await expect(target).toHaveAttribute("data-selected", "true");
+  await expect(page.getByLabel("Псевдоним ячейки")).toHaveValue("Move Selected Pad");
+  await expect(page.getByText("Длительность: 0:10")).toBeVisible();
+});
+
+test("moves cells on touch after a short hold in edit mode", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "touch drag behavior is mobile-specific");
+  await page.goto("/");
+
+  await importAudio(page, "Touch Move Pad");
+  await assignFirstCell(page);
+  await touchDragCell(page, "cell-0", "cell-3");
+
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("aria-label", "Пустая ячейка 1");
+  await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("aria-label", "Ячейка 4 Touch Move Pad");
+  await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("data-selected", "true");
 });
 
 test("swaps configured cells when dragging onto an occupied cell", async ({ page }) => {

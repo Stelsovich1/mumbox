@@ -511,6 +511,18 @@ export function AppShell() {
             stopCell(cell.id);
           }}
           onCellMove={(fromCellId, toCellId) => {
+            setSelectedCellId((current) => {
+              if (!state.editMode) {
+                return current;
+              }
+              if (current === fromCellId) {
+                return toCellId;
+              }
+              if (current === toCellId) {
+                return fromCellId;
+              }
+              return current;
+            });
             dispatch({ type: "cell/move", panelId: activePanel.id, fromCellId, toCellId });
           }}
         />

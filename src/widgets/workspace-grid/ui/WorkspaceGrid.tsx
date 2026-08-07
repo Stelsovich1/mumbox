@@ -26,6 +26,12 @@ type PlaybackIndicatorProps = {
   color: string;
 };
 
+type TouchDragState = {
+  fromCellId: string;
+  overCellId: string | null;
+  active: boolean;
+};
+
 function mixHexColor(hexColor: string, targetHexColor: string, amount: number) {
   if (!/^#[\da-f]{6}$/i.test(hexColor) || !/^#[\da-f]{6}$/i.test(targetHexColor)) {
     return hexColor;
@@ -49,6 +55,7 @@ function mixHexColor(hexColor: string, targetHexColor: string, amount: number) {
 
 function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorProps) {
   const guideColor = `color-mix(in srgb, ${color} ${active ? "40%" : "62%"}, transparent)`;
+  const markerColor = `color-mix(in srgb, ${color} ${active ? "92%" : "86%"}, transparent)`;
 
   if (mode === "loop") {
     const angle = progress * Math.PI * 2 - Math.PI / 2;
@@ -80,33 +87,40 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
   return (
     <Box
       aria-hidden="true"
+      data-playback-indicator={mode}
       sx={{
         position: "relative",
         width: "clamp(14px, 48cqw, 58px)",
-        height: "clamp(6px, 14cqh, 16px)",
+        height: "clamp(9px, 18cqh, 20px)",
         overflow: "visible"
       }}
     >
       {mode === "once" ? (
         <>
           <Box
+            data-testid="once-left-boundary"
             sx={{
               position: "absolute",
               left: 0,
-              top: 2,
-              bottom: 2,
-              width: 2,
-              backgroundColor: guideColor
+              top: 0,
+              bottom: 0,
+              width: "clamp(2px, 5cqw, 4px)",
+              borderRadius: 999,
+              backgroundColor: markerColor,
+              boxShadow: `0 0 6px ${markerColor}`
             }}
           />
           <Box
+            data-testid="once-right-boundary"
             sx={{
               position: "absolute",
               right: 0,
-              top: 2,
-              bottom: 2,
-              width: 2,
-              backgroundColor: guideColor
+              top: 0,
+              bottom: 0,
+              width: "clamp(2px, 5cqw, 4px)",
+              borderRadius: 999,
+              backgroundColor: markerColor,
+              boxShadow: `0 0 6px ${markerColor}`
             }}
           />
         </>
@@ -151,7 +165,60 @@ export function WorkspaceGrid({
   onCellMove
 }: WorkspaceGridProps) {
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
+  const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
   const pointerActivatedCellIdRef = useRef<string | null>(null);
+  const touchDragRef = useRef<TouchDragState | null>(null);
+  const touchDragTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const clearTouchDragTimer = () => {
+    if (touchDragTimerRef.current) {
+      window.clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+  };
+
+  const finishTouchDrag = (move: boolean) => {
+    clearTouchDragTimer();
+    const current = touchDragRef.current;
+    touchDragRef.current = null;
+    setTouchDrag(null);
+    setDragOverCellId(null);
+    if (move && current?.active && current.overCellId && current.overCellId !== current.fromCellId) {
+      onCellMove(current.fromCellId, current.overCellId);
+    }
+  };
+
+  const beginTouchDrag = (cellId: string) => {
+    const nextDrag = { fromCellId: cellId, overCellId: cellId, active: false };
+    touchDragRef.current = nextDrag;
+    setTouchDrag(nextDrag);
+    clearTouchDragTimer();
+    touchDragTimerRef.current = window.setTimeout(() => {
+      const activeDrag = { ...nextDrag, active: true };
+      suppressClickRef.current = true;
+      touchDragRef.current = activeDrag;
+      setTouchDrag(activeDrag);
+      setDragOverCellId(cellId);
+    }, 180);
+  };
+
+  const updateTouchDragTarget = (clientX: number, clientY: number) => {
+    const currentDrag = touchDragRef.current;
+    if (!currentDrag?.active) {
+      return;
+    }
+    const targetCell = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-cell-id]");
+    const overCellId = targetCell?.dataset.cellId ?? currentDrag.overCellId;
+    if (overCellId && overCellId !== currentDrag.overCellId) {
+      const nextDrag = { ...currentDrag, overCellId };
+      touchDragRef.current = nextDrag;
+      setTouchDrag(nextDrag);
+      setDragOverCellId(overCellId);
+    }
+  };
 
   return (
     <Box
@@ -194,7 +261,9 @@ export function WorkspaceGrid({
               : mediaAsset?.fileName ?? "";
           const color = cell.colorOverride ?? mediaAsset?.color ?? "rgba(34, 43, 60, 0.76)";
           const isPlaying = playingCells.some((item) => item.cellId === cell.id);
+          const isSelected = editMode && selectedCellId === cell.id;
           const progress = playingCells.find((item) => item.cellId === cell.id)?.progress ?? 0;
+          const activeDragOverCellId = touchDrag?.overCellId ?? dragOverCellId;
           const displayColor = mediaAsset
             ? isPlaying
               ? mixHexColor(color, "#ffffff", 0.24)
@@ -217,6 +286,7 @@ export function WorkspaceGrid({
               data-trim-end-ms={cell.trimEndMs ?? ""}
               data-fade-in-ms={cell.fadeInEnabled ? cell.fadeInMs : ""}
               data-fade-out-ms={cell.fadeOutEnabled ? cell.fadeOutMs : ""}
+              data-selected={isSelected ? "true" : "false"}
               draggable={editMode && Boolean(mediaAsset)}
               aria-label={
                 label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
@@ -249,6 +319,10 @@ export function WorkspaceGrid({
                 }
               }}
               onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
                 if (pointerActivatedCellIdRef.current === cell.id) {
                   pointerActivatedCellIdRef.current = null;
                   return;
@@ -260,6 +334,10 @@ export function WorkspaceGrid({
               }}
               onPointerDown={(event) => {
                 if (editMode) {
+                  if (event.pointerType !== "mouse" && mediaAsset) {
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    beginTouchDrag(cell.id);
+                  }
                   return;
                 }
                 if (cell.playbackMode === "gate") {
@@ -272,14 +350,61 @@ export function WorkspaceGrid({
                   onCellClick(cell);
                 }
               }}
+              onPointerMove={(event) => {
+                const currentDrag = touchDragRef.current;
+                if (!editMode || !currentDrag?.active) {
+                  return;
+                }
+                event.preventDefault();
+                updateTouchDragTarget(event.clientX, event.clientY);
+              }}
+              onTouchStart={() => {
+                if (editMode && mediaAsset) {
+                  beginTouchDrag(cell.id);
+                }
+              }}
+              onTouchMove={(event) => {
+                const currentDrag = touchDragRef.current;
+                if (!editMode || !currentDrag?.active) {
+                  return;
+                }
+                event.preventDefault();
+                const touch = event.touches[0];
+                if (touch) {
+                  updateTouchDragTarget(touch.clientX, touch.clientY);
+                }
+              }}
+              onTouchEnd={(event) => {
+                if (!editMode || !touchDragRef.current) {
+                  return;
+                }
+                const wasActive = touchDragRef.current.active;
+                if (wasActive) {
+                  event.preventDefault();
+                }
+                finishTouchDrag(wasActive);
+              }}
               onPointerUp={(event) => {
                 event.currentTarget.blur();
+                if (editMode && touchDragRef.current) {
+                  const wasActive = touchDragRef.current.active;
+                  if (wasActive) {
+                    event.preventDefault();
+                  }
+                  finishTouchDrag(wasActive);
+                  return;
+                }
                 if (!editMode && cell.playbackMode === "gate") {
                   onGateEnd(cell);
                 }
               }}
               onPointerCancel={() => {
                 pointerActivatedCellIdRef.current = null;
+                if (editMode && touchDragRef.current) {
+                  suppressClickRef.current = true;
+                  finishTouchDrag(false);
+                  return;
+                }
                 if (!editMode && cell.playbackMode === "gate") {
                   onGateEnd(cell);
                 }
@@ -298,9 +423,9 @@ export function WorkspaceGrid({
                 overflow: "hidden",
                 border: 1,
                 borderColor:
-                  dragOverCellId === cell.id
+                  activeDragOverCellId === cell.id
                     ? "secondary.main"
-                    : selectedCellId === cell.id
+                    : isSelected
                     ? "secondary.main"
                     : isPlaying
                       ? "primary.main"
@@ -314,11 +439,11 @@ export function WorkspaceGrid({
                 transition:
                   "transform 160ms ease, border-color 160ms ease, filter 160ms ease, background-color 160ms ease",
                 filter:
-                  isPlaying || dragOverCellId === cell.id
+                  isPlaying || activeDragOverCellId === cell.id
                     ? "brightness(1.12) saturate(1.22)"
                     : "none",
                 boxShadow:
-                  dragOverCellId === cell.id
+                  activeDragOverCellId === cell.id
                     ? "0 0 0 2px rgba(255, 204, 102, 0.54), 0 0 18px rgba(255, 204, 102, 0.26)"
                     : "none",
                 "&:hover": {

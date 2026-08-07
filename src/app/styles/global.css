@@ -57,7 +57,7 @@ body {
   -webkit-touch-callout: default;
 }
 
-[data-noselect] button {
+[data-noselect] button:not([draggable="true"]) {
   -webkit-user-drag: none;
   touch-action: manipulation;
 }
@@ -67,9 +67,16 @@ body {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-  -webkit-user-drag: none;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
+}
+
+[data-cell-id] * {
+  -webkit-user-drag: none;
+}
+
+[data-cell-id][draggable="true"] {
+  -webkit-user-drag: element;
 }
 
 button,
