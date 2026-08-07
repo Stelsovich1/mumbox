@@ -19,7 +19,6 @@ import {
   InputAdornment,
   Radio,
   RadioGroup,
-  Slider,
   Snackbar,
   TextField,
   Tooltip,
@@ -330,50 +329,6 @@ export function CellSettingsDrawer({
                 <FormControlLabel value="once" control={<Radio />} label="Once" />
               </RadioGroup>
             </FormControl>
-            <Box>
-              <Typography gutterBottom>Громкость аудио: {cell.volumeOffset}</Typography>
-              <Slider
-                aria-label="Громкость аудио"
-                min={-100}
-                max={100}
-                value={cell.volumeOffset}
-                onChange={(_, value: number | number[]) => {
-                  const volumeOffset = Array.isArray(value) ? value[0] ?? 0 : value;
-                  dispatch({
-                    type: "cell/update",
-                    panelId,
-                    cellId: cell.id,
-                    patch: { volumeOffset }
-                  });
-                }}
-              />
-              <TextField
-                label="Значение громкости аудио"
-                type="number"
-                size="small"
-                fullWidth
-                value={cell.volumeOffset}
-                slotProps={{
-                  htmlInput: {
-                    min: -100,
-                    max: 100,
-                    step: 1
-                  }
-                }}
-                onChange={(event) => {
-                  const nextValue = Number(event.target.value);
-                  if (!Number.isFinite(nextValue)) {
-                    return;
-                  }
-                  dispatch({
-                    type: "cell/update",
-                    panelId,
-                    cellId: cell.id,
-                    patch: { volumeOffset: Math.min(100, Math.max(-100, nextValue)) }
-                  });
-                }}
-              />
-            </Box>
             <Box sx={{ display: "grid", gap: 1 }}>
               <Typography>Цвет</Typography>
               <ColorSwatches

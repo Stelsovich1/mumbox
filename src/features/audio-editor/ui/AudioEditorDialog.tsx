@@ -80,7 +80,11 @@ function makeFallbackWaveform() {
 }
 
 function getPreviewVolume(volumeOffset: number) {
-  return Math.min(1, Math.max(0, 1 + volumeOffset / 100));
+  return Math.min(2, Math.max(0, 1 + volumeOffset / 100));
+}
+
+function getHtmlAudioVolume(volume: number) {
+  return Math.min(1, Math.max(0, volume));
 }
 
 async function buildWaveform(mediaId: string) {
@@ -368,8 +372,14 @@ export function AudioEditorDialog({
     }
     if (!previewRouteRef.current) {
       audio.volume =
-        getPreviewVolume(draftRef.current.volumeOffset) *
-        getEnvelopeValue(draftRef.current, audio.currentTime, getTrimEndSeconds(draftRef.current, durationMs / 1000));
+        getHtmlAudioVolume(
+          getPreviewVolume(draftRef.current.volumeOffset) *
+            getEnvelopeValue(
+              draftRef.current,
+              audio.currentTime,
+              getTrimEndSeconds(draftRef.current, durationMs / 1000)
+            )
+        );
     }
     setPlayheadMs(Math.round(audio.currentTime * 1000));
     previewFrameRef.current = requestAnimationFrame(updatePreviewVolumeAndPosition);
@@ -393,8 +403,10 @@ export function AudioEditorDialog({
       void route.context.close();
       previewRouteRef.current = null;
       audio.volume =
-        getPreviewVolume(draftRef.current.volumeOffset) *
-        getEnvelopeValue(draftRef.current, audio.currentTime, endSeconds);
+        getHtmlAudioVolume(
+          getPreviewVolume(draftRef.current.volumeOffset) *
+            getEnvelopeValue(draftRef.current, audio.currentTime, endSeconds)
+        );
     }
   }, [durationMs]);
 
@@ -423,8 +435,10 @@ export function AudioEditorDialog({
     const endSeconds = getTrimEndSeconds(draftRef.current, durationMs / 1000);
     audio.currentTime = startSeconds;
     audio.volume =
-      getPreviewVolume(draftRef.current.volumeOffset) *
-      getEnvelopeValue(draftRef.current, startSeconds, endSeconds);
+      getHtmlAudioVolume(
+        getPreviewVolume(draftRef.current.volumeOffset) *
+          getEnvelopeValue(draftRef.current, startSeconds, endSeconds)
+      );
     try {
       const context = new AudioContext();
       const source = context.createMediaElementSource(audio);

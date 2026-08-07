@@ -26,7 +26,11 @@ type AudioRoute = {
 function getEffectiveVolume(masterVolume: number, cellVolumeOffset: number) {
   const normalizedMaster = masterVolume / 100;
   const offsetMultiplier = 1 + cellVolumeOffset / 100;
-  return Math.min(1, Math.max(0, normalizedMaster * offsetMultiplier));
+  return Math.min(2, Math.max(0, normalizedMaster * offsetMultiplier));
+}
+
+function getHtmlAudioVolume(volume: number) {
+  return Math.min(1, Math.max(0, volume));
 }
 
 function setRouteVolume(route: AudioRoute, volume: number) {
@@ -104,7 +108,7 @@ export function useAudioEngine(
       const audio = new Audio(url);
       audio.loop = false;
       const baseVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, cell.volumeOffset);
-      audio.volume = baseVolume;
+      audio.volume = getHtmlAudioVolume(baseVolume);
       audio.currentTime = getTrimStartSeconds(cell);
       try {
         const context = new AudioContext();
@@ -127,7 +131,7 @@ export function useAudioEngine(
         }
         routeByCellRef.current.set(cell.id, { context, envelopeGain, volumeGain, lastVolume: baseVolume });
       } catch {
-        audio.volume = baseVolume;
+        audio.volume = getHtmlAudioVolume(baseVolume);
       }
       audioByCellRef.current.set(cell.id, audio);
       urlByCellRef.current.set(cell.id, url);
@@ -176,7 +180,7 @@ export function useAudioEngine(
         setRouteVolume(route, nextVolume);
         return;
       }
-      audio.volume = nextVolume;
+      audio.volume = getHtmlAudioVolume(nextVolume);
     });
   }, [cells, masterMuted, masterVolume]);
 
@@ -219,7 +223,9 @@ export function useAudioEngine(
           }
           const route = routeByCellRef.current.get(gridCell.id);
           if (!route) {
-            audio.volume = baseVolume * getEnvelopeValue(gridCell, audio.currentTime, endTime);
+            audio.volume = getHtmlAudioVolume(
+              baseVolume * getEnvelopeValue(gridCell, audio.currentTime, endTime)
+            );
           } else {
             setRouteVolume(route, baseVolume);
           }

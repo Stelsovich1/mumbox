@@ -524,7 +524,10 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await cell.click();
   await expect(page.getByText("Длительность: 0:10")).toBeVisible();
-  await page.getByLabel("Значение громкости аудио").fill("50");
+  await expect(page.getByLabel("Значение громкости аудио")).toHaveCount(0);
+  await page.getByRole("button", { name: "Открыть редактор аудио" }).click();
+  await page.getByLabel("Значение громкости аудио в редакторе").fill("50");
+  await page.getByRole("button", { name: "Сохранить редактор аудио" }).click();
   await expect
     .poll(async () =>
       page.evaluate(() => {
@@ -534,7 +537,7 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
         return audioWindow.__mumboxGainNodes?.at(-1)?.gain.value;
       })
     )
-    .toBeCloseTo(1);
+    .toBeCloseTo(1.2);
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await expect(page.getByRole("button", { name: "Режим редактирования" })).toHaveAttribute(
@@ -580,7 +583,7 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
         return audioWindow.__mumboxGainNodes?.at(-1)?.gain.value;
       })
     )
-    .toBeCloseTo(1);
+    .toBeCloseTo(1.2);
   await cell.dispatchEvent("pointerup");
   await expect(cell).toHaveAttribute("data-playing", "false");
 
@@ -755,7 +758,7 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
   await page.getByLabel("Затухание").check();
   await page.getByLabel("Секунды").first().fill("0.5");
   await page.getByLabel("Секунды").nth(1).fill("0.7");
-  await page.getByLabel("Значение громкости аудио в редакторе").fill("25");
+  await page.getByLabel("Значение громкости аудио в редакторе").fill("100");
   await expect(page.getByTestId("fade-in-region")).toBeVisible();
   await expect(page.getByTestId("fade-out-region")).toBeVisible();
   await page.getByRole("button", { name: "Сохранить редактор аудио" }).click();
@@ -765,7 +768,7 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
   await expect(cell).toHaveAttribute("data-trim-end-ms", "7400");
   await expect(cell).toHaveAttribute("data-fade-in-ms", "500");
   await expect(cell).toHaveAttribute("data-fade-out-ms", "700");
-  await expect(cell).toHaveAttribute("data-volume-offset", "25");
+  await expect(cell).toHaveAttribute("data-volume-offset", "100");
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await cell.click();
@@ -779,6 +782,16 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
       })
     )
     .toBeCloseTo(1.2);
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const audioWindow = window as Window & {
+          __mumboxGainNodes?: { gain: { value: number } }[];
+        };
+        return audioWindow.__mumboxGainNodes?.at(-1)?.gain.value;
+      })
+    )
+    .toBeCloseTo(1.6);
 
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await cell.click();
