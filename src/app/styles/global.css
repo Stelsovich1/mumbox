@@ -45,6 +45,8 @@ body {
 [data-noselect] * {
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 [data-noselect] input,
@@ -52,6 +54,12 @@ body {
 [data-noselect] [contenteditable="true"] {
   user-select: text;
   -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+[data-noselect] button {
+  -webkit-user-drag: none;
+  touch-action: manipulation;
 }
 
 button,

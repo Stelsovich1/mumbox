@@ -470,15 +470,15 @@ export function AppShell() {
           minHeight: 0,
           display: "grid",
           gridTemplateColumns: cellSettingsOpen
-            ? { xs: "minmax(0, 1fr) 58px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
-            : { xs: "minmax(0, 1fr) 58px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
+            ? { xs: "minmax(0, 1fr) 82px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
+            : { xs: "minmax(0, 1fr) 82px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
           gap: { xs: 0.75, sm: 1.5 },
           p: { xs: 0.75, sm: 1.5 },
           overflow: "hidden",
           "@media (max-height: 480px)": {
             gridTemplateColumns: cellSettingsOpen
-              ? "minmax(0, 1fr) 33px minmax(190px, 34vw)"
-              : "minmax(0, 1fr) 33px",
+              ? "minmax(0, 1fr) 46px minmax(190px, 34vw)"
+              : "minmax(0, 1fr) 46px",
             gap: 0.5,
             p: 0.5
           },

@@ -114,13 +114,13 @@ export function RightToolbar({
         </Tooltip>
         <Box
           sx={{
-            height: { xs: 92, sm: 180 },
+            height: { xs: 120, sm: 180 },
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             px: { xs: 0.25, sm: 0.5 },
             "@media (max-height: 480px)": {
-              height: 68,
+              height: 88,
               px: 0.25
             }
           }}

@@ -58,6 +58,8 @@ type PreviewRoute = {
 };
 
 const WAVEFORM_POINTS = 420;
+const VOLUME_OFFSET_MIN = -100;
+const VOLUME_OFFSET_MAX = 100;
 
 function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
@@ -81,6 +83,14 @@ function makeFallbackWaveform() {
 
 function getPreviewVolume(volumeOffset: number) {
   return Math.min(2, Math.max(0, 1 + volumeOffset / 100));
+}
+
+function formatVolumeOffset(volumeOffset: number) {
+  return `${volumeOffset > 0 ? "+" : ""}${String(volumeOffset)}%`;
+}
+
+function formatVolumeMultiplier(volumeOffset: number) {
+  return getPreviewVolume(volumeOffset).toFixed(2).replace(/\.?0+$/, "");
 }
 
 function getHtmlAudioVolume(volume: number) {
@@ -897,12 +907,17 @@ export function AudioEditorDialog({
                 "@media (max-height: 480px)": { fontSize: 10, lineHeight: 1, mb: 0 }
               }}
             >
-              Настройка громкости: {draft.volumeOffset}
+              Настройка громкости: {formatVolumeOffset(draft.volumeOffset)} · x{formatVolumeMultiplier(draft.volumeOffset)}
             </Typography>
             <Slider
               aria-label="Громкость аудио в редакторе"
-              min={-100}
-              max={100}
+              min={VOLUME_OFFSET_MIN}
+              max={VOLUME_OFFSET_MAX}
+              marks={[
+                { value: VOLUME_OFFSET_MIN, label: "-100%" },
+                { value: 0, label: "0%" },
+                { value: VOLUME_OFFSET_MAX, label: "+100%" }
+              ]}
               value={draft.volumeOffset}
               onChange={(_, value: number | number[]) => {
                 const volumeOffset = Array.isArray(value) ? value[0] ?? 0 : value;
@@ -916,7 +931,7 @@ export function AudioEditorDialog({
               size="small"
               fullWidth
               value={draft.volumeOffset}
-              slotProps={{ htmlInput: { min: -100, max: 100, step: 1 } }}
+              slotProps={{ htmlInput: { min: VOLUME_OFFSET_MIN, max: VOLUME_OFFSET_MAX, step: 1 } }}
               sx={compactNumberFieldSx}
               onChange={(event) => {
                 const nextValue = Number(event.target.value);
@@ -925,7 +940,7 @@ export function AudioEditorDialog({
                 }
                 setDraft((current) => ({
                   ...current,
-                  volumeOffset: Math.min(100, Math.max(-100, nextValue))
+                  volumeOffset: Math.min(VOLUME_OFFSET_MAX, Math.max(VOLUME_OFFSET_MIN, nextValue))
                 }));
               }}
             />
