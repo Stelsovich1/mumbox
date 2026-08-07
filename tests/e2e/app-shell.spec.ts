@@ -234,6 +234,14 @@ test("opens project FAQ from the file menu", async ({ page }) => {
   await expect(page.getByRole("dialog", { name: "Документация MUMBOX" })).toHaveCount(0);
 });
 
+test("hides app update controls when no new version is available", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByRole("dialog", { name: "Доступна новая версия" })).toHaveCount(0);
+  await openFileMenu(page);
+  await expect(page.getByRole("menuitem", { name: "Обновить приложение" })).toHaveCount(0);
+});
+
 test("prevents selection in workspace controls and highlights edit mode", async ({ page }) => {
   await page.goto("/");
 

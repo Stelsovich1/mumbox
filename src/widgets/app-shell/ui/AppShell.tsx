@@ -1,6 +1,7 @@
 import FileOpenIcon from "@mui/icons-material/FileOpen";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
+import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
   Box,
@@ -8,6 +9,10 @@ import {
   Backdrop,
   CircularProgress,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Menu,
   MenuItem,
   Snackbar,
@@ -16,6 +21,7 @@ import {
 } from "@mui/material";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import { ChangeEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRegisterSW } from "virtual:pwa-register/react";
 
 import { serializeState, useAppStore } from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
@@ -103,10 +109,24 @@ export function AppShell() {
   const [saveMessage, setSaveMessage] = useState("");
   const [installPromptDismissed, setInstallPromptDismissed] = useState(false);
   const [standaloneMode, setStandaloneMode] = useState(isStandaloneDisplayMode);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const swRegistrationRef = useRef<ServiceWorkerRegistration | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const audioFolderInputRef = useRef<HTMLInputElement | null>(null);
   const configInputRef = useRef<HTMLInputElement | null>(null);
   const mobileBrowser = useMediaQuery("(hover: none) and (pointer: coarse)");
+  const {
+    needRefresh: [updateAvailable],
+    updateServiceWorker
+  } = useRegisterSW({
+    immediate: true,
+    onNeedRefresh() {
+      setUpdateDialogOpen(true);
+    },
+    onRegisteredSW(_, registration) {
+      swRegistrationRef.current = registration ?? null;
+    }
+  });
   const activeCells = useMemo(() => {
     if (!activePanel) {
       return [];
@@ -126,12 +146,43 @@ export function AppShell() {
     setFileAnchor(event.currentTarget);
   };
 
+  function closeFileMenu() {
+    setFileAnchor(null);
+  }
+
   const selectedCell = activeCells.find((cell) => cell.id === selectedCellId) ?? null;
   const cellSettingsOpen = state.editMode && Boolean(selectedCell);
+
+  const requestAppUpdate = useCallback(() => {
+    closeFileMenu();
+    stopAll();
+    void updateServiceWorker(true);
+  }, [stopAll, updateServiceWorker]);
 
   useEffect(() => {
     audioFolderInputRef.current?.setAttribute("webkitdirectory", "");
     audioFolderInputRef.current?.setAttribute("directory", "");
+  }, []);
+
+  useEffect(() => {
+    if (updateAvailable) {
+      setUpdateDialogOpen(true);
+    }
+  }, [updateAvailable]);
+
+  useEffect(() => {
+    const checkForServiceWorkerUpdate = () => {
+      if (document.visibilityState === "visible") {
+        void swRegistrationRef.current?.update();
+      }
+    };
+
+    window.addEventListener("pageshow", checkForServiceWorkerUpdate);
+    document.addEventListener("visibilitychange", checkForServiceWorkerUpdate);
+    return () => {
+      window.removeEventListener("pageshow", checkForServiceWorkerUpdate);
+      document.removeEventListener("visibilitychange", checkForServiceWorkerUpdate);
+    };
   }, []);
 
   useEffect(() => {
@@ -198,10 +249,6 @@ export function AppShell() {
       document.removeEventListener("touchmove", preventMultiTouchZoom);
     };
   }, []);
-
-  const closeFileMenu = () => {
-    setFileAnchor(null);
-  };
 
   const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter(isAudioFile);
@@ -406,6 +453,15 @@ export function AppShell() {
             <HelpOutlineIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>ЧАВО</Typography>
           </MenuItem>
+          {updateAvailable ? (
+            <>
+              <Divider />
+              <MenuItem onClick={requestAppUpdate}>
+                <SystemUpdateAltIcon fontSize="small" />
+                <Typography sx={{ ml: 1 }}>Обновить приложение</Typography>
+              </MenuItem>
+            </>
+          ) : null}
         </Menu>
         <input
           ref={configInputRef}
@@ -577,6 +633,32 @@ export function AppShell() {
           setFaqOpen(false);
         }}
       />
+      <Dialog
+        open={updateAvailable && updateDialogOpen}
+        onClose={() => {
+          setUpdateDialogOpen(false);
+        }}
+        aria-labelledby="app-update-dialog-title"
+      >
+        <DialogTitle id="app-update-dialog-title">Доступна новая версия</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Можно обновить MUMBOX сейчас. Настройки ячеек, панели и импортированные аудио сохранятся.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setUpdateDialogOpen(false);
+            }}
+          >
+            Позже
+          </Button>
+          <Button variant="contained" onClick={requestAppUpdate}>
+            Обновить
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Backdrop
         open={importLoading}
         sx={{
