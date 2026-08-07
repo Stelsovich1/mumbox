@@ -1,5 +1,5 @@
 import { Box, Typography } from "@mui/material";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
@@ -151,6 +151,7 @@ export function WorkspaceGrid({
   onCellMove
 }: WorkspaceGridProps) {
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
+  const pointerActivatedCellIdRef = useRef<string | null>(null);
 
   return (
     <Box
@@ -248,19 +249,40 @@ export function WorkspaceGrid({
                 }
               }}
               onClick={() => {
+                if (pointerActivatedCellIdRef.current === cell.id) {
+                  pointerActivatedCellIdRef.current = null;
+                  return;
+                }
                 onCellClick(cell);
               }}
-              onPointerDown={() => {
-                if (!editMode && cell.playbackMode === "gate") {
+              onPointerDown={(event) => {
+                if (editMode) {
+                  return;
+                }
+                if (cell.playbackMode === "gate") {
                   onGateStart(cell);
+                  return;
+                }
+                if (event.pointerType !== "mouse") {
+                  pointerActivatedCellIdRef.current = cell.id;
+                  event.currentTarget.blur();
+                  onCellClick(cell);
                 }
               }}
-              onPointerUp={() => {
+              onPointerUp={(event) => {
+                event.currentTarget.blur();
                 if (!editMode && cell.playbackMode === "gate") {
                   onGateEnd(cell);
                 }
               }}
-              onPointerLeave={() => {
+              onPointerCancel={() => {
+                pointerActivatedCellIdRef.current = null;
+                if (!editMode && cell.playbackMode === "gate") {
+                  onGateEnd(cell);
+                }
+              }}
+              onPointerLeave={(event) => {
+                event.currentTarget.blur();
                 if (!editMode && cell.playbackMode === "gate") {
                   onGateEnd(cell);
                 }
@@ -304,6 +326,16 @@ export function WorkspaceGrid({
                   outline: "2px solid",
                   outlineColor: "primary.main",
                   outlineOffset: 2
+                },
+                "@media (hover: none), (pointer: coarse)": {
+                  WebkitTapHighlightColor: "transparent",
+                  touchAction: "manipulation",
+                  "&:hover": {
+                    transform: "none"
+                  },
+                  "&:focus, &:focus-visible": {
+                    outline: "none"
+                  }
                 }
               }}
             >
