@@ -239,6 +239,7 @@ export function WorkspaceGrid({
       sx={{
         minWidth: 0,
         minHeight: 0,
+        containerType: "size",
         display: "grid",
         placeItems: "center",
         border: 1,
@@ -261,7 +262,12 @@ export function WorkspaceGrid({
           display: "grid",
           gridTemplateColumns: `repeat(${String(gridSize)}, minmax(0, 1fr))`,
           gridTemplateRows: `repeat(${String(gridSize)}, minmax(0, 1fr))`,
-          gap: { xs: 0.5, md: 0.75 }
+          gap: { xs: 0.5, md: 0.75 },
+          "@media (orientation: portrait) and (max-width: 700px)": {
+            width: "min(100cqw, 100cqh)",
+            height: "min(100cqw, 100cqh)",
+            aspectRatio: "1 / 1"
+          }
         }}
       >
         {cells.map((cell, index) => {

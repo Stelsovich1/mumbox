@@ -156,6 +156,16 @@ export function AudioImportDialog({
     );
   };
 
+  const toggleDraftSelection = (id: string) => {
+    setSelectedIds((current) =>
+      current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id]
+    );
+  };
+
+  const isInteractiveRowTarget = (target: EventTarget | null) =>
+    target instanceof HTMLElement &&
+    Boolean(target.closest("button, input, textarea, [role='button'], [role='checkbox'], [role='radio']"));
+
   const applyColorToAll = (color: string) => {
     setDrafts((current) => current.map((draft) => ({ ...draft, color })));
   };
@@ -269,11 +279,18 @@ export function AudioImportDialog({
                 <Box
                   key={draft.id}
                   role="row"
+                  onClick={(event) => {
+                    if (isInteractiveRowTarget(event.target)) {
+                      return;
+                    }
+                    toggleDraftSelection(draft.id);
+                  }}
                   sx={{
                     display: "grid",
                     gridTemplateColumns: IMPORT_COLUMNS,
                     alignItems: "center",
                     minHeight: IMPORT_ROW_HEIGHT,
+                    cursor: "pointer",
                     borderBottom: 1,
                     borderColor: "rgba(169, 183, 207, 0.12)",
                     backgroundColor: selectedSet.has(draft.id)

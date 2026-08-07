@@ -538,6 +538,13 @@ export function AppShell() {
             gap: 0.5,
             p: 0.5
           },
+          "@media (orientation: portrait) and (max-width: 700px)": {
+            gridTemplateColumns: cellSettingsOpen
+              ? "minmax(128px, 1fr) 57px minmax(170px, 42vw)"
+              : "minmax(0, 1fr) 57px",
+            gap: 0.5,
+            p: 0.5
+          },
           "@media (orientation: landscape) and (max-height: 430px)": {
             gap: 0.375,
             p: 0.375

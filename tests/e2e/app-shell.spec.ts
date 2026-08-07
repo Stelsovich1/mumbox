@@ -397,6 +397,21 @@ test("imports audio and assigns it to a grid cell", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Ячейка 1 Launch Pad" })).toBeVisible();
 });
 
+test("selects imported audio by clicking the import table row", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByTestId("audio-file-input").setInputFiles(audioFile);
+  await expect(page.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+
+  const importFileCell = page.getByRole("cell", { name: "launch.wav", exact: true });
+  await importFileCell.click();
+  await expect(page.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+
+  await importFileCell.click();
+  await expect(page.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+});
+
 test("opens media picker immediately for an empty cell", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
@@ -722,7 +737,8 @@ test("moves a configured cell by drag and drop without resetting settings", asyn
   await expect(page.getByTestId("cell-hotkey-cell-2")).toHaveText("M");
 });
 
-test("keeps selected cell settings open after moving the selected cell", async ({ page }) => {
+test("keeps selected cell settings open after moving the selected cell", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag selection is desktop-specific");
   await installAudioMock(page);
   await page.goto("/");
 

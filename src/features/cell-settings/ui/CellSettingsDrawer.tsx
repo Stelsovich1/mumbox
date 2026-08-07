@@ -174,22 +174,33 @@ export function CellSettingsDrawer({
           height: "100%",
           p: { xs: 1, sm: 2 },
           display: "grid",
+          gridTemplateRows: "minmax(0, 1fr) auto",
           alignContent: "start",
           gap: { xs: 1, sm: 2 },
-          overflowY: "auto"
+          overflow: "hidden"
         }}
       >
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title="Закрыть настройки">
-            <IconButton aria-label="Закрыть настройки ячейки" size="small" onClick={onClose}>
-              <CloseIcon />
-            </IconButton>
-          </Tooltip>
-          <Typography variant="h6">Настройки ячейки</Typography>
-        </Box>
+        <Box
+          sx={{
+            minHeight: 0,
+            display: "grid",
+            alignContent: "start",
+            gap: { xs: 1, sm: 2 },
+            overflowY: "auto",
+            pr: { xs: 0, sm: 0.5 }
+          }}
+        >
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title="Закрыть настройки">
+              <IconButton aria-label="Закрыть настройки ячейки" size="small" onClick={onClose}>
+                <CloseIcon />
+              </IconButton>
+            </Tooltip>
+            <Typography variant="h6">Настройки ячейки</Typography>
+          </Box>
 
-        {selectedMedia ? (
-          <>
+          {selectedMedia ? (
+            <>
             <Box
               role="button"
               tabIndex={0}
@@ -354,10 +365,10 @@ export function CellSettingsDrawer({
                 label="Цвет ячейки"
               />
             </Box>
-          </>
-        ) : null}
+            </>
+          ) : null}
 
-        {pickerOpen ? (
+          {pickerOpen ? (
           <Box sx={{ display: "grid", gap: 1, minWidth: 0 }}>
             <TextField
               label="Поиск"
@@ -555,9 +566,21 @@ export function CellSettingsDrawer({
               </Box>
             </Box>
           </Box>
-        ) : null}
+          ) : null}
+        </Box>
 
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: "auto" }}>
+        <Box
+          sx={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 1,
+            pt: { xs: 0.75, sm: 1 },
+            pb: "calc(8px + var(--app-safe-area-bottom))",
+            borderTop: 1,
+            borderColor: "rgba(169, 183, 207, 0.16)",
+            backgroundColor: "rgba(13, 18, 31, 0.96)"
+          }}
+        >
           <Button
             startIcon={<CheckIcon />}
             variant="contained"
