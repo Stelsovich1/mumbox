@@ -169,6 +169,7 @@ export function WorkspaceGrid({
   const pointerActivatedCellIdRef = useRef<string | null>(null);
   const touchDragRef = useRef<TouchDragState | null>(null);
   const touchDragTimerRef = useRef<number | null>(null);
+  const suppressClickTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
 
   const clearTouchDragTimer = () => {
@@ -189,6 +190,17 @@ export function WorkspaceGrid({
     }
   };
 
+  const suppressNextClick = () => {
+    suppressClickRef.current = true;
+    if (suppressClickTimerRef.current) {
+      window.clearTimeout(suppressClickTimerRef.current);
+    }
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false;
+      suppressClickTimerRef.current = null;
+    }, 300);
+  };
+
   const beginTouchDrag = (cellId: string) => {
     const nextDrag = { fromCellId: cellId, overCellId: cellId, active: false };
     touchDragRef.current = nextDrag;
@@ -196,7 +208,7 @@ export function WorkspaceGrid({
     clearTouchDragTimer();
     touchDragTimerRef.current = window.setTimeout(() => {
       const activeDrag = { ...nextDrag, active: true };
-      suppressClickRef.current = true;
+      suppressNextClick();
       touchDragRef.current = activeDrag;
       setTouchDrag(activeDrag);
       setDragOverCellId(cellId);
@@ -299,6 +311,10 @@ export function WorkspaceGrid({
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", cell.id);
               }}
+              onDragEnd={() => {
+                suppressNextClick();
+                setDragOverCellId(null);
+              }}
               onDragOver={(event) => {
                 if (!editMode) {
                   return;
@@ -315,6 +331,7 @@ export function WorkspaceGrid({
                 setDragOverCellId(null);
                 const fromCellId = event.dataTransfer.getData("text/plain");
                 if (fromCellId) {
+                  suppressNextClick();
                   onCellMove(fromCellId, cell.id);
                 }
               }}
@@ -401,7 +418,7 @@ export function WorkspaceGrid({
               onPointerCancel={() => {
                 pointerActivatedCellIdRef.current = null;
                 if (editMode && touchDragRef.current) {
-                  suppressClickRef.current = true;
+                  suppressNextClick();
                   finishTouchDrag(false);
                   return;
                 }

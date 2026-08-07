@@ -733,6 +733,7 @@ test("keeps selected cell settings open after moving the selected cell", async (
   const source = page.locator('[data-cell-id="cell-0"]');
   const target = page.locator('[data-cell-id="cell-2"]');
   await source.dragTo(target);
+  await source.dispatchEvent("click");
 
   await expect(source).toHaveAttribute("data-selected", "false");
   await expect(target).toHaveAttribute("data-selected", "true");
