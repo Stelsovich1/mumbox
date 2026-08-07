@@ -71,6 +71,8 @@ export function CellSettingsDrawer({
   const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
+  const cellId = cell?.id ?? null;
+  const cellMediaId = cell?.mediaId ?? null;
   const selectedMedia = media.find((item) => item.id === cell?.mediaId) ?? null;
   const filteredMedia = useMemo(
     () =>
@@ -82,10 +84,18 @@ export function CellSettingsDrawer({
   );
 
   useEffect(() => {
-    if (open && cell && !selectedMedia) {
-      setPickerOpen(true);
+    if (!open || !cellId) {
+      setPickerOpen(false);
+      return;
     }
-  }, [cell, open, selectedMedia]);
+
+    if (selectedMedia) {
+      setPickerOpen(false);
+      return;
+    }
+
+    setPickerOpen(true);
+  }, [cellId, cellMediaId, open, selectedMedia]);
 
   if (!open || !cell) {
     return null;

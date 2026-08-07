@@ -739,6 +739,7 @@ test("keeps selected cell settings open after moving the selected cell", async (
   await expect(target).toHaveAttribute("data-selected", "true");
   await expect(page.getByLabel("Псевдоним ячейки")).toHaveValue("Move Selected Pad");
   await expect(page.getByText("Длительность: 0:10")).toBeVisible();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toHaveCount(0);
 });
 
 test("moves cells on touch after a short hold in edit mode", async ({ page }, testInfo) => {
