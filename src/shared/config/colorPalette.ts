@@ -1,5 +1,5 @@
 export const CELL_COLORS = [
-  "#8cf8ff",
+  "#ec5aa7",
   "#6df7a5",
   "#ffcc66",
   "#ff6b8a",

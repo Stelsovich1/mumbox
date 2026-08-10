@@ -1,4 +1,4 @@
-import { get, set } from "idb-keyval";
+import { clear, get, set } from "idb-keyval";
 import { useEffect, useMemo, useReducer } from "react";
 
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
@@ -31,6 +31,7 @@ type ImportMediaDraft = {
   alias: string;
   color: string;
   mimeType: string;
+  size: number;
   durationMs: number | null;
 };
 
@@ -77,6 +78,7 @@ export type AppAction =
   | { type: "volume/muteToggle" }
   | { type: "editMode/toggle" }
   | { type: "stopOthers/toggle" }
+  | { type: "state/reset" }
   | { type: "state/import"; state: SerializableAppState };
 
 function createId(prefix: string) {
@@ -386,6 +388,8 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, editMode: !state.editMode };
     case "stopOthers/toggle":
       return { ...state, stopOthers: !state.stopOthers };
+    case "state/reset":
+      return createInitialState();
     case "state/import":
       return sanitizeImportedState(action.state);
     default:
@@ -434,6 +438,7 @@ export async function saveImportedMedia(drafts: ImportMediaDraft[]) {
     alias: draft.alias,
     color: draft.color,
     mimeType: draft.mimeType,
+    size: draft.size,
     durationMs: draft.durationMs,
     createdAt: new Date().toISOString()
   }));
@@ -441,6 +446,16 @@ export async function saveImportedMedia(drafts: ImportMediaDraft[]) {
 
 export async function getMediaBlob(mediaId: string) {
   return get<Blob>(`${MEDIA_BLOB_PREFIX}${mediaId}`);
+}
+
+export async function replaceStoredMedia(blobs: { id: string; blob: Blob }[]) {
+  await clear();
+  await Promise.all(blobs.map((item) => set(`${MEDIA_BLOB_PREFIX}${item.id}`, item.blob)));
+}
+
+export async function clearStoredAppData() {
+  localStorage.removeItem(STORAGE_KEY);
+  await clear();
 }
 
 export function makeMediaDraft(file: File, index: number): ImportMediaDraft {
@@ -451,6 +466,7 @@ export function makeMediaDraft(file: File, index: number): ImportMediaDraft {
     alias: "",
     color: CELL_COLORS[index % CELL_COLORS.length] ?? CELL_COLORS[0],
     mimeType: file.type || "audio/*",
+    size: file.size,
     durationMs: null
   };
 }

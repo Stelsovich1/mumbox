@@ -248,8 +248,8 @@ function Waveform({
             top: 0,
             bottom: 0,
             width: 3,
-            backgroundColor: "#8cf8ff",
-            boxShadow: "0 0 14px rgba(140, 248, 255, 0.8)"
+            backgroundColor: "#ec5aa7",
+            boxShadow: "0 0 14px rgba(236, 90, 167, 0.8)"
           }}
         />
         {draft.fadeInEnabled ? (
@@ -284,7 +284,7 @@ function Waveform({
             }}
           >
             <Box component="svg" viewBox="0 0 100 100" preserveAspectRatio="none" sx={{ width: "100%", height: "100%" }}>
-              <line x1="0" y1="16" x2="100" y2="84" stroke="#8cf8ff" strokeWidth="4" />
+              <line x1="0" y1="16" x2="100" y2="84" stroke="#ec5aa7" strokeWidth="4" />
             </Box>
           </Box>
         ) : null}

@@ -25,7 +25,7 @@ import {
   Typography
 } from "@mui/material";
 import useMediaQuery from "@mui/material/useMediaQuery";
-import { KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
@@ -34,9 +34,10 @@ import { AudioEditorDialog } from "../../../features/audio-editor";
 import { formatDuration } from "../../../shared/lib/duration";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 
-const MEDIA_PICKER_ROW_HEIGHT = 52;
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
-const MEDIA_PICKER_COLUMNS = "minmax(260px, 1.4fr) minmax(160px, 1fr) 74px 164px 48px";
+const MEDIA_PICKER_ROW_HEIGHT = 52;
+const MEDIA_PICKER_COLUMNS = "minmax(260px, 2fr) minmax(96px, 1fr) 74px 60px 42px";
+const MEDIA_PICKER_MIN_WIDTH = 532;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -70,6 +71,7 @@ export function CellSettingsDrawer({
   const [hotkeyError, setHotkeyError] = useState("");
   const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
+  const hotkeyCaptureRef = useRef<HTMLDivElement | null>(null);
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
   const cellId = cell?.id ?? null;
   const cellMediaId = cell?.mediaId ?? null;
@@ -97,6 +99,16 @@ export function CellSettingsDrawer({
     setPickerOpen(true);
   }, [cellId, cellMediaId, open, selectedMedia]);
 
+  useEffect(() => {
+    if (!hotkeyDialogOpen) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      hotkeyCaptureRef.current?.focus();
+    });
+  }, [hotkeyDialogOpen]);
+
   if (!open || !cell) {
     return null;
   }
@@ -106,8 +118,21 @@ export function CellSettingsDrawer({
     : selectedMedia?.alias.trim()
       ? selectedMedia.alias
       : selectedMedia?.fileName ?? "";
-  const shownColor = cell.colorOverride ?? selectedMedia?.color ?? "#8cf8ff";
+  const shownColor = cell.colorOverride ?? selectedMedia?.color ?? "#ec5aa7";
   const pendingDeleteMedia = media.find((item) => item.id === pendingDeleteMediaId) ?? null;
+  const canClearCell =
+    Boolean(cell.mediaId) ||
+    cell.aliasOverride.length > 0 ||
+    cell.colorOverride !== null ||
+    cell.hotkey.length > 0 ||
+    cell.playbackMode !== "once" ||
+    cell.volumeOffset !== 0 ||
+    cell.trimStartMs !== null ||
+    cell.trimEndMs !== null ||
+    cell.fadeInEnabled ||
+    cell.fadeInMs !== 0 ||
+    cell.fadeOutEnabled ||
+    cell.fadeOutMs !== 0;
   const pickerStart = Math.max(0, Math.floor(pickerScrollTop / MEDIA_PICKER_ROW_HEIGHT) - 6);
   const pickerEnd = Math.min(
     filteredMedia.length,
@@ -172,7 +197,7 @@ export function CellSettingsDrawer({
       <Box
         sx={{
           height: "100%",
-          p: { xs: 1, sm: 2 },
+          p: { xs: 1.5, sm: 2.5 },
           display: "grid",
           gridTemplateRows: "minmax(0, 1fr) auto",
           alignContent: "start",
@@ -187,7 +212,7 @@ export function CellSettingsDrawer({
             alignContent: "start",
             gap: { xs: 1, sm: 2 },
             overflowY: "auto",
-            pr: { xs: 0, sm: 0.5 }
+            pr: { xs: 0.25, sm: 0.75 }
           }}
         >
           <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -415,7 +440,7 @@ export function CellSettingsDrawer({
               </Box>
             </Box>
             <Box role="table" aria-label="Выбор медиа" sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
-              <Box sx={{ width: 720, maxWidth: "max-content" }}>
+              <Box sx={{ width: `max(100%, ${String(MEDIA_PICKER_MIN_WIDTH)}px)` }}>
               <Box
                 role="row"
                 sx={{
@@ -509,16 +534,34 @@ export function CellSettingsDrawer({
                       }
                     }}
                   >
-                    <Typography sx={{ px: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <Typography
+                      title={item.fileName}
+                      sx={{
+                        minWidth: 0,
+                        px: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap"
+                      }}
+                    >
                       {item.fileName}
                     </Typography>
-                    <Typography sx={{ px: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <Typography
+                      title={item.alias || undefined}
+                      sx={{
+                        minWidth: 0,
+                        px: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap"
+                      }}
+                    >
                       {item.alias || "..."}
                     </Typography>
                     <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
                       {formatDuration(item.durationMs)}
                     </Typography>
-                    <Box sx={{ px: 1 }}>
+                    <Box sx={{ px: 1, display: "grid", placeItems: "center" }}>
                       <Box
                         aria-label={`Цвет ${item.fileName}`}
                         sx={{
@@ -530,9 +573,10 @@ export function CellSettingsDrawer({
                         }}
                       />
                     </Box>
-                    <Box sx={{ px: 0.5, textAlign: "right" }}>
+                    <Box sx={{ display: "grid", placeItems: "center", justifySelf: "stretch" }}>
                       <Tooltip title="Удалить из медиатеки">
                         <IconButton
+                          size="small"
                           className="media-delete-button"
                           aria-label={`Удалить из медиатеки ${item.fileName}`}
                           onClick={(event) => {
@@ -589,15 +633,17 @@ export function CellSettingsDrawer({
           >
             Ок
           </Button>
-          <Button
-            startIcon={<ClearIcon />}
-            color="warning"
-            onClick={() => {
-              onClearCell(cell.id);
+          {canClearCell ? (
+            <Button
+              startIcon={<ClearIcon />}
+              color="warning"
+              onClick={() => {
+                onClearCell(cell.id);
               }}
-          >
-            Очистить
-          </Button>
+            >
+              Очистить
+            </Button>
+          ) : null}
         </Box>
       </Box>
       <Dialog
@@ -619,6 +665,7 @@ export function CellSettingsDrawer({
         <DialogTitle>Комбинация клавиш</DialogTitle>
         <DialogContent>
           <Box
+            ref={hotkeyCaptureRef}
             autoFocus
             tabIndex={0}
             role="button"

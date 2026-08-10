@@ -60,6 +60,7 @@ export function AudioImportDialog({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [query, setQuery] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +73,7 @@ export function AudioImportDialog({
       const nextDrafts = files.map((file, index) => makeMediaDraft(file, index));
       setDrafts(nextDrafts);
       setSelectedIds([]);
+      setQuery("");
       setScrollTop(0);
       if (bodyRef.current) {
         bodyRef.current.scrollTop = 0;
@@ -114,12 +116,21 @@ export function AudioImportDialog({
   }, [files, onLoadingChange, onReady, open]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const filteredDrafts = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return drafts;
+    }
+
+    return drafts.filter((draft) => draft.fileName.toLowerCase().includes(normalizedQuery));
+  }, [drafts, query]);
+  const selectedFilteredCount = filteredDrafts.filter((draft) => selectedSet.has(draft.id)).length;
   const virtualStart = Math.max(0, Math.floor(scrollTop / IMPORT_ROW_HEIGHT) - 6);
   const virtualEnd = Math.min(
-    drafts.length,
+    filteredDrafts.length,
     Math.ceil((scrollTop + IMPORT_VIEWPORT_HEIGHT) / IMPORT_ROW_HEIGHT) + 6
   );
-  const visibleDrafts = drafts.slice(virtualStart, virtualEnd);
+  const visibleDrafts = filteredDrafts.slice(virtualStart, virtualEnd);
 
   const stopPreview = () => {
     audioRef.current?.pause();
@@ -207,6 +218,30 @@ export function AudioImportDialog({
       >
         <DialogTitle>Импорт аудио</DialogTitle>
         <DialogContent sx={{ overflowX: "auto", p: { xs: 1, sm: 3 } }}>
+          <TextField
+            label="Поиск по имени файла"
+            value={query}
+            size="small"
+            sx={{
+              mt: 0.75,
+              mb: 2,
+              display: "block",
+              width: { xs: 260, sm: 360 },
+              maxWidth: "100%"
+            }}
+            slotProps={{
+              htmlInput: {
+                "aria-label": "Поиск импортируемых аудио"
+              }
+            }}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setScrollTop(0);
+              if (bodyRef.current) {
+                bodyRef.current.scrollTop = 0;
+              }
+            }}
+          />
           <Box role="table" aria-label="Импортируемые аудио" sx={{ minWidth: 980, maxWidth: "max-content" }}>
             <Box
               role="row"
@@ -222,10 +257,15 @@ export function AudioImportDialog({
               <Box role="columnheader" sx={{ px: 1 }}>
                   <Checkbox
                     aria-label="Выбрать все аудио"
-                    checked={drafts.length > 0 && selectedIds.length === drafts.length}
-                    indeterminate={selectedIds.length > 0 && selectedIds.length < drafts.length}
+                    checked={filteredDrafts.length > 0 && selectedFilteredCount === filteredDrafts.length}
+                    indeterminate={selectedFilteredCount > 0 && selectedFilteredCount < filteredDrafts.length}
                     onChange={(event) => {
-                      setSelectedIds(event.target.checked ? drafts.map((draft) => draft.id) : []);
+                      const filteredIds = new Set(filteredDrafts.map((draft) => draft.id));
+                      setSelectedIds((current) =>
+                        event.target.checked
+                          ? Array.from(new Set([...current, ...filteredIds]))
+                          : current.filter((id) => !filteredIds.has(id))
+                      );
                     }}
                   />
               </Box>
@@ -266,16 +306,16 @@ export function AudioImportDialog({
                 maxHeight: IMPORT_VIEWPORT_HEIGHT,
                 overflowY: "auto",
                 position: "relative",
-                height: drafts.length > 80 ? IMPORT_VIEWPORT_HEIGHT : "auto"
+                height: filteredDrafts.length > 80 ? IMPORT_VIEWPORT_HEIGHT : "auto"
               }}
             >
               <Box
                 sx={{
-                  height: drafts.length > 80 ? drafts.length * IMPORT_ROW_HEIGHT : "auto",
+                  height: filteredDrafts.length > 80 ? filteredDrafts.length * IMPORT_ROW_HEIGHT : "auto",
                   position: "relative"
                 }}
               >
-              {(drafts.length > 80 ? visibleDrafts : drafts).map((draft, visibleIndex) => (
+              {(filteredDrafts.length > 80 ? visibleDrafts : filteredDrafts).map((draft, visibleIndex) => (
                 <Box
                   key={draft.id}
                   role="row"
@@ -294,13 +334,13 @@ export function AudioImportDialog({
                     borderBottom: 1,
                     borderColor: "rgba(169, 183, 207, 0.12)",
                     backgroundColor: selectedSet.has(draft.id)
-                      ? "rgba(140, 248, 255, 0.08)"
+                      ? "rgba(236, 90, 167, 0.09)"
                       : "transparent",
                     transition: "background-color 160ms ease",
                     "&:hover": {
-                      backgroundColor: "rgba(140, 248, 255, 0.06)"
+                      backgroundColor: "rgba(236, 90, 167, 0.07)"
                     },
-                    ...(drafts.length > 80
+                    ...(filteredDrafts.length > 80
                       ? {
                           position: "absolute",
                           left: 0,
@@ -323,7 +363,11 @@ export function AudioImportDialog({
                       }}
                     />
                   </Box>
-                  <Typography role="cell" sx={{ px: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <Typography
+                    role="cell"
+                    title={draft.fileName}
+                    sx={{ px: 1, overflow: "hidden", textOverflow: "ellipsis" }}
+                  >
                     {draft.fileName}
                   </Typography>
                   <Typography role="cell" sx={{ px: 1 }}>
@@ -385,6 +429,21 @@ export function AudioImportDialog({
                   </Box>
                 </Box>
               ))}
+              {filteredDrafts.length === 0 ? (
+                <Box
+                  role="row"
+                  sx={{
+                    minHeight: IMPORT_ROW_HEIGHT,
+                    display: "flex",
+                    alignItems: "center",
+                    px: 1,
+                    borderBottom: 1,
+                    borderColor: "rgba(169, 183, 207, 0.12)"
+                  }}
+                >
+                  <Typography color="text.secondary">Нет аудио</Typography>
+                </Box>
+              ) : null}
               </Box>
             </Box>
           </Box>

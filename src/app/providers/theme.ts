@@ -8,8 +8,8 @@ export const appTheme = createTheme({
       paper: "rgba(13, 18, 31, 0.92)"
     },
     primary: {
-      main: "#8cf8ff",
-      contrastText: "#031014"
+      main: "#ec5aa7",
+      contrastText: "#18020d"
     },
     secondary: {
       main: "#ffcc66",
@@ -24,7 +24,7 @@ export const appTheme = createTheme({
     error: {
       main: "#ff6b8a"
     },
-    divider: "rgba(140, 248, 255, 0.2)",
+    divider: "rgba(236, 90, 167, 0.22)",
     text: {
       primary: "#f7fbff",
       secondary: "#a9b7cf"

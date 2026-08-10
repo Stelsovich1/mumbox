@@ -1,4 +1,5 @@
 import FileOpenIcon from "@mui/icons-material/FileOpen";
+import DeleteIcon from "@mui/icons-material/Delete";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
@@ -20,13 +21,33 @@ import {
   Typography
 } from "@mui/material";
 import useMediaQuery from "@mui/material/useMediaQuery";
-import { ChangeEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  MouseEvent,
+  PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
-import { serializeState, useAppStore } from "../../../app/model/appState";
+import {
+  clearStoredAppData,
+  replaceStoredMedia,
+  serializeState,
+  useAppStore
+} from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
-import { readConfigFile, saveConfigFile } from "../../../features/file-config";
+import {
+  LARGE_PROJECT_IMPORT_BYTES,
+  makeProjectBlob,
+  PROJECT_FILE_EXTENSION,
+  readProjectFile,
+  saveProjectBlob
+} from "../../../features/file-config";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
@@ -52,10 +73,58 @@ const audioAcceptTypes = [
   "audio/opus",
   "audio/webm"
 ].join(",");
+const SETTINGS_PANEL_MIN_WIDTH = 460;
+const SETTINGS_PANEL_MAX_WIDTH = SETTINGS_PANEL_MIN_WIDTH * 2;
+const SETTINGS_PANEL_MOBILE_MIN_WIDTH = 170;
+const SETTINGS_PANEL_LANDSCAPE_MIN_WIDTH = 190;
+const SETTINGS_PANEL_RESIZER_WIDTH = 12;
+const pleasantPink = "rgba(236, 90, 167, 0.78)";
 
 function isAudioFile(file: File) {
   const fileName = file.name.toLowerCase();
   return file.type.startsWith("audio/") || audioExtensions.some((extension) => fileName.endsWith(extension));
+}
+
+function getAudioMimeCandidates(fileName: string, mimeType: string) {
+  if (mimeType) {
+    return [mimeType];
+  }
+  const extension = fileName.toLowerCase().slice(fileName.lastIndexOf("."));
+  const mimeByExtension: Record<string, string[]> = {
+    ".mp3": ["audio/mpeg"],
+    ".wav": ["audio/wav", "audio/x-wav"],
+    ".ogg": ["audio/ogg"],
+    ".m4a": ["audio/mp4", "audio/x-m4a"],
+    ".aac": ["audio/aac"],
+    ".flac": ["audio/flac"],
+    ".opus": ["audio/opus", "audio/ogg"],
+    ".webm": ["audio/webm"]
+  };
+
+  return mimeByExtension[extension] ?? [];
+}
+
+function isPlayableAudio(fileName: string, mimeType: string) {
+  const audio = document.createElement("audio");
+  const candidates = getAudioMimeCandidates(fileName, mimeType);
+
+  return candidates.length === 0 || candidates.some((candidate) => audio.canPlayType(candidate) !== "");
+}
+
+function isDuplicateMediaFile(
+  file: File,
+  media: { fileName: string; size?: number; mimeType: string }[]
+) {
+  return media.some((item) => {
+    if (item.fileName !== file.name) {
+      return false;
+    }
+    if (typeof item.size === "number") {
+      return item.size === file.size;
+    }
+
+    return item.mimeType === file.type || !file.type;
+  });
 }
 
 function hasConfiguredLayout(
@@ -105,15 +174,19 @@ export function AppShell() {
   const [pendingAudioFiles, setPendingAudioFiles] = useState<File[]>([]);
   const [importLoading, setImportLoading] = useState(false);
   const [configImportWarningOpen, setConfigImportWarningOpen] = useState(false);
+  const [largeProjectFile, setLargeProjectFile] = useState<File | null>(null);
+  const [preparedProjectBlob, setPreparedProjectBlob] = useState<Blob | null>(null);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [installPromptDismissed, setInstallPromptDismissed] = useState(false);
   const [standaloneMode, setStandaloneMode] = useState(isStandaloneDisplayMode);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [settingsPanelWidth, setSettingsPanelWidth] = useState(SETTINGS_PANEL_MIN_WIDTH);
   const swRegistrationRef = useRef<ServiceWorkerRegistration | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const audioFolderInputRef = useRef<HTMLInputElement | null>(null);
-  const configInputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
   const mobileBrowser = useMediaQuery("(hover: none) and (pointer: coarse)");
   const {
     needRefresh: [updateAvailable],
@@ -152,6 +225,60 @@ export function AppShell() {
 
   const selectedCell = activeCells.find((cell) => cell.id === selectedCellId) ?? null;
   const cellSettingsOpen = state.editMode && Boolean(selectedCell);
+
+  const clampSettingsPanelWidth = useCallback((nextWidth: number) => {
+    const viewportWidth = window.innerWidth;
+    let minimumWidth = SETTINGS_PANEL_MIN_WIDTH;
+    if (window.matchMedia("(orientation: portrait) and (max-width: 700px)").matches) {
+      minimumWidth = SETTINGS_PANEL_MOBILE_MIN_WIDTH;
+    } else if (window.matchMedia("(max-height: 480px)").matches) {
+      minimumWidth = SETTINGS_PANEL_LANDSCAPE_MIN_WIDTH;
+    }
+    const reservedWidth = viewportWidth < 700 ? 210 : 360;
+    const maximumWidth = Math.min(SETTINGS_PANEL_MAX_WIDTH, Math.max(minimumWidth, viewportWidth - reservedWidth));
+
+    return Math.min(maximumWidth, Math.max(minimumWidth, nextWidth));
+  }, []);
+
+  const startSettingsPanelResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const startX = event.clientX;
+      const startWidth = settingsPanelWidth;
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        setSettingsPanelWidth(clampSettingsPanelWidth(startWidth - (moveEvent.clientX - startX)));
+      };
+      const handlePointerUp = () => {
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+        window.removeEventListener("pointercancel", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+      window.addEventListener("pointercancel", handlePointerUp);
+    },
+    [clampSettingsPanelWidth, settingsPanelWidth]
+  );
+
+  useEffect(() => {
+    setSettingsPanelWidth((current) => clampSettingsPanelWidth(current));
+  }, [cellSettingsOpen, clampSettingsPanelWidth]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setSettingsPanelWidth((current) => clampSettingsPanelWidth(current));
+    };
+
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
+  }, [clampSettingsPanelWidth]);
 
   const requestAppUpdate = useCallback(() => {
     closeFileMenu();
@@ -250,8 +377,27 @@ export function AppShell() {
     };
   }, []);
 
-  const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []).filter(isAudioFile);
+  const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>, source: "files" | "folder") => {
+    const selectedFiles = Array.from(event.target.files ?? []).filter(isAudioFile);
+    const unsupportedFiles = selectedFiles.filter((file) => !isPlayableAudio(file.name, file.type));
+    const playableFiles = selectedFiles.filter((file) => isPlayableAudio(file.name, file.type));
+    const files =
+      source === "files"
+        ? playableFiles.filter((file) => !isDuplicateMediaFile(file, state.media))
+        : playableFiles;
+    const duplicateCount = source === "files" ? playableFiles.length - files.length : 0;
+
+    if (unsupportedFiles.length > 0) {
+      setSaveMessage(
+        `Формат не поддерживается на этом устройстве: ${unsupportedFiles
+          .slice(0, 3)
+          .map((file) => file.name)
+          .join(", ")}`
+      );
+    } else if (duplicateCount > 0) {
+      setSaveMessage(`Дубликаты уже есть в медиатеке и пропущены: ${String(duplicateCount)}`);
+    }
+
     if (files.length > 0) {
       setImportLoading(true);
       setPendingAudioFiles(files);
@@ -259,17 +405,47 @@ export function AppShell() {
     event.target.value = "";
   };
 
-  const handleConfigFile = (event: ChangeEvent<HTMLInputElement>) => {
+  const importProjectFile = (file: File) => {
+    setImportLoading(true);
+    void readProjectFile(file)
+      .then(async (project) => {
+        const unsupportedMedia = project.mediaBlobs.filter(
+          (item) => !isPlayableAudio(item.fileName, item.mimeType)
+        );
+        if (unsupportedMedia.length > 0) {
+          setSaveMessage(
+            `Проект содержит неподдерживаемый формат: ${unsupportedMedia
+              .slice(0, 3)
+              .map((item) => item.fileName)
+              .join(", ")}`
+          );
+          return;
+        }
+        stopAll();
+        await replaceStoredMedia(project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })));
+        dispatch({ type: "state/import", state: project.state });
+        setSelectedCellId(null);
+        setSaveMessage(`Проект импортирован: ${file.name}`);
+      })
+      .catch(() => {
+        setSaveMessage("Не удалось импортировать проект");
+      })
+      .finally(() => {
+        setImportLoading(false);
+      });
+  };
+
+  const handleProjectFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) {
       return;
     }
-    void readConfigFile(file).then((importedState) => {
-      stopAll();
-      dispatch({ type: "state/import", state: importedState });
-      setSelectedCellId(null);
-    });
+    if (file.size >= LARGE_PROJECT_IMPORT_BYTES) {
+      setLargeProjectFile(file);
+      return;
+    }
+    importProjectFile(file);
   };
 
   const requestConfigImport = () => {
@@ -278,7 +454,7 @@ export function AppShell() {
       return;
     }
 
-    configInputRef.current?.click();
+    projectInputRef.current?.click();
   };
 
   const handleImportReady = useCallback(() => {
@@ -390,7 +566,7 @@ export function AppShell() {
           variant="outlined"
           size="small"
         >
-          Файл
+          Проект
         </Button>
         <Menu
           id="file-menu"
@@ -400,21 +576,22 @@ export function AppShell() {
         >
           <MenuItem
             onClick={() => {
-              void saveConfigFile(serializeState(state))
-                .then((fileName) => {
-                  setSaveMessage(`Конфиг сохранен: ${fileName}`);
+              setImportLoading(true);
+              void makeProjectBlob(serializeState(state))
+                .then((blob) => {
+                  setPreparedProjectBlob(blob);
                 })
-                .catch((error: unknown) => {
-                  if (error instanceof DOMException && error.name === "AbortError") {
-                    return;
-                  }
-                  setSaveMessage("Не удалось сохранить конфиг");
+                .catch(() => {
+                  setSaveMessage("Не удалось экспортировать проект");
+                })
+                .finally(() => {
+                  setImportLoading(false);
                 });
               closeFileMenu();
             }}
           >
             <SaveAltIcon fontSize="small" />
-            <Typography sx={{ ml: 1 }}>Сохранить в файл</Typography>
+            <Typography sx={{ ml: 1 }}>Экспорт проекта</Typography>
           </MenuItem>
           <MenuItem
             onClick={() => {
@@ -423,7 +600,7 @@ export function AppShell() {
             }}
           >
             <UploadFileIcon fontSize="small" />
-            <Typography sx={{ ml: 1 }}>Импортировать конфиг</Typography>
+            <Typography sx={{ ml: 1 }}>Импорт проекта</Typography>
           </MenuItem>
           <MenuItem
             onClick={() => {
@@ -453,6 +630,17 @@ export function AppShell() {
             <HelpOutlineIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>ЧАВО</Typography>
           </MenuItem>
+          <Divider />
+          <MenuItem
+            onClick={() => {
+              setResetConfirmOpen(true);
+              closeFileMenu();
+            }}
+            sx={{ color: "error.main" }}
+          >
+            <DeleteIcon fontSize="small" />
+            <Typography sx={{ ml: 1 }}>Стереть все данные</Typography>
+          </MenuItem>
           {updateAvailable ? (
             <>
               <Divider />
@@ -464,11 +652,12 @@ export function AppShell() {
           ) : null}
         </Menu>
         <input
-          ref={configInputRef}
+          ref={projectInputRef}
+          data-testid="project-file-input"
           type="file"
-          accept="application/json"
+          accept={`${PROJECT_FILE_EXTENSION},application/vnd.mumbox.project+json,application/json`}
           hidden
-          onChange={handleConfigFile}
+          onChange={handleProjectFile}
         />
         <input
           ref={audioInputRef}
@@ -477,7 +666,9 @@ export function AppShell() {
           accept={audioAcceptTypes}
           multiple
           hidden
-          onChange={handleAudioFiles}
+          onChange={(event) => {
+            handleAudioFiles(event, "files");
+          }}
         />
         <input
           ref={audioFolderInputRef}
@@ -486,7 +677,9 @@ export function AppShell() {
           accept={audioAcceptTypes}
           multiple
           hidden
-          onChange={handleAudioFiles}
+          onChange={(event) => {
+            handleAudioFiles(event, "folder");
+          }}
         />
 
         <Stack direction="row" alignItems="center" minWidth={0} sx={{ overflow: "hidden" }}>
@@ -510,7 +703,7 @@ export function AppShell() {
             fontWeight: 700,
             fontSize: { xs: 18, sm: 22 },
             color: "primary.main",
-            textShadow: "0 0 18px rgba(140, 248, 255, 0.5)",
+            textShadow: "0 0 18px rgba(236, 90, 167, 0.5)",
             "@media (orientation: landscape) and (max-height: 430px)": {
               fontSize: 14
             }
@@ -526,27 +719,31 @@ export function AppShell() {
           minHeight: 0,
           display: "grid",
           gridTemplateColumns: cellSettingsOpen
-            ? { xs: "minmax(0, 1fr) 82px minmax(220px, 36vw)", sm: "minmax(0, 1fr) 64px minmax(280px, 40vw)", lg: "minmax(0, 1fr) 76px 460px" }
+            ? {
+                xs: `minmax(128px, 1fr) 82px ${String(SETTINGS_PANEL_RESIZER_WIDTH)}px minmax(${String(SETTINGS_PANEL_MOBILE_MIN_WIDTH)}px, ${String(settingsPanelWidth)}px)`,
+                sm: `minmax(0, 1fr) 64px ${String(SETTINGS_PANEL_RESIZER_WIDTH)}px minmax(280px, ${String(settingsPanelWidth)}px)`,
+                lg: `minmax(0, 1fr) 76px ${String(SETTINGS_PANEL_RESIZER_WIDTH)}px minmax(${String(SETTINGS_PANEL_MIN_WIDTH)}px, ${String(settingsPanelWidth)}px)`
+              }
             : { xs: "minmax(0, 1fr) 82px", sm: "minmax(0, 1fr) 64px", lg: "minmax(0, 1fr) 76px" },
-          gap: { xs: 0.75, sm: 1.5 },
+          gap: { xs: 0.375, sm: 0.75 },
           p: { xs: 0.75, sm: 1.5 },
           overflow: "hidden",
           "@media (max-height: 480px)": {
             gridTemplateColumns: cellSettingsOpen
-              ? "minmax(0, 1fr) 46px minmax(190px, 34vw)"
+              ? `minmax(0, 1fr) 46px ${String(SETTINGS_PANEL_RESIZER_WIDTH)}px minmax(${String(SETTINGS_PANEL_LANDSCAPE_MIN_WIDTH)}px, ${String(settingsPanelWidth)}px)`
               : "minmax(0, 1fr) 46px",
-            gap: 0.5,
+            gap: 0.25,
             p: 0.5
           },
           "@media (orientation: portrait) and (max-width: 700px)": {
             gridTemplateColumns: cellSettingsOpen
-              ? "minmax(128px, 1fr) 57px minmax(170px, 42vw)"
+              ? `minmax(128px, 1fr) 57px ${String(SETTINGS_PANEL_RESIZER_WIDTH)}px minmax(${String(SETTINGS_PANEL_MOBILE_MIN_WIDTH)}px, ${String(settingsPanelWidth)}px)`
               : "minmax(0, 1fr) 57px",
-            gap: 0.5,
+            gap: 0.25,
             p: 0.5
           },
           "@media (orientation: landscape) and (max-height: 430px)": {
-            gap: 0.375,
+            gap: 0.1875,
             p: 0.375
           }
         }}
@@ -599,6 +796,46 @@ export function AppShell() {
           dispatch={dispatch}
           onStopAll={stopAll}
         />
+        {cellSettingsOpen ? (
+          <Box
+            data-testid="settings-panel-resizer"
+            aria-label="Изменить ширину панели настроек"
+            role="separator"
+            aria-orientation="vertical"
+            tabIndex={0}
+            onPointerDown={startSettingsPanelResize}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+                return;
+              }
+              event.preventDefault();
+              setSettingsPanelWidth((current) =>
+                clampSettingsPanelWidth(current + (event.key === "ArrowLeft" ? 24 : -24))
+              );
+            }}
+            sx={{
+              minWidth: SETTINGS_PANEL_RESIZER_WIDTH,
+              height: "100%",
+              cursor: "col-resize",
+              touchAction: "none",
+              display: "grid",
+              placeItems: "center",
+              "&::before": {
+                content: '""',
+                width: 3,
+                height: 54,
+                borderRadius: 999,
+                backgroundColor: pleasantPink,
+                boxShadow: "0 0 14px rgba(236, 90, 167, 0.4)"
+              },
+              "@media (hover: none)": {
+                "&::before": {
+                  opacity: 0
+                }
+              }
+            }}
+          />
+        ) : null}
         <CellSettingsDrawer
           open={cellSettingsOpen}
           panelId={activePanel.id}
@@ -666,6 +903,137 @@ export function AppShell() {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog
+        open={Boolean(largeProjectFile)}
+        onClose={() => {
+          setLargeProjectFile(null);
+        }}
+        aria-labelledby="large-project-dialog-title"
+      >
+        <DialogTitle id="large-project-dialog-title">Большой файл проекта</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Проект весит больше 100 MB. Импорт может занять заметное время и потребовать много
+            памяти, особенно на мобильном устройстве.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setLargeProjectFile(null);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              const file = largeProjectFile;
+              setLargeProjectFile(null);
+              if (file) {
+                importProjectFile(file);
+              }
+            }}
+          >
+            Импортировать
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={Boolean(preparedProjectBlob)}
+        onClose={() => {
+          setPreparedProjectBlob(null);
+        }}
+        aria-labelledby="prepared-project-dialog-title"
+      >
+        <DialogTitle id="prepared-project-dialog-title">Проект готов к сохранению</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Файл проекта собран. После выбора места сохранения браузер завершит сохранение .mumbox.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setPreparedProjectBlob(null);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              const blob = preparedProjectBlob;
+              if (!blob) {
+                return;
+              }
+              setImportLoading(true);
+              void saveProjectBlob(blob)
+                .then((result) => {
+                  setPreparedProjectBlob(null);
+                  if (result.completed) {
+                    setSaveMessage(`Проект экспортирован: ${result.fileName}`);
+                  }
+                })
+                .catch((error: unknown) => {
+                  if (error instanceof DOMException && error.name === "AbortError") {
+                    return;
+                  }
+                  setSaveMessage("Не удалось сохранить проект");
+                })
+                .finally(() => {
+                  setImportLoading(false);
+                });
+            }}
+          >
+            Выбрать место
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={resetConfirmOpen}
+        onClose={() => {
+          setResetConfirmOpen(false);
+        }}
+        aria-labelledby="reset-project-dialog-title"
+      >
+        <DialogTitle id="reset-project-dialog-title">Стереть все данные?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Будут удалены все панели, настройки ячеек и аудиофайлы из локального хранилища MUMBOX
+            на этом устройстве.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setResetConfirmOpen(false);
+            }}
+          >
+            Нет
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              setImportLoading(true);
+              void clearStoredAppData()
+                .then(() => {
+                  stopAll();
+                  setSelectedCellId(null);
+                  dispatch({ type: "state/reset" });
+                  setSaveMessage("Все данные MUMBOX стерты");
+                })
+                .finally(() => {
+                  setResetConfirmOpen(false);
+                  setImportLoading(false);
+                });
+            }}
+          >
+            Да, стереть
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Backdrop
         open={importLoading}
         sx={{
@@ -707,14 +1075,14 @@ export function AppShell() {
           width: { xs: "calc(100vw - 24px)", sm: "auto" },
           maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
-        message="Импорт конфига перезапишет текущую рабочую раскладку"
+        message="Импорт проекта перезапишет текущую рабочую раскладку и медиатеку"
         action={
           <>
             <Button
               color="inherit"
               onClick={() => {
                 setConfigImportWarningOpen(false);
-                configInputRef.current?.click();
+                projectInputRef.current?.click();
               }}
             >
               Импортировать

@@ -39,7 +39,7 @@ export function ColorSwatches({ value, onChange, label }: ColorSwatchesProps) {
                 transform: "scale(1.08)"
               },
               "&:focus-visible": {
-                outline: "2px solid #8cf8ff",
+                outline: "2px solid #ec5aa7",
                 outlineOffset: 2
               }
             }}

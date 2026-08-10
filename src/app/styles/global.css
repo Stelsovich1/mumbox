@@ -34,7 +34,7 @@ body,
 body {
   min-height: var(--app-height);
   background:
-    radial-gradient(circle at 18% 14%, rgba(140, 248, 255, 0.08), transparent 28%),
+    radial-gradient(circle at 18% 14%, rgba(236, 90, 167, 0.1), transparent 28%),
     radial-gradient(circle at 78% 24%, rgba(255, 204, 102, 0.08), transparent 24%),
     #05070d;
   overscroll-behavior: none;

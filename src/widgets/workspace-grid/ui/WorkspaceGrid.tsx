@@ -249,7 +249,7 @@ export function WorkspaceGrid({
         p: { xs: 0.5, md: 0.75 },
         boxShadow: editMode
           ? "0 0 0 1px rgba(255, 204, 102, 0.42), 0 0 22px rgba(255, 204, 102, 0.18), inset 0 0 36px rgba(255, 204, 102, 0.05)"
-          : "inset 0 0 36px rgba(140, 248, 255, 0.06)",
+          : "inset 0 0 36px rgba(236, 90, 167, 0.07)",
         transition: "border-color 160ms ease, box-shadow 160ms ease"
       }}
     >

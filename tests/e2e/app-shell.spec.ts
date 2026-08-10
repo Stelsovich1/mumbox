@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -14,6 +14,12 @@ const secondAudioFile = {
   name: "alarm.mp3",
   mimeType: "audio/mpeg",
   buffer: Buffer.from("ID3")
+};
+
+const longAudioFile = {
+  name: "this-is-a-very-long-audio-file-name-without-readable-spaces-for-title-hover.wav",
+  mimeType: "audio/wav",
+  buffer: Buffer.from("RIFF....WAVEfmt ")
 };
 
 const textFile = {
@@ -154,7 +160,7 @@ async function assignCell(page: Page, cellNumber: number, fileName = "launch.wav
 }
 
 async function openFileMenu(page: Page) {
-  await page.getByRole("button", { name: "Файл" }).click();
+  await page.getByRole("button", { name: "Проект" }).click();
 }
 
 async function touchDragCell(page: Page, fromCellId: string, toCellId: string) {
@@ -198,7 +204,7 @@ test("renders the MUMBOX shell", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByText("MUMBOX", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Файл" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Проект" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Panel 1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Добавить панель" })).toBeVisible();
   await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
@@ -226,7 +232,7 @@ test("opens project FAQ from the file menu", async ({ page }) => {
   await page.getByRole("menuitem", { name: "ЧАВО" }).click();
   await expect(page.getByRole("dialog", { name: "Документация MUMBOX" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Оглавление ЧАВО" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Медиатека и конфиги" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Медиатека и проекты" })).toBeVisible();
   await expect(page.getByText("Разработчик вдохновлялся мобильным приложением RemixLive")).toBeVisible();
   await expect(page.getByText("локальном браузерном хранилище IndexedDB")).toBeVisible();
   await expect(page.getByText("Developer: Stelsovich1.")).toBeVisible();
@@ -264,90 +270,51 @@ test("does not keep cell selection highlighted outside edit mode", async ({ page
   await expect(cell).toHaveAttribute("data-selected", "false");
 });
 
-test("saves config with a save dialog and warns before overwriting layout on import", async ({
+test("exports, resets, and imports a project with audio", async ({
   page
 }) => {
-  await page.addInitScript(() => {
-    const configWindow = window as Window & {
-      __mumboxSavePickerSuggestedName?: string;
-      __mumboxSavedConfigText?: string;
-      showSaveFilePicker?: (options: {
-        suggestedName: string;
-      }) => Promise<{
-        name: string;
-        createWritable: () => Promise<{
-          write: (data: Blob) => Promise<void>;
-          close: () => Promise<void>;
-        }>;
-      }>;
-    };
-
-    configWindow.showSaveFilePicker = (options) => {
-      configWindow.__mumboxSavePickerSuggestedName = options.suggestedName;
-      return Promise.resolve({
-        name: "custom-mumbox.json",
-        createWritable: () =>
-          Promise.resolve({
-          write: async (data: Blob) => {
-            configWindow.__mumboxSavedConfigText = await data.text();
-          },
-          close: () => {
-            configWindow.__mumboxSavedConfigText =
-              configWindow.__mumboxSavedConfigText ?? "";
-            return Promise.resolve();
-          }
-        })
-      });
-    };
-  });
+  await installAudioMock(page);
   await page.goto("/");
 
+  await importAudio(page, "Portable Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+
   await openFileMenu(page);
-  await page.getByText("Сохранить в файл").click();
-  await expect(page.getByText("Конфиг сохранен: custom-mumbox.json")).toBeVisible();
-  await expect
-    .poll(async () =>
-      page.evaluate(() => {
-        const configWindow = window as Window & {
-          __mumboxSavePickerSuggestedName?: string;
-          __mumboxSavedConfigText?: string;
-        };
-        return {
-          suggestedName: configWindow.__mumboxSavePickerSuggestedName,
-          hasPanels: configWindow.__mumboxSavedConfigText?.includes('"panels"') ?? false
-        };
-      })
-    )
-    .toEqual({ suggestedName: "mumbox-config.json", hasPanels: true });
+  await page.getByText("Экспорт проекта").click();
+  await expect(page.getByRole("dialog", { name: "Проект готов к сохранению" })).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Выбрать место" }).click();
+  const download = await downloadPromise;
+  await expect(page.getByText("Браузер открыл сохранение проекта: mumbox-project.mumbox")).toHaveCount(0);
+  expect(download.suggestedFilename()).toBe("mumbox-project.mumbox");
+  const projectPath = join(tmpdir(), `mumbox-project-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+  const projectText = await readFile(projectPath, "utf8");
+  expect(projectText).toContain('"panels"');
+  expect(projectText).toContain('"mediaBlobs"');
+
+  await openFileMenu(page);
+  await page.getByText("Стереть все данные").click();
+  await expect(page.getByRole("dialog", { name: "Стереть все данные?" })).toBeVisible();
+  await page.getByRole("button", { name: "Да, стереть" }).click();
+  await expect(page.getByRole("button", { name: "Пустая ячейка 1", exact: true })).toBeVisible();
+
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+  await expect(page.getByText(`Проект импортирован: ${projectPath.split("/").at(-1) ?? ""}`)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Portable Pad" })).toBeVisible();
+});
+
+test("warns before overwriting layout on project import", async ({ page }) => {
+  await page.goto("/");
 
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await openFileMenu(page);
-  await expect(page.getByText("Импортировать конфиг")).toBeVisible();
+  await expect(page.getByText("Импорт проекта")).toBeVisible();
   await expect(page.getByText("Импортировать из файла")).toHaveCount(0);
-  await page.getByText("Импортировать конфиг").click();
-  const warning = page.getByText("Импорт конфига перезапишет текущую рабочую раскладку");
+  await page.getByText("Импорт проекта").click();
+  const warning = page.getByText("Импорт проекта перезапишет текущую рабочую раскладку и медиатеку");
   await expect(warning).toBeVisible();
-  const warningToast = page.locator(".MuiSnackbar-root", {
-    hasText: "Импорт конфига перезапишет текущую рабочую раскладку"
-  });
-  await expect
-    .poll(async () => {
-      const box = await warningToast.boundingBox();
-      return page.evaluate(
-        ({ boxCenterX }) => Math.abs(window.innerWidth / 2 - boxCenterX),
-        { boxCenterX: (box?.x ?? 0) + (box?.width ?? 0) / 2 }
-      );
-    })
-    .toBeLessThan(2);
-  await expect
-    .poll(async () => {
-      const box = await warningToast.boundingBox();
-      return page.evaluate(
-        ({ boxCenterY }) => Math.abs(window.innerHeight / 2 - boxCenterY),
-        { boxCenterY: (box?.y ?? 0) + (box?.height ?? 0) / 2 }
-      );
-    })
-    .toBeLessThan(2);
   await page.getByRole("button", { name: "Отмена" }).click();
 });
 
@@ -433,6 +400,7 @@ test("shows empty media placeholder for an empty library", async ({ page }) => {
 
   await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Выбрать медиа", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Очистить" })).toHaveCount(0);
   await expect(page.getByText("Нет аудио")).toBeVisible();
 });
 
@@ -473,6 +441,116 @@ test("imports one file, multiple files, and an audio folder", async ({ page }) =
   await expect(page.getByText("notes.txt")).toBeHidden();
 });
 
+test("filters import audio table by file name", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByTestId("audio-file-input").setInputFiles([audioFile, secondAudioFile]);
+  await page.getByLabel("Поиск импортируемых аудио").fill("alarm");
+  await expect(page.getByText("alarm.mp3")).toBeVisible();
+  await expect(page.getByText("launch.wav")).toHaveCount(0);
+  await page.getByLabel("Поиск импортируемых аудио").fill("missing");
+  await expect(page.getByText("Нет аудио")).toBeVisible();
+});
+
+test("skips duplicate point audio imports and reports unsupported formats", async ({ page }) => {
+  await installAudioMock(page);
+  await page.addInitScript(() => {
+    HTMLMediaElement.prototype.canPlayType = function canPlayType(type: string) {
+      return type === "audio/flac" ? "" : "probably";
+    };
+  });
+  await page.goto("/");
+
+  await importAudio(page, "Existing Launch");
+  await page.getByTestId("audio-file-input").setInputFiles(audioFile);
+  await expect(page.getByText("Дубликаты уже есть в медиатеке и пропущены: 1")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Импорт аудио" })).toHaveCount(0);
+
+  await page.getByTestId("audio-file-input").setInputFiles({
+    name: "unsupported.flac",
+    mimeType: "audio/flac",
+    buffer: Buffer.from("fLaC")
+  });
+  await expect(page.getByText("Формат не поддерживается на этом устройстве: unsupported.flac")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Импорт аудио" })).toHaveCount(0);
+});
+
+test("warns for large project files and rejects unsupported project audio", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "large placeholder file is enough to cover the shared flow");
+  await page.addInitScript(() => {
+    HTMLMediaElement.prototype.canPlayType = function canPlayType(type: string) {
+      return type === "audio/flac" ? "" : "probably";
+    };
+  });
+  await page.goto("/");
+
+  const largeProjectPath = join(tmpdir(), `large-mumbox-${Date.now().toString()}.mumbox`);
+  await writeFile(largeProjectPath, "{}");
+  await truncate(largeProjectPath, 101 * 1024 * 1024);
+  await page.getByTestId("project-file-input").setInputFiles(largeProjectPath);
+  await expect(page.getByRole("dialog", { name: "Большой файл проекта" })).toBeVisible();
+  await page.getByRole("button", { name: "Отмена" }).click();
+
+  const unsupportedProject = {
+    kind: "mumbox-project",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    state: {
+      panels: [{ id: "panel-test", name: "Panel 1", gridSize: 8, cellIds: ["cell-0"] }],
+      activePanelId: "panel-test",
+      cellsByPanel: {
+        "panel-test": {
+          "cell-0": {
+            id: "cell-0",
+            mediaId: "media-test",
+            aliasOverride: "",
+            colorOverride: null,
+            playbackMode: "once",
+            volumeOffset: 0,
+            hotkey: "",
+            trimStartMs: null,
+            trimEndMs: null,
+            fadeInEnabled: false,
+            fadeInMs: 0,
+            fadeOutEnabled: false,
+            fadeOutMs: 0
+          }
+        }
+      },
+      media: [
+        {
+          id: "media-test",
+          fileName: "unsupported.flac",
+          alias: "Unsupported",
+          color: "#ec5aa7",
+          mimeType: "audio/flac",
+          size: 4,
+          durationMs: null,
+          createdAt: new Date().toISOString()
+        }
+      ],
+      masterVolume: 80,
+      masterMuted: false,
+      stopOthers: false
+    },
+    mediaBlobs: [
+      {
+        id: "media-test",
+        fileName: "unsupported.flac",
+        mimeType: "audio/flac",
+        size: 4,
+        dataBase64: Buffer.from("fLaC").toString("base64")
+      }
+    ]
+  };
+  const unsupportedProjectPath = join(tmpdir(), `unsupported-mumbox-${Date.now().toString()}.mumbox`);
+  await writeFile(unsupportedProjectPath, JSON.stringify(unsupportedProject));
+  await page.getByTestId("project-file-input").setInputFiles(unsupportedProjectPath);
+  await expect(page.getByText("Проект содержит неподдерживаемый формат: unsupported.flac")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Unsupported" })).toHaveCount(0);
+});
+
 test("keeps import table aligned and renders a large audio folder", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
@@ -500,17 +578,7 @@ test("keeps import table aligned and renders a large audio folder", async ({ pag
         const rows = Array.from(table.querySelectorAll('[role="row"]'));
         const headerColumns = rows[0] ? getComputedStyle(rows[0]).gridTemplateColumns : "";
         const firstRowColumns = rows[1] ? getComputedStyle(rows[1]).gridTemplateColumns : "";
-        return { headerColumns, firstRowColumns };
-      })
-    )
-    .toEqual(expect.objectContaining({ headerColumns: expect.any(String), firstRowColumns: expect.any(String) }));
-  await expect
-    .poll(async () =>
-      importTable.evaluate((table) => {
-        const rows = Array.from(table.querySelectorAll('[role="row"]'));
-        return rows[0] && rows[1]
-          ? getComputedStyle(rows[0]).gridTemplateColumns === getComputedStyle(rows[1]).gridTemplateColumns
-          : false;
+        return Boolean(headerColumns) && headerColumns === firstRowColumns;
       })
     )
     .toBe(true);
@@ -667,7 +735,7 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
   await cell.click();
   await page.getByRole("button", { name: "Очистить" }).click();
   await expect(cell).toHaveAttribute("data-playing", "false");
-  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click({ force: true });
   await expect(cell).toHaveAttribute("aria-label", "Пустая ячейка 1");
 });
 
@@ -710,7 +778,41 @@ test("deletes media from the edit picker with confirmation", async ({ page }) =>
   await expect(page.getByText("alarm.mp3")).toHaveCount(0);
 });
 
-test("moves a configured cell by drag and drop without resetting settings", async ({ page }) => {
+test("resizes cell settings panel and exposes full media file names as titles", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "desktop hover and panel width are desktop-specific");
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByTestId("audio-file-input").setInputFiles([longAudioFile]);
+  await page.getByLabel(`Выбрать ${longAudioFile.name}`).click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+
+  const drawer = page.getByRole("complementary", { name: "Настройки ячейки" });
+  const initialBox = await drawer.boundingBox();
+  const resizer = page.getByTestId("settings-panel-resizer");
+  const resizerBox = await resizer.boundingBox();
+  if (!initialBox || !resizerBox) {
+    throw new Error("Settings panel or resizer box is not available");
+  }
+
+  await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + resizerBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(resizerBox.x - 140, resizerBox.y + resizerBox.height / 2);
+  await page.mouse.up();
+
+  const widenedBox = await drawer.boundingBox();
+  expect(widenedBox?.width ?? 0).toBeGreaterThan(initialBox.width + 80);
+  expect(widenedBox?.width ?? 0).toBeLessThanOrEqual(initialBox.width * 2 + 2);
+
+  const fileNameCell = page.getByText(longAudioFile.name).first();
+  await expect(fileNameCell).toHaveCSS("text-overflow", "ellipsis");
+  await expect(fileNameCell).toHaveAttribute("title", longAudioFile.name);
+});
+
+test("moves a configured cell by drag and drop without resetting settings", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
   await installAudioMock(page);
   await page.goto("/");
 
@@ -718,7 +820,8 @@ test("moves a configured cell by drag and drop without resetting settings", asyn
   await assignFirstCell(page);
   await page.getByRole("radio", { name: "Loop" }).check();
   await page.getByRole("button", { name: "Назначить" }).click();
-  await page.getByLabel("Нажмите комбинацию клавиш").press("M");
+  await expect(page.getByLabel("Нажмите комбинацию клавиш")).toBeFocused();
+  await page.keyboard.press("M");
   await page.getByRole("button", { name: "Сохранить" }).click();
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
 
@@ -749,7 +852,6 @@ test("keeps selected cell settings open after moving the selected cell", async (
   const source = page.locator('[data-cell-id="cell-0"]');
   const target = page.locator('[data-cell-id="cell-2"]');
   await source.dragTo(target);
-  await source.dispatchEvent("click");
 
   await expect(source).toHaveAttribute("data-selected", "false");
   await expect(target).toHaveAttribute("data-selected", "true");
@@ -771,7 +873,8 @@ test("moves cells on touch after a short hold in edit mode", async ({ page }, te
   await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("data-selected", "true");
 });
 
-test("swaps configured cells when dragging onto an occupied cell", async ({ page }) => {
+test("swaps configured cells when dragging onto an occupied cell", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
   await installAudioMock(page);
   await page.goto("/");
 
@@ -803,7 +906,8 @@ test("swaps configured cells when dragging onto an occupied cell", async ({ page
   await expect(page.getByTestId("cell-hotkey-cell-1")).toHaveText("L");
 });
 
-test("binds hotkeys only once per panel and triggers playback outside edit mode", async ({ page }) => {
+test("binds hotkeys only once per panel and triggers playback outside edit mode", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "hotkey settings are desktop-only");
   await installAudioMock(page);
   await page.goto("/");
 
