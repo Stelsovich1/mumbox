@@ -606,7 +606,7 @@ export function AppShell() {
           gap: 1.5,
           px: 1.5,
           borderBottom: 1,
-          borderColor: state.editMode ? "secondary.main" : "divider",
+          borderColor: "divider",
           backgroundColor: "rgba(5, 7, 13, 0.78)",
           backdropFilter: "blur(18px)",
           "@media (orientation: landscape) and (max-height: 430px)": {

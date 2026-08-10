@@ -148,6 +148,9 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
                     "&:hover .panel-delete-button, &:focus-within .panel-delete-button": {
                       opacity: 1,
                       pointerEvents: "auto"
+                    },
+                    "@media (orientation: landscape) and (max-height: 430px)": {
+                      pr: editMode && panel !== panels[0] ? 4 : 0
                     }
                   }}
                 >
@@ -181,8 +184,8 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
                           right: -10,
                           width: 20,
                           height: 20,
-                          opacity: 0,
-                          pointerEvents: "none",
+                          opacity: 1,
+                          pointerEvents: "auto",
                           color: "error.main",
                           backgroundColor: "rgba(5, 7, 13, 0.92)",
                           border: 1,
@@ -232,6 +235,10 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
             sx={{
               minHeight: 42,
               maxWidth: 180,
+              color: editMode ? "secondary.main" : undefined,
+              "&.Mui-selected": {
+                color: editMode ? "secondary.main" : undefined
+              },
               "@media (orientation: landscape) and (max-height: 430px)": {
                 minHeight: 32,
                 maxWidth: 120
@@ -252,7 +259,8 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
               "@media (orientation: landscape) and (max-height: 430px)": {
                 width: 28,
                 height: 28,
-                p: 0.25
+                p: 0.25,
+                ml: 1
               }
             }}
           >

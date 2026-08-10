@@ -428,10 +428,13 @@ test("manages panels and grid size", async ({ page }) => {
   await expect(page.getByLabel("Название панели")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Режим редактирования" }).click();
-  await expect(page.locator("header")).toHaveCSS("border-bottom-color", "rgb(255, 204, 102)");
+  await expect(page.locator("header")).toHaveCSS("border-bottom-color", "rgba(236, 90, 167, 0.22)");
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await expect(page.getByRole("tab", { name: "Panel 2" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1" })).toHaveCSS("color", "rgb(255, 204, 102)");
+  await expect(page.getByRole("tab", { name: "Panel 2" })).toHaveCSS("color", "rgb(255, 204, 102)");
   await expect(page.getByRole("button", { name: "Удалить панель Panel 1" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Удалить панель Panel 2" })).toBeVisible();
 
   await page.getByRole("tab", { name: "Panel 2" }).dblclick();
   await page.getByLabel("Название панели").fill("Launch");
