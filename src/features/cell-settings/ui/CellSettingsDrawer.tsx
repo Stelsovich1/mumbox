@@ -1,6 +1,7 @@
 import CheckIcon from "@mui/icons-material/Check";
 import ClearIcon from "@mui/icons-material/Clear";
 import CloseIcon from "@mui/icons-material/Close";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyboardIcon from "@mui/icons-material/Keyboard";
@@ -17,6 +18,7 @@ import {
   FormLabel,
   IconButton,
   InputAdornment,
+  MenuItem,
   Radio,
   RadioGroup,
   Snackbar,
@@ -30,6 +32,7 @@ import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AppAction } from "../../../app/model/appState";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
+import { Panel } from "../../../entities/panel/model/types";
 import { AudioEditorDialog } from "../../../features/audio-editor";
 import { formatDuration } from "../../../shared/lib/duration";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
@@ -43,6 +46,8 @@ type CellSettingsDrawerProps = {
   open: boolean;
   panelId: string;
   cell: GridCell | null;
+  panels: Panel[];
+  cellsByPanel: Record<string, Record<string, GridCell>>;
   media: MediaAsset[];
   dispatch: React.Dispatch<AppAction>;
   onClose: () => void;
@@ -55,6 +60,8 @@ export function CellSettingsDrawer({
   open,
   panelId,
   cell,
+  panels,
+  cellsByPanel,
   media,
   dispatch,
   onClose,
@@ -71,6 +78,8 @@ export function CellSettingsDrawer({
   const [hotkeyError, setHotkeyError] = useState("");
   const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
+  const [copyDialogOpen, setCopyDialogOpen] = useState(false);
+  const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
   const hotkeyCaptureRef = useRef<HTMLDivElement | null>(null);
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
   const cellId = cell?.id ?? null;
@@ -84,6 +93,20 @@ export function CellSettingsDrawer({
       }),
     [colorFilter, media, query]
   );
+  const copyPanelOptions = useMemo(
+    () =>
+      panels
+        .map((panel) => {
+          const cells = cellsByPanel[panel.id] ?? {};
+          const freeCellId = panel.cellIds.find((id) => !cells[id]?.mediaId);
+          return freeCellId ? { panel, freeCellId } : null;
+        })
+        .filter((option): option is { panel: Panel; freeCellId: string } => Boolean(option)),
+    [cellsByPanel, panels]
+  );
+  const canCopyCell = Boolean(cellMediaId) && copyPanelOptions.length > 0;
+  const selectedCopyOption =
+    copyPanelOptions.find((option) => option.panel.id === copyTargetPanelId) ?? copyPanelOptions[0] ?? null;
 
   useEffect(() => {
     if (!open || !cellId) {
@@ -98,6 +121,15 @@ export function CellSettingsDrawer({
 
     setPickerOpen(true);
   }, [cellId, cellMediaId, open, selectedMedia]);
+
+  useEffect(() => {
+    if (!copyDialogOpen) {
+      return;
+    }
+    if (selectedCopyOption && selectedCopyOption.panel.id !== copyTargetPanelId) {
+      setCopyTargetPanelId(selectedCopyOption.panel.id);
+    }
+  }, [copyDialogOpen, copyTargetPanelId, selectedCopyOption]);
 
   useEffect(() => {
     if (!hotkeyDialogOpen) {
@@ -613,6 +645,33 @@ export function CellSettingsDrawer({
           ) : null}
         </Box>
 
+        {selectedMedia ? (
+          <Box
+            sx={{
+              display: "grid",
+              pt: { xs: 0.25, sm: 0 },
+              borderTop: 1,
+              borderColor: "rgba(169, 183, 207, 0.1)"
+            }}
+          >
+            <Button
+              startIcon={<ContentCopyIcon />}
+              variant="outlined"
+              disabled={!canCopyCell}
+              onClick={() => {
+                if (!selectedCopyOption) {
+                  return;
+                }
+                setCopyTargetPanelId(selectedCopyOption.panel.id);
+                setCopyDialogOpen(true);
+              }}
+              sx={{ justifySelf: "stretch" }}
+            >
+              Скопировать
+            </Button>
+          </Box>
+        ) : null}
+
         <Box
           sx={{
             display: "flex",
@@ -646,6 +705,78 @@ export function CellSettingsDrawer({
           ) : null}
         </Box>
       </Box>
+      <Dialog
+        open={copyDialogOpen}
+        onClose={() => {
+          setCopyDialogOpen(false);
+        }}
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle>Скопировать</DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: "grid", gap: 1.5, pt: 1 }}>
+            <TextField
+              select
+              label="Панель"
+              value={selectedCopyOption?.panel.id ?? ""}
+              onChange={(event) => {
+                setCopyTargetPanelId(event.target.value);
+              }}
+              fullWidth
+            >
+              {copyPanelOptions.map((option) => (
+                <MenuItem key={option.panel.id} value={option.panel.id}>
+                  {option.panel.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            {selectedCopyOption ? (
+              <Typography color="text.secondary">
+                Копия будет помещена в первую свободную ячейку: {selectedCopyOption.freeCellId.replace("cell-", "#")}
+              </Typography>
+            ) : (
+              <Typography color="text.secondary">Нет панелей со свободными ячейками.</Typography>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setCopyDialogOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!selectedCopyOption}
+            onClick={() => {
+              if (!selectedCopyOption) {
+                return;
+              }
+              dispatch({
+                type: "cell/copy",
+                fromPanelId: panelId,
+                fromCellId: cell.id,
+                toPanelId: selectedCopyOption.panel.id,
+                toCellId: selectedCopyOption.freeCellId
+              });
+              setCopyDialogOpen(false);
+            }}
+          >
+            Скопировать
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={hotkeyDialogOpen}
         onClose={() => {

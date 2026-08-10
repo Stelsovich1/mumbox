@@ -11,7 +11,7 @@ import {
 } from "./audioEnvelope";
 
 type PlayingCell = {
-  cellId: string;
+  cellKey: string;
   mediaId: string;
   progress: number;
 };
@@ -40,6 +40,10 @@ const RELEASE_SECONDS = 0.018;
 
 function isMediaId(value: string | null): value is string {
   return Boolean(value);
+}
+
+function getCellKey(panelId: string, cellId: string) {
+  return `${panelId}:${cellId}`;
 }
 
 function getEffectiveVolume(masterVolume: number, cellVolumeOffset: number) {
@@ -106,6 +110,7 @@ function stopRoute(route: AudioRoute) {
 }
 
 export function useAudioEngine(
+  panelId: string,
   media: MediaAsset[],
   cells: GridCell[],
   masterVolume: number,
@@ -136,9 +141,9 @@ export function useAudioEngine(
     return context;
   }, []);
 
-  const bumpCellToken = useCallback((cellId: string) => {
-    const nextToken = (playTokenByCellRef.current.get(cellId) ?? 0) + 1;
-    playTokenByCellRef.current.set(cellId, nextToken);
+  const bumpCellToken = useCallback((cellKey: string) => {
+    const nextToken = (playTokenByCellRef.current.get(cellKey) ?? 0) + 1;
+    playTokenByCellRef.current.set(cellKey, nextToken);
     return nextToken;
   }, []);
 
@@ -194,29 +199,39 @@ export function useAudioEngine(
     [loadAudioBuffer]
   );
 
-  const stopCell = useCallback(
-    (cellId: string) => {
-      bumpCellToken(cellId);
-      const route = routeByCellRef.current.get(cellId);
+  const stopCellKey = useCallback(
+    (cellKey: string) => {
+      bumpCellToken(cellKey);
+      const route = routeByCellRef.current.get(cellKey);
       if (route) {
         stopRoute(route);
-        routeByCellRef.current.delete(cellId);
+        routeByCellRef.current.delete(cellKey);
       }
-      setPlayingCells((current) => current.filter((cell) => cell.cellId !== cellId));
+      setPlayingCells((current) => current.filter((cell) => cell.cellKey !== cellKey));
     },
     [bumpCellToken]
   );
 
-  const stopAll = useCallback(() => {
-    Array.from(routeByCellRef.current.keys()).forEach((cellId) => {
-      stopCell(cellId);
-    });
-  }, [stopCell]);
+  const stopCell = useCallback(
+    (cellId: string) => {
+      stopCellKey(getCellKey(panelId, cellId));
+    },
+    [panelId, stopCellKey]
+  );
 
-  const isCellPlaying = useCallback((cellId: string) => routeByCellRef.current.has(cellId), []);
+  const stopAll = useCallback(() => {
+    Array.from(routeByCellRef.current.keys()).forEach((cellKey) => {
+      stopCellKey(cellKey);
+    });
+  }, [stopCellKey]);
+
+  const isCellPlaying = useCallback(
+    (cellId: string) => routeByCellRef.current.has(getCellKey(panelId, cellId)),
+    [panelId]
+  );
 
   const startMediaElementFallback = useCallback(
-    async (cell: GridCell, mediaAsset: MediaAsset, blob: Blob, token: number) => {
+    async (cell: GridCell, mediaAsset: MediaAsset, blob: Blob, token: number, cellKey: string) => {
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       const durationSeconds = (mediaAsset.durationMs ?? audio.duration * 1000) / 1000 || 0;
@@ -249,32 +264,32 @@ export function useAudioEngine(
         bufferDurationSeconds: durationSeconds || audio.duration || 10
       };
 
-      routeByCellRef.current.set(cell.id, route);
+      routeByCellRef.current.set(cellKey, route);
       audio.addEventListener("ended", () => {
-        if (playTokenByCellRef.current.get(cell.id) !== token) {
+        if (playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
         if (cell.playbackMode === "loop") {
-          void startMediaElementFallback(cell, mediaAsset, blob, token);
+          void startMediaElementFallback(cell, mediaAsset, blob, token, cellKey);
           return;
         }
-        stopCell(cell.id);
+        stopCellKey(cellKey);
       });
       if (context.state === "suspended") {
         await context.resume();
       }
       setPlayingCells((current) => [
-        ...current.filter((playing) => playing.cellId !== cell.id),
-        { cellId: cell.id, mediaId: mediaAsset.id, progress: 0 }
+        ...current.filter((playing) => playing.cellKey !== cellKey),
+        { cellKey, mediaId: mediaAsset.id, progress: 0 }
       ]);
       await audio.play();
     },
-    [masterMuted, masterVolume, stopCell]
+    [masterMuted, masterVolume, stopCellKey]
   );
 
   const startBufferRoute = useCallback(
-    (cell: GridCell, mediaAsset: MediaAsset, buffer: AudioBuffer, token: number) => {
-      if (playTokenByCellRef.current.get(cell.id) !== token) {
+    (cell: GridCell, mediaAsset: MediaAsset, buffer: AudioBuffer, token: number, cellKey: string) => {
+      if (playTokenByCellRef.current.get(cellKey) !== token) {
         return;
       }
 
@@ -282,7 +297,7 @@ export function useAudioEngine(
       const { startSeconds, endSeconds } = getClampedPlaybackRange(cell, buffer.duration);
       const playDurationSeconds = endSeconds - startSeconds;
       if (playDurationSeconds <= 0.001) {
-        stopCell(cell.id);
+        stopCellKey(cellKey);
         return;
       }
 
@@ -311,27 +326,27 @@ export function useAudioEngine(
         bufferDurationSeconds: buffer.duration
       };
 
-      routeByCellRef.current.set(cell.id, route);
+      routeByCellRef.current.set(cellKey, route);
       source.onended = () => {
-        if (routeByCellRef.current.get(cell.id) !== route) {
+        if (routeByCellRef.current.get(cellKey) !== route) {
           return;
         }
-        if (playTokenByCellRef.current.get(cell.id) !== token) {
+        if (playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
         if (cell.playbackMode === "loop") {
-          startBufferRoute(cell, mediaAsset, buffer, token);
+          startBufferRoute(cell, mediaAsset, buffer, token, cellKey);
           return;
         }
-        stopCell(cell.id);
+        stopCellKey(cellKey);
       };
       source.start(0, startSeconds, playDurationSeconds);
       setPlayingCells((current) => [
-        ...current.filter((playing) => playing.cellId !== cell.id),
-        { cellId: cell.id, mediaId: mediaAsset.id, progress: 0 }
+        ...current.filter((playing) => playing.cellKey !== cellKey),
+        { cellKey, mediaId: mediaAsset.id, progress: 0 }
       ]);
     },
-    [getContext, masterMuted, masterVolume, stopCell]
+    [getContext, masterMuted, masterVolume, stopCellKey]
   );
 
   const playCell = useCallback(
@@ -344,12 +359,14 @@ export function useAudioEngine(
         return;
       }
 
+      const cellKey = getCellKey(panelId, cell.id);
+
       if (stopOthers) {
         stopAll();
       } else {
-        stopCell(cell.id);
+        stopCellKey(cellKey);
       }
-      const token = bumpCellToken(cell.id);
+      const token = bumpCellToken(cellKey);
 
       const context = getContext();
       if (context.state === "suspended") {
@@ -359,28 +376,29 @@ export function useAudioEngine(
       const canUseBufferSource = typeof context.createBufferSource === "function";
       if (canUseBufferSource) {
         const buffer = await loadAudioBuffer(cell.mediaId);
-        if (!buffer || playTokenByCellRef.current.get(cell.id) !== token) {
+        if (!buffer || playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
-        startBufferRoute(cell, mediaAsset, buffer, token);
+        startBufferRoute(cell, mediaAsset, buffer, token, cellKey);
         return;
       }
 
       const blob = await getMediaBlob(cell.mediaId);
-      if (!blob || playTokenByCellRef.current.get(cell.id) !== token) {
+      if (!blob || playTokenByCellRef.current.get(cellKey) !== token) {
         return;
       }
-      await startMediaElementFallback(cell, mediaAsset, blob, token);
+      await startMediaElementFallback(cell, mediaAsset, blob, token, cellKey);
     },
     [
       bumpCellToken,
       getContext,
       loadAudioBuffer,
       media,
+      panelId,
       startBufferRoute,
       startMediaElementFallback,
       stopAll,
-      stopCell,
+      stopCellKey,
       stopOthers
     ]
   );
@@ -426,15 +444,15 @@ export function useAudioEngine(
 
   useEffect(() => {
     routeByCellRef.current.forEach((route, cellId) => {
-      const cell = cellsRef.current.find((candidate) => candidate.id === cellId);
+      const cell = cellsRef.current.find((candidate) => getCellKey(panelId, candidate.id) === cellId);
       const nextVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, cell?.volumeOffset ?? 0);
       setRouteVolume(route, nextVolume);
     });
-  }, [cells, masterMuted, masterVolume]);
+  }, [cells, masterMuted, masterVolume, panelId]);
 
   useEffect(() => {
     routeByCellRef.current.forEach((route, cellId) => {
-      const cell = cellsRef.current.find((candidate) => candidate.id === cellId);
+      const cell = cellsRef.current.find((candidate) => getCellKey(panelId, candidate.id) === cellId);
       if (!cell) {
         return;
       }
@@ -445,17 +463,19 @@ export function useAudioEngine(
       const { endSeconds } = getClampedPlaybackRange(cell, route.bufferDurationSeconds);
       scheduleEnvelope(route.envelopeGain, cell, currentSeconds, endSeconds);
     });
-  }, [cells]);
+  }, [cells, panelId]);
 
   useEffect(() => {
     const tick = () => {
       setPlayingCells((current) =>
         current.map((cell) => {
-          const route = routeByCellRef.current.get(cell.cellId);
+          const route = routeByCellRef.current.get(cell.cellKey);
           if (!route) {
             return cell;
           }
-          const gridCell = cellsRef.current.find((candidate) => candidate.id === cell.cellId);
+          const gridCell = cellsRef.current.find(
+            (candidate) => getCellKey(panelId, candidate.id) === cell.cellKey
+          );
           if (!gridCell) {
             return cell;
           }
@@ -472,7 +492,7 @@ export function useAudioEngine(
               route.audio.currentTime = getTrimStartSeconds(gridCell);
               scheduleEnvelope(route.envelopeGain, gridCell, route.audio.currentTime, route.endSeconds);
             } else {
-              stopCell(gridCell.id);
+              stopCellKey(cell.cellKey);
             }
           }
 
@@ -498,7 +518,7 @@ export function useAudioEngine(
         cancelAnimationFrame(frameRef.current);
       }
     };
-  }, [masterMuted, masterVolume, stopCell]);
+  }, [masterMuted, masterVolume, panelId, stopCellKey]);
 
   useEffect(
     () => () => {

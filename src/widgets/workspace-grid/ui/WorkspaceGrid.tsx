@@ -1,5 +1,5 @@
 import { Box, Typography } from "@mui/material";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
@@ -7,12 +7,13 @@ import { GridSize } from "../../../entities/panel/model/types";
 import { getReadableTextColor } from "../../../shared/lib/contrast";
 
 type WorkspaceGridProps = {
+  panelId: string;
   gridSize: GridSize;
   cells: GridCell[];
   media: MediaAsset[];
   editMode: boolean;
   selectedCellId: string | null;
-  playingCells: { cellId: string; progress: number }[];
+  playingCells: { cellKey: string; progress: number }[];
   warmedMedia: { mediaId: string; state: "warming" | "ready" }[];
   onCellClick: (cell: GridCell) => void;
   onGateStart: (cell: GridCell) => void;
@@ -154,6 +155,7 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
 }
 
 export function WorkspaceGrid({
+  panelId,
   gridSize,
   cells,
   media,
@@ -173,6 +175,10 @@ export function WorkspaceGrid({
   const touchDragTimerRef = useRef<number | null>(null);
   const suppressClickTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
+  const playingByCellKey = useMemo(
+    () => new Map(playingCells.map((cell) => [cell.cellKey, cell.progress])),
+    [playingCells]
+  );
 
   const clearTouchDragTimer = () => {
     if (touchDragTimerRef.current) {
@@ -273,6 +279,7 @@ export function WorkspaceGrid({
         }}
       >
         {cells.map((cell, index) => {
+          const cellKey = `${panelId}:${cell.id}`;
           const mediaAsset = media.find((item) => item.id === cell.mediaId) ?? null;
           const label = cell.aliasOverride.trim()
             ? cell.aliasOverride
@@ -280,9 +287,10 @@ export function WorkspaceGrid({
               ? mediaAsset.alias
               : mediaAsset?.fileName ?? "";
           const color = cell.colorOverride ?? mediaAsset?.color ?? "rgba(34, 43, 60, 0.76)";
-          const isPlaying = playingCells.some((item) => item.cellId === cell.id);
+          const playingProgress = playingByCellKey.get(cellKey);
+          const isPlaying = playingProgress !== undefined;
           const isSelected = editMode && selectedCellId === cell.id;
-          const progress = playingCells.find((item) => item.cellId === cell.id)?.progress ?? 0;
+          const progress = playingProgress ?? 0;
           const warmState = cell.mediaId
             ? warmedMedia.find((item) => item.mediaId === cell.mediaId)?.state ?? "idle"
             : "idle";

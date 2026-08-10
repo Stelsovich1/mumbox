@@ -222,6 +222,7 @@ export function AppShell() {
     return activePanel.cellIds.map((cellId) => cells[cellId]).filter(isDefinedCell);
   }, [activePanel, state.cellsByPanel]);
   const { playingCells, warmedMedia, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
+    activePanel?.id ?? "",
     state.media,
     activeCells,
     state.masterVolume,
@@ -825,6 +826,7 @@ export function AppShell() {
         }}
       >
         <WorkspaceGrid
+          panelId={activePanel.id}
           gridSize={activePanel.gridSize}
           cells={activeCells}
           media={state.media}
@@ -917,6 +919,8 @@ export function AppShell() {
           open={cellSettingsOpen}
           panelId={activePanel.id}
           cell={selectedCell}
+          panels={state.panels}
+          cellsByPanel={state.cellsByPanel}
           media={state.media}
           dispatch={dispatch}
           onClose={() => {

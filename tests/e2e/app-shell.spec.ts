@@ -211,9 +211,12 @@ async function installAudioMock(page: Page) {
 
 async function importAudio(page: Page, alias: string) {
   await page.getByTestId("audio-file-input").setInputFiles(audioFile);
-  await page.getByLabel("Выбрать launch.wav").click();
+  const importDialog = page.getByRole("dialog", { name: "Импорт аудио" });
+  await expect(importDialog).toBeVisible();
+  await importDialog.getByRole("cell", { name: "launch.wav", exact: true }).click();
   await page.getByLabel("Псевдоним launch.wav").fill(alias);
   await page.getByRole("button", { name: "Сохранить" }).click();
+  await expect(importDialog).toBeHidden();
 }
 
 async function assignFirstCell(page: Page) {
@@ -227,6 +230,34 @@ async function assignCell(page: Page, cellNumber: number, fileName = "launch.wav
   await page.getByRole("button", { name: `Пустая ячейка ${String(cellNumber)}`, exact: true }).click();
   await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
   await page.getByRole("button", { name: `Выбрать ${fileName}` }).click();
+}
+
+function makeStoredCell(id: string, mediaId: string | null) {
+  return {
+    id,
+    mediaId,
+    aliasOverride: "",
+    colorOverride: null,
+    playbackMode: "once",
+    volumeOffset: 0,
+    hotkey: "",
+    trimStartMs: null,
+    trimEndMs: null,
+    fadeInEnabled: false,
+    fadeInMs: 0,
+    fadeOutEnabled: false,
+    fadeOutMs: 0
+  };
+}
+
+async function seedStoredState(page: Page, state: unknown) {
+  await page.addInitScript(
+    ({ key, value }) => {
+      localStorage.setItem(key, JSON.stringify(value));
+    },
+    { key: "mumbox:state:v1", value: state }
+  );
+  await page.goto("/");
 }
 
 async function openFileMenu(page: Page) {
@@ -412,6 +443,170 @@ test("manages panels and grid size", async ({ page }) => {
   await page.getByRole("button", { name: "6x6" }).click();
   await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
   await expect(page.getByRole("button", { name: /Пустая ячейка/ })).toHaveCount(36);
+});
+
+test("keeps cells outside the smaller grid after switching 12x12 to 6x6 and back", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Outer Pad");
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "12x12" }).click();
+  await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await assignCell(page, 40);
+  await page.getByLabel("Псевдоним ячейки").fill("Outer Cell");
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "12x12" }).click();
+  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+});
+
+test("does not show playback state from another panel on empty cells", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Добавить панель" }).click();
+  await page.getByRole("tab", { name: "Panel 1" }).click();
+  await importAudio(page, "Panel One Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+  const panelOneCell = page.locator('[data-cell-id="cell-0"]');
+  await panelOneCell.click();
+  await expect(panelOneCell).toHaveAttribute("data-playing", "true");
+
+  await page.getByRole("tab", { name: "Panel 2" }).click();
+  const panelTwoCell = page.locator('[data-cell-id="cell-0"]');
+  await expect(panelTwoCell).toHaveAttribute("aria-label", "Пустая ячейка 1");
+  await expect(panelTwoCell).toHaveAttribute("data-playing", "false");
+  await expect(panelTwoCell).toHaveAttribute("data-warm-state", "idle");
+});
+
+test("copies a configured cell to the same panel using the first free cell", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "copy dialog select is covered once on desktop");
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Launch Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Скопировать", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Скопировать" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Панель" })).toHaveText("Panel 1");
+  await expect(page.getByText("Копия будет помещена в первую свободную ячейку: #1")).toBeVisible();
+  await page
+    .getByRole("dialog", { name: "Скопировать" })
+    .getByRole("button", { name: "Скопировать" })
+    .click();
+
+  await expect(page.getByRole("button", { name: "Ячейка 1 Launch Pad" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 2 launch.wav_copy" })).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-1"]')).toHaveAttribute("data-hotkey", "");
+});
+
+test("copies a configured cell to another panel and hides panels without free cells", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "copy dialog select is covered once on desktop");
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Добавить панель" }).click();
+  await page.getByRole("tab", { name: "Panel 1" }).click();
+  await importAudio(page, "Shared Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Скопировать", exact: true }).click();
+
+  await page.getByRole("combobox", { name: "Панель" }).click();
+  await expect(page.getByRole("option", { name: "Panel 1" })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Panel 2" })).toBeVisible();
+  await page.getByRole("option", { name: "Panel 2" }).click();
+  await expect(page.getByText("Копия будет помещена в первую свободную ячейку: #0")).toBeVisible();
+  await page
+    .getByRole("dialog", { name: "Скопировать" })
+    .getByRole("button", { name: "Скопировать" })
+    .click();
+
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await page.getByRole("tab", { name: "Panel 2" }).click();
+  await expect(page.getByRole("button", { name: "Ячейка 1 launch.wav_copy" })).toBeVisible();
+
+  const mediaAsset = {
+    id: "media-filled",
+    fileName: "filled.wav",
+    alias: "Filled",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 10000,
+    createdAt: new Date().toISOString()
+  };
+  const panel1Ids = Array.from({ length: 2 }, (_, index) => `cell-${String(index)}`);
+  const panel2Ids = Array.from({ length: 2 }, (_, index) => `cell-${String(index)}`);
+  await seedStoredState(page, {
+    panels: [
+      { id: "panel-full", name: "Full", gridSize: 6, cellIds: panel1Ids },
+      { id: "panel-open", name: "Open", gridSize: 6, cellIds: panel2Ids }
+    ],
+    activePanelId: "panel-open",
+    cellsByPanel: {
+      "panel-full": Object.fromEntries(panel1Ids.map((id) => [id, makeStoredCell(id, mediaAsset.id)])),
+      "panel-open": {
+        "cell-0": makeStoredCell("cell-0", mediaAsset.id),
+        "cell-1": makeStoredCell("cell-1", null)
+      }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Ячейка 1 Filled" }).click();
+  await page.getByRole("button", { name: "Скопировать", exact: true }).click();
+  await page.getByRole("combobox", { name: "Панель" }).click();
+  await expect(page.getByRole("option", { name: "Full" })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "Open" })).toBeVisible();
+});
+
+test("disables copy for filled cells when every visible target cell is occupied", async ({ page }) => {
+  const mediaAsset = {
+    id: "media-full",
+    fileName: "full.wav",
+    alias: "Full",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 10000,
+    createdAt: new Date().toISOString()
+  };
+  const cellIds = Array.from({ length: 36 }, (_, index) => `cell-${String(index)}`);
+  await seedStoredState(page, {
+    panels: [{ id: "panel-full", name: "Full", gridSize: 6, cellIds }],
+    activePanelId: "panel-full",
+    cellsByPanel: {
+      "panel-full": Object.fromEntries(cellIds.map((id) => [id, makeStoredCell(id, mediaAsset.id)]))
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Ячейка 1 Full" }).click();
+  await expect(page.getByRole("button", { name: "Скопировать", exact: true })).toBeDisabled();
 });
 
 test("imports audio and assigns it to a grid cell", async ({ page }) => {

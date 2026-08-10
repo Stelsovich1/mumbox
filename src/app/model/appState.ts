@@ -79,6 +79,7 @@ export type AppAction =
       >;
     }
   | { type: "cell/move"; panelId: string; fromCellId: string; toCellId: string }
+  | { type: "cell/copy"; fromPanelId: string; fromCellId: string; toPanelId: string; toCellId: string }
   | { type: "cell/clear"; panelId: string; cellId: string }
   | { type: "volume/master"; value: number }
   | { type: "volume/muteToggle" }
@@ -258,7 +259,10 @@ function reducer(state: AppState, action: AppAction): AppState {
         panels,
         cellsByPanel: {
           ...state.cellsByPanel,
-          [panel.id]: ensurePanelCells(panel, state.cellsByPanel[panel.id])
+          [panel.id]: {
+            ...state.cellsByPanel[panel.id],
+            ...ensurePanelCells(panel, state.cellsByPanel[panel.id])
+          }
         }
       };
     }
@@ -370,6 +374,38 @@ function reducer(state: AppState, action: AppAction): AppState {
             [action.toCellId]: {
               ...fromCell,
               id: action.toCellId
+            }
+          }
+        }
+      };
+    }
+    case "cell/copy": {
+      const sourceCell = state.cellsByPanel[action.fromPanelId]?.[action.fromCellId];
+      const targetPanel = state.panels.find((candidate) => candidate.id === action.toPanelId);
+      const targetCells = state.cellsByPanel[action.toPanelId];
+      if (!sourceCell?.mediaId || !targetPanel || !targetCells || !targetPanel.cellIds.includes(action.toCellId)) {
+        return state;
+      }
+
+      const targetCell = targetCells[action.toCellId] ?? makeCell(action.toCellId);
+      if (targetCell.mediaId) {
+        return state;
+      }
+
+      const sourceMedia = state.media.find((media) => media.id === sourceCell.mediaId);
+      const copyAliasBase = sourceCell.aliasOverride.trim() || (sourceMedia?.fileName ?? "");
+
+      return {
+        ...state,
+        cellsByPanel: {
+          ...state.cellsByPanel,
+          [action.toPanelId]: {
+            ...targetCells,
+            [action.toCellId]: {
+              ...sourceCell,
+              id: action.toCellId,
+              aliasOverride: copyAliasBase ? `${copyAliasBase}_copy` : "",
+              hotkey: ""
             }
           }
         }
