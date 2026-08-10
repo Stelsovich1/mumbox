@@ -190,7 +190,14 @@ export function MediaLibraryDialog({
                   {item.fileName}
                 </Typography>
                 <Box
-                  sx={{ minWidth: 0, px: 1 }}
+                  sx={{
+                    minWidth: 0,
+                    px: 1,
+                    cursor: "text",
+                    "&:hover": {
+                      textDecoration: editingAliasId === item.id ? "none" : "underline"
+                    }
+                  }}
                   onDoubleClick={() => {
                     beginAliasEdit(item);
                   }}

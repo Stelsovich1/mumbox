@@ -169,6 +169,7 @@ export function WorkspaceGrid({
   onCellMove
 }: WorkspaceGridProps) {
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
+  const [draggingCellId, setDraggingCellId] = useState<string | null>(null);
   const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
   const pointerActivatedCellIdRef = useRef<string | null>(null);
   const touchDragRef = useRef<TouchDragState | null>(null);
@@ -290,6 +291,8 @@ export function WorkspaceGrid({
           const playingProgress = playingByCellKey.get(cellKey);
           const isPlaying = playingProgress !== undefined;
           const isSelected = editMode && selectedCellId === cell.id;
+          const isDragging =
+            draggingCellId === cell.id || (touchDrag?.active && touchDrag.fromCellId === cell.id);
           const progress = playingProgress ?? 0;
           const warmState = cell.mediaId
             ? warmedMedia.find((item) => item.mediaId === cell.mediaId)?.state ?? "idle"
@@ -328,11 +331,13 @@ export function WorkspaceGrid({
                   event.preventDefault();
                   return;
                 }
+                setDraggingCellId(cell.id);
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", cell.id);
               }}
               onDragEnd={() => {
                 suppressNextClick();
+                setDraggingCellId(null);
                 setDragOverCellId(null);
               }}
               onDragOver={(event) => {
@@ -348,6 +353,7 @@ export function WorkspaceGrid({
               }}
               onDrop={(event) => {
                 event.preventDefault();
+                setDraggingCellId(null);
                 setDragOverCellId(null);
                 const fromCellId = event.dataTransfer.getData("text/plain");
                 if (fromCellId) {
@@ -472,7 +478,13 @@ export function WorkspaceGrid({
                 backgroundColor: displayColor,
                 display: "grid",
                 placeItems: "center",
-                cursor: "pointer",
+                cursor: isDragging
+                  ? "grabbing"
+                  : editMode && mediaAsset
+                    ? "grab"
+                    : editMode || mediaAsset
+                      ? "pointer"
+                      : "default",
                 transition:
                   "transform 160ms ease, border-color 160ms ease, filter 160ms ease, background-color 160ms ease",
                 filter:
@@ -492,6 +504,9 @@ export function WorkspaceGrid({
                 "&:hover": {
                   transform: "translateY(-1px)",
                   borderColor: "primary.main"
+                },
+                '&[draggable="true"]:active': {
+                  cursor: "grabbing"
                 },
                 "&:focus-visible": {
                   outline: "2px solid",

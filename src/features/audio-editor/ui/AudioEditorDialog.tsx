@@ -175,6 +175,7 @@ function Waveform({
         height: { xs: 76, sm: 210 },
         overflowX: "auto",
         touchAction: "pan-x",
+        cursor: "pointer",
         border: 1,
         borderColor: "rgba(255, 107, 138, 0.42)",
         borderRadius: 2,

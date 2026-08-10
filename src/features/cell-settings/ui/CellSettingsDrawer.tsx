@@ -830,7 +830,8 @@ export function CellSettingsDrawer({
               display: "grid",
               placeItems: "center",
               color: capturedHotkey ? "primary.main" : "text.secondary",
-              backgroundColor: "rgba(5, 7, 13, 0.7)"
+              backgroundColor: "rgba(5, 7, 13, 0.7)",
+              cursor: "default"
             }}
           >
             {capturedHotkey || "Нажмите клавишу или комбинацию"}

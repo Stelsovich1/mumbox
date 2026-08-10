@@ -47,6 +47,39 @@ export const appTheme = createTheme({
     MuiButtonBase: {
       defaultProps: {
         disableRipple: false
+      },
+      styleOverrides: {
+        root: {
+          cursor: "pointer",
+          "&.Mui-disabled": {
+            cursor: "default"
+          }
+        }
+      }
+    },
+    MuiSlider: {
+      styleOverrides: {
+        root: {
+          cursor: "pointer",
+          "&.Mui-disabled": {
+            cursor: "default"
+          },
+          "&.Mui-disabled .MuiSlider-thumb": {
+            cursor: "default"
+          }
+        },
+        thumb: {
+          cursor: "grab",
+          "&.Mui-active": {
+            cursor: "grabbing"
+          }
+        },
+        rail: {
+          cursor: "pointer"
+        },
+        track: {
+          cursor: "pointer"
+        }
       }
     },
     MuiTooltip: {
