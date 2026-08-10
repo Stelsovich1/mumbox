@@ -37,6 +37,7 @@ type AudioRoute = {
 };
 
 const RELEASE_SECONDS = 0.018;
+const PROGRESS_EPSILON = 0.001;
 
 function isMediaId(value: string | null): value is string {
   return Boolean(value);
@@ -49,11 +50,36 @@ function getCellKey(panelId: string, cellId: string) {
 function getEffectiveVolume(masterVolume: number, cellVolumeOffset: number) {
   const normalizedMaster = masterVolume / 100;
   const offsetMultiplier = 1 + cellVolumeOffset / 100;
-  return Math.min(2, Math.max(0, normalizedMaster * offsetMultiplier));
+  return Math.min(4, Math.max(0, normalizedMaster * offsetMultiplier));
 }
 
 function getHtmlAudioVolume(volume: number) {
   return Math.min(1, Math.max(0, volume));
+}
+
+function getAudioContextState(context: AudioContext) {
+  return context.state as AudioContextState | "interrupted";
+}
+
+async function decodeAudioBlob(blob: Blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const context = new OfflineAudioContext(1, 1, 44_100);
+  return context.decodeAudioData(arrayBuffer);
+}
+
+function arePlayingCellsEqual(previous: PlayingCell[], next: PlayingCell[]) {
+  if (previous.length !== next.length) {
+    return false;
+  }
+
+  return previous.every((cell, index) => {
+    const nextCell = next[index];
+    return (
+      cell.cellKey === nextCell?.cellKey &&
+      cell.mediaId === nextCell.mediaId &&
+      Math.abs(cell.progress - nextCell.progress) < PROGRESS_EPSILON
+    );
+  });
 }
 
 function setRouteVolume(route: AudioRoute, volume: number) {
@@ -122,14 +148,24 @@ export function useAudioEngine(
   const routeByCellRef = useRef(new Map<string, AudioRoute>());
   const playTokenByCellRef = useRef(new Map<string, number>());
   const cellsRef = useRef(cells);
+  const panelIdRef = useRef(panelId);
+  const masterVolumeRef = useRef(masterVolume);
+  const masterMutedRef = useRef(masterMuted);
   const warmupRunRef = useRef(0);
   const frameRef = useRef<number | null>(null);
+  const playingCellsRef = useRef<PlayingCell[]>([]);
   const [playingCells, setPlayingCells] = useState<PlayingCell[]>([]);
   const [warmedMedia, setWarmedMedia] = useState<WarmedMediaState[]>([]);
 
   useEffect(() => {
     cellsRef.current = cells;
   }, [cells]);
+
+  useEffect(() => {
+    panelIdRef.current = panelId;
+    masterVolumeRef.current = masterVolume;
+    masterMutedRef.current = masterMuted;
+  }, [masterMuted, masterVolume, panelId]);
 
   const getContext = useCallback(() => {
     const current = contextRef.current;
@@ -141,11 +177,64 @@ export function useAudioEngine(
     return context;
   }, []);
 
+  const resumeContext = useCallback(async (context: AudioContext) => {
+    const state = getAudioContextState(context);
+    if (state === "running" || state === "closed") {
+      return context;
+    }
+
+    try {
+      await context.resume();
+    } catch {
+      // iOS may reject resume while the page is backgrounded; the next user tap retries.
+    }
+
+    return context;
+  }, []);
+
   const bumpCellToken = useCallback((cellKey: string) => {
     const nextToken = (playTokenByCellRef.current.get(cellKey) ?? 0) + 1;
     playTokenByCellRef.current.set(cellKey, nextToken);
     return nextToken;
   }, []);
+
+  const syncPlayingCells = useCallback((next: PlayingCell[]) => {
+    if (arePlayingCellsEqual(playingCellsRef.current, next)) {
+      return;
+    }
+
+    playingCellsRef.current = next;
+    setPlayingCells(next);
+  }, []);
+
+  const clearActiveRoutes = useCallback(() => {
+    routeByCellRef.current.forEach((route, cellKey) => {
+      bumpCellToken(cellKey);
+      stopRoute(route);
+    });
+    routeByCellRef.current.clear();
+    syncPlayingCells([]);
+  }, [bumpCellToken, syncPlayingCells]);
+
+  const getPlayableContext = useCallback(async () => {
+    let context = await resumeContext(getContext());
+    if (getAudioContextState(context) === "running") {
+      return context;
+    }
+
+    clearActiveRoutes();
+    try {
+      await context.close();
+    } catch {
+      // The context may already be unusable after an iOS audio interruption.
+    }
+    if (contextRef.current === context) {
+      contextRef.current = null;
+    }
+
+    context = await resumeContext(getContext());
+    return context;
+  }, [clearActiveRoutes, getContext, resumeContext]);
 
   const loadAudioBuffer = useCallback(
     (mediaId: string) => {
@@ -159,15 +248,14 @@ export function useAudioEngine(
           if (!blob) {
             return null;
           }
-          const context = getContext();
-          return context.decodeAudioData(await blob.arrayBuffer());
+          return decodeAudioBlob(blob);
         })
         .catch(() => null);
 
       bufferByMediaRef.current.set(mediaId, promise);
       return promise;
     },
-    [getContext]
+    []
   );
 
   const warmMedia = useCallback(
@@ -207,9 +295,9 @@ export function useAudioEngine(
         stopRoute(route);
         routeByCellRef.current.delete(cellKey);
       }
-      setPlayingCells((current) => current.filter((cell) => cell.cellKey !== cellKey));
+      syncPlayingCells(playingCellsRef.current.filter((cell) => cell.cellKey !== cellKey));
     },
-    [bumpCellToken]
+    [bumpCellToken, syncPlayingCells]
   );
 
   const stopCell = useCallback(
@@ -228,6 +316,89 @@ export function useAudioEngine(
   const isCellPlaying = useCallback(
     (cellId: string) => routeByCellRef.current.has(getCellKey(panelId, cellId)),
     [panelId]
+  );
+
+  const startProgressLoop = useCallback(() => {
+    if (frameRef.current !== null) {
+      return;
+    }
+
+    const tick = () => {
+      frameRef.current = null;
+      const current = playingCellsRef.current;
+      if (current.length === 0 && routeByCellRef.current.size === 0) {
+        return;
+      }
+
+      const endedCellKeys: string[] = [];
+      const nextPlayingCells = current.flatMap((cell) => {
+        const route = routeByCellRef.current.get(cell.cellKey);
+        if (!route) {
+          return [];
+        }
+        const gridCell = cellsRef.current.find(
+          (candidate) => getCellKey(panelIdRef.current, candidate.id) === cell.cellKey
+        );
+        if (!gridCell) {
+          return [cell];
+        }
+
+        const currentSeconds =
+          route.mode === "media" && route.audio
+            ? route.audio.currentTime
+            : route.offsetSeconds + (route.context.currentTime - route.startedAtContextTime);
+        const baseVolume = masterMutedRef.current
+          ? 0
+          : getEffectiveVolume(masterVolumeRef.current, gridCell.volumeOffset);
+        setRouteVolume(route, baseVolume);
+
+        if (route.mode === "media" && route.audio && currentSeconds >= route.endSeconds) {
+          if (gridCell.playbackMode === "loop") {
+            route.audio.currentTime = getTrimStartSeconds(gridCell);
+            scheduleEnvelope(route.envelopeGain, gridCell, route.audio.currentTime, route.endSeconds);
+          } else {
+            endedCellKeys.push(cell.cellKey);
+            return [];
+          }
+        }
+
+        if (route.mode === "media" && route.audio) {
+          route.audio.volume = getHtmlAudioVolume(
+            baseVolume * getEnvelopeValue(gridCell, currentSeconds, route.endSeconds)
+          );
+        }
+
+        const range = Math.max(0.1, route.endSeconds - route.offsetSeconds);
+        return [
+          {
+            ...cell,
+            progress: Math.min(1, Math.max(0, (currentSeconds - route.offsetSeconds) / range))
+          }
+        ];
+      });
+
+      syncPlayingCells(nextPlayingCells);
+      endedCellKeys.forEach((cellKey) => {
+        stopCellKey(cellKey);
+      });
+
+      if (routeByCellRef.current.size > 0 || playingCellsRef.current.length > 0) {
+        frameRef.current = requestAnimationFrame(tick);
+      }
+    };
+
+    frameRef.current = requestAnimationFrame(tick);
+  }, [stopCellKey, syncPlayingCells]);
+
+  const addPlayingCell = useCallback(
+    (cell: PlayingCell) => {
+      syncPlayingCells([
+        ...playingCellsRef.current.filter((playing) => playing.cellKey !== cell.cellKey),
+        cell
+      ]);
+      startProgressLoop();
+    },
+    [startProgressLoop, syncPlayingCells]
   );
 
   const startMediaElementFallback = useCallback(
@@ -278,13 +449,10 @@ export function useAudioEngine(
       if (context.state === "suspended") {
         await context.resume();
       }
-      setPlayingCells((current) => [
-        ...current.filter((playing) => playing.cellKey !== cellKey),
-        { cellKey, mediaId: mediaAsset.id, progress: 0 }
-      ]);
+      addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
       await audio.play();
     },
-    [masterMuted, masterVolume, stopCellKey]
+    [addPlayingCell, masterMuted, masterVolume, stopCellKey]
   );
 
   const startBufferRoute = useCallback(
@@ -341,12 +509,9 @@ export function useAudioEngine(
         stopCellKey(cellKey);
       };
       source.start(0, startSeconds, playDurationSeconds);
-      setPlayingCells((current) => [
-        ...current.filter((playing) => playing.cellKey !== cellKey),
-        { cellKey, mediaId: mediaAsset.id, progress: 0 }
-      ]);
+      addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
     },
-    [getContext, masterMuted, masterVolume, stopCellKey]
+    [addPlayingCell, getContext, masterMuted, masterVolume, stopCellKey]
   );
 
   const playCell = useCallback(
@@ -368,10 +533,7 @@ export function useAudioEngine(
       }
       const token = bumpCellToken(cellKey);
 
-      const context = getContext();
-      if (context.state === "suspended") {
-        await context.resume();
-      }
+      const context = await getPlayableContext();
 
       const canUseBufferSource = typeof context.createBufferSource === "function";
       if (canUseBufferSource) {
@@ -391,7 +553,7 @@ export function useAudioEngine(
     },
     [
       bumpCellToken,
-      getContext,
+      getPlayableContext,
       loadAudioBuffer,
       media,
       panelId,
@@ -402,6 +564,28 @@ export function useAudioEngine(
       stopOthers
     ]
   );
+
+  useEffect(() => {
+    const recoverContext = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      const context = contextRef.current;
+      if (!context || getAudioContextState(context) === "closed") {
+        return;
+      }
+      void resumeContext(context);
+    };
+
+    window.addEventListener("pageshow", recoverContext);
+    window.addEventListener("focus", recoverContext);
+    document.addEventListener("visibilitychange", recoverContext);
+    return () => {
+      window.removeEventListener("pageshow", recoverContext);
+      window.removeEventListener("focus", recoverContext);
+      document.removeEventListener("visibilitychange", recoverContext);
+    };
+  }, [resumeContext]);
 
   const toggleCell = useCallback(
     async (cell: GridCell) => {
@@ -465,60 +649,15 @@ export function useAudioEngine(
     });
   }, [cells, panelId]);
 
-  useEffect(() => {
-    const tick = () => {
-      setPlayingCells((current) =>
-        current.map((cell) => {
-          const route = routeByCellRef.current.get(cell.cellKey);
-          if (!route) {
-            return cell;
-          }
-          const gridCell = cellsRef.current.find(
-            (candidate) => getCellKey(panelId, candidate.id) === cell.cellKey
-          );
-          if (!gridCell) {
-            return cell;
-          }
-
-          const currentSeconds =
-            route.mode === "media" && route.audio
-              ? route.audio.currentTime
-              : route.offsetSeconds + (route.context.currentTime - route.startedAtContextTime);
-          const baseVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, gridCell.volumeOffset);
-          setRouteVolume(route, baseVolume);
-
-          if (route.mode === "media" && route.audio && currentSeconds >= route.endSeconds) {
-            if (gridCell.playbackMode === "loop") {
-              route.audio.currentTime = getTrimStartSeconds(gridCell);
-              scheduleEnvelope(route.envelopeGain, gridCell, route.audio.currentTime, route.endSeconds);
-            } else {
-              stopCellKey(cell.cellKey);
-            }
-          }
-
-          if (route.mode === "media" && route.audio) {
-            route.audio.volume = getHtmlAudioVolume(
-              baseVolume * getEnvelopeValue(gridCell, currentSeconds, route.endSeconds)
-            );
-          }
-
-          const range = Math.max(0.1, route.endSeconds - route.offsetSeconds);
-          return {
-            ...cell,
-            progress: Math.min(1, Math.max(0, (currentSeconds - route.offsetSeconds) / range))
-          };
-        })
-      );
-      frameRef.current = requestAnimationFrame(tick);
-    };
-
-    frameRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (frameRef.current) {
+  useEffect(
+    () => () => {
+      if (frameRef.current !== null) {
         cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
       }
-    };
-  }, [masterMuted, masterVolume, panelId, stopCellKey]);
+    },
+    []
+  );
 
   useEffect(
     () => () => {

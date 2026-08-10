@@ -14,7 +14,6 @@ import {
   FormControlLabel,
   IconButton,
   Slider,
-  TextField,
   Tooltip,
   Typography
 } from "@mui/material";
@@ -30,6 +29,7 @@ import {
   scheduleEnvelope
 } from "../../playback/model/audioEnvelope";
 import { formatDuration } from "../../../shared/lib/duration";
+import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 type AudioEditorDialogProps = {
   open: boolean;
@@ -59,7 +59,7 @@ type PreviewRoute = {
 
 const WAVEFORM_POINTS = 420;
 const VOLUME_OFFSET_MIN = -100;
-const VOLUME_OFFSET_MAX = 100;
+const VOLUME_OFFSET_MAX = 300;
 
 function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
@@ -82,7 +82,7 @@ function makeFallbackWaveform() {
 }
 
 function getPreviewVolume(volumeOffset: number) {
-  return Math.min(2, Math.max(0, 1 + volumeOffset / 100));
+  return Math.min(4, Math.max(0, 1 + volumeOffset / 100));
 }
 
 function formatVolumeOffset(volumeOffset: number) {
@@ -853,31 +853,31 @@ export function AudioEditorDialog({
                 }
               }}
             >
-              <TextField
+              <MobileLandscapeTextField
                 label="Начало сек"
                 type="number"
                 size="small"
                 value={rangeValue[0]}
                 slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
                 sx={compactNumberFieldSx}
-                onChange={(event) => {
+                onValueChange={(value) => {
                   setDraft((current) => ({
                     ...current,
-                    trimStartMs: Math.round(Math.max(0, Number(event.target.value)) * 1000)
+                    trimStartMs: Math.round(Math.max(0, Number(value)) * 1000)
                   }));
                 }}
               />
-              <TextField
+              <MobileLandscapeTextField
                 label="Конец сек"
                 type="number"
                 size="small"
                 value={rangeValue[1]}
                 slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
                 sx={compactNumberFieldSx}
-                onChange={(event) => {
+                onValueChange={(value) => {
                   setDraft((current) => ({
                     ...current,
-                    trimEndMs: Math.round(Math.min(durationMs / 1000, Number(event.target.value)) * 1000)
+                    trimEndMs: Math.round(Math.min(durationMs / 1000, Number(value)) * 1000)
                   }));
                 }}
               />
@@ -916,7 +916,7 @@ export function AudioEditorDialog({
               marks={[
                 { value: VOLUME_OFFSET_MIN, label: "-100%" },
                 { value: 0, label: "0%" },
-                { value: VOLUME_OFFSET_MAX, label: "+100%" }
+                { value: VOLUME_OFFSET_MAX, label: "+300%" }
               ]}
               value={draft.volumeOffset}
               onChange={(_, value: number | number[]) => {
@@ -926,11 +926,28 @@ export function AudioEditorDialog({
               size="small"
               sx={{
                 "& .MuiSlider-markLabel": {
-                  display: { xs: "none", sm: "block" }
+                  display: { xs: "none", sm: "block" },
+                  "@media (max-height: 480px)": {
+                    display: "block",
+                    top: 18,
+                    fontSize: 9,
+                    lineHeight: 1,
+                    whiteSpace: "nowrap"
+                  }
+                },
+                "@media (max-height: 480px)": {
+                  "& .MuiSlider-markLabel[data-index='0']": {
+                    transform: "translateX(0)",
+                    left: "0% !important"
+                  },
+                  "& .MuiSlider-markLabel[data-index='2']": {
+                    transform: "translateX(-100%)",
+                    left: "100% !important"
+                  }
                 }
               }}
             />
-            <TextField
+            <MobileLandscapeTextField
               label="Значение громкости аудио в редакторе"
               type="number"
               size="small"
@@ -938,8 +955,8 @@ export function AudioEditorDialog({
               value={draft.volumeOffset}
               slotProps={{ htmlInput: { min: VOLUME_OFFSET_MIN, max: VOLUME_OFFSET_MAX, step: 1 } }}
               sx={compactNumberFieldSx}
-              onChange={(event) => {
-                const nextValue = Number(event.target.value);
+              onValueChange={(value) => {
+                const nextValue = Number(value);
                 if (!Number.isFinite(nextValue)) {
                   return;
                 }
@@ -1001,17 +1018,17 @@ export function AudioEditorDialog({
                 }
                 label="Нарастание"
               />
-              <TextField
+              <MobileLandscapeTextField
                 label="Секунды"
                 type="number"
                 size="small"
                 value={draft.fadeInMs / 1000}
                 slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
                 sx={compactNumberFieldSx}
-                onChange={(event) => {
+                onValueChange={(value) => {
                   setDraft((current) => ({
                     ...current,
-                    fadeInMs: Math.max(0, Number(event.target.value) * 1000)
+                    fadeInMs: Math.max(0, Number(value) * 1000)
                   }));
                 }}
               />
@@ -1039,17 +1056,17 @@ export function AudioEditorDialog({
                 }
                 label="Затухание"
               />
-              <TextField
+              <MobileLandscapeTextField
                 label="Секунды"
                 type="number"
                 size="small"
                 value={draft.fadeOutMs / 1000}
                 slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
                 sx={compactNumberFieldSx}
-                onChange={(event) => {
+                onValueChange={(value) => {
                   setDraft((current) => ({
                     ...current,
-                    fadeOutMs: Math.max(0, Number(event.target.value) * 1000)
+                    fadeOutMs: Math.max(0, Number(value) * 1000)
                   }));
                 }}
               />

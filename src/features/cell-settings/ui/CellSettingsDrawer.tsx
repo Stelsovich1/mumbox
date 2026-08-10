@@ -36,6 +36,7 @@ import { Panel } from "../../../entities/panel/model/types";
 import { AudioEditorDialog } from "../../../features/audio-editor";
 import { formatDuration } from "../../../shared/lib/duration";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
+import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
@@ -80,11 +81,16 @@ export function CellSettingsDrawer({
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
   const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
+  const [aliasDraft, setAliasDraft] = useState("");
   const hotkeyCaptureRef = useRef<HTMLDivElement | null>(null);
+  const aliasDraftSeedRef = useRef("");
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
   const cellId = cell?.id ?? null;
   const cellMediaId = cell?.mediaId ?? null;
   const selectedMedia = media.find((item) => item.id === cell?.mediaId) ?? null;
+  const defaultAliasName = selectedMedia?.alias.trim()
+    ? selectedMedia.alias
+    : selectedMedia?.fileName ?? "";
   const filteredMedia = useMemo(
     () =>
       media.filter((item) => {
@@ -141,15 +147,25 @@ export function CellSettingsDrawer({
     });
   }, [hotkeyDialogOpen]);
 
+  useEffect(() => {
+    if (!open || !cellId || !selectedMedia) {
+      aliasDraftSeedRef.current = "";
+      setAliasDraft("");
+      return;
+    }
+
+    const seedKey = `${cellId}:${cellMediaId ?? ""}`;
+    if (aliasDraftSeedRef.current === seedKey) {
+      return;
+    }
+    aliasDraftSeedRef.current = seedKey;
+    setAliasDraft(cell?.aliasOverride.trim() ? cell.aliasOverride : defaultAliasName);
+  }, [cell?.aliasOverride, cellId, cellMediaId, defaultAliasName, open, selectedMedia]);
+
   if (!open || !cell) {
     return null;
   }
 
-  const shownName = cell.aliasOverride.trim()
-    ? cell.aliasOverride
-    : selectedMedia?.alias.trim()
-      ? selectedMedia.alias
-      : selectedMedia?.fileName ?? "";
   const shownColor = cell.colorOverride ?? selectedMedia?.color ?? "#ec5aa7";
   const pendingDeleteMedia = media.find((item) => item.id === pendingDeleteMediaId) ?? null;
   const canClearCell =
@@ -319,20 +335,22 @@ export function CellSettingsDrawer({
                 <EditIcon />
               </IconButton>
             </Box>
-            <TextField
+            <MobileLandscapeTextField
               label="Псевдоним"
-              value={shownName}
+              value={aliasDraft}
               slotProps={{
                 htmlInput: {
-                  "aria-label": "Псевдоним ячейки"
+                  "aria-label": "Псевдоним ячейки",
+                  placeholder: defaultAliasName
                 }
               }}
-              onChange={(event) => {
+              onValueChange={(value) => {
+                setAliasDraft(value);
                 dispatch({
                   type: "cell/update",
                   panelId,
                   cellId: cell.id,
-                  patch: { aliasOverride: event.target.value }
+                  patch: { aliasOverride: value }
                 });
               }}
             />
@@ -427,12 +445,12 @@ export function CellSettingsDrawer({
 
           {pickerOpen ? (
           <Box sx={{ display: "grid", gap: 1, minWidth: 0 }}>
-            <TextField
+            <MobileLandscapeTextField
               label="Поиск"
               value={query}
               size="small"
-              onChange={(event) => {
-                setQuery(event.target.value);
+              onValueChange={(value) => {
+                setQuery(value);
               }}
               slotProps={{
                 htmlInput: {

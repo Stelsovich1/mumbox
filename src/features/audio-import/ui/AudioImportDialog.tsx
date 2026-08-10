@@ -12,7 +12,6 @@ import {
   DialogTitle,
   IconButton,
   Snackbar,
-  TextField,
   Tooltip,
   Typography
 } from "@mui/material";
@@ -24,6 +23,7 @@ import { MediaAsset } from "../../../entities/media/model/types";
 import { CELL_COLORS } from "../../../shared/config/colorPalette";
 import { formatDuration, readAudioDurationMs } from "../../../shared/lib/duration";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
+import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 type MediaDraft = ReturnType<typeof makeMediaDraft>;
 
@@ -232,7 +232,7 @@ export function AudioImportDialog({
       >
         <DialogTitle>Импорт аудио</DialogTitle>
         <DialogContent sx={{ overflowX: "auto", p: { xs: 1, sm: 3 } }}>
-          <TextField
+          <MobileLandscapeTextField
             label="Поиск по имени файла"
             value={query}
             size="small"
@@ -248,8 +248,8 @@ export function AudioImportDialog({
                 "aria-label": "Поиск импортируемых аудио"
               }
             }}
-            onChange={(event) => {
-              setQuery(event.target.value);
+            onValueChange={(value) => {
+              setQuery(value);
               setScrollTop(0);
               if (bodyRef.current) {
                 bodyRef.current.scrollTop = 0;
@@ -417,7 +417,7 @@ export function AudioImportDialog({
                     />
                   </Box>
                   <Box role="cell" sx={{ px: 1 }}>
-                    <TextField
+                    <MobileLandscapeTextField
                       value={draft.alias}
                       size="small"
                       slotProps={{
@@ -425,8 +425,8 @@ export function AudioImportDialog({
                           "aria-label": `Псевдоним ${draft.fileName}`
                         }
                       }}
-                      onChange={(event) => {
-                        updateDraft(draft.id, { alias: event.target.value });
+                      onValueChange={(value) => {
+                        updateDraft(draft.id, { alias: value });
                       }}
                     />
                   </Box>

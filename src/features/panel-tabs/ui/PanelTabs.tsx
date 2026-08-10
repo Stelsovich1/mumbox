@@ -1,10 +1,11 @@
 import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
-import { Box, IconButton, Tab, Tabs, TextField, Tooltip } from "@mui/material";
+import { Box, IconButton, Tab, Tabs, Tooltip } from "@mui/material";
 import { KeyboardEvent, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { Panel } from "../../../entities/panel/model/types";
+import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 type PanelTabsProps = {
   panels: Panel[];
@@ -25,7 +26,7 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
     setRenamingPanelId(null);
   };
 
-  const handleRenameKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const handleRenameKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Enter") {
       commitRename();
     }
@@ -78,7 +79,7 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
             value={panel.id}
             label={
               renamingPanelId === panel.id ? (
-                <TextField
+                <MobileLandscapeTextField
                   value={draftName}
                   autoFocus
                   size="small"
@@ -88,8 +89,14 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                       "aria-label": "Название панели"
                     }
                   }}
-                  onChange={(event) => {
-                    setDraftName(event.target.value);
+                  onValueChange={(value) => {
+                    setDraftName(value);
+                  }}
+                  onMobileCommit={(value) => {
+                    if (renamingPanelId) {
+                      dispatch({ type: "panel/rename", panelId: renamingPanelId, name: value });
+                      setRenamingPanelId(null);
+                    }
                   }}
                   onBlur={commitRename}
                   onKeyDown={handleRenameKeyDown}
@@ -124,6 +131,7 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                     <Tooltip title="Удалить панель">
                       <IconButton
                         className="panel-delete-button"
+                        component="span"
                         aria-label={`Удалить панель ${panel.name}`}
                         size="small"
                         onClick={(event) => {

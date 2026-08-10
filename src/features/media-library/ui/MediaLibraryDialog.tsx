@@ -8,7 +8,6 @@ import {
   DialogTitle,
   IconButton,
   Snackbar,
-  TextField,
   Tooltip,
   Typography
 } from "@mui/material";
@@ -19,6 +18,7 @@ import { MediaAsset } from "../../../entities/media/model/types";
 import { CELL_COLORS } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
+import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 type MediaLibraryDialogProps = {
   open: boolean;
@@ -94,14 +94,14 @@ export function MediaLibraryDialog({
         <DialogTitle>Медиатека</DialogTitle>
         <DialogContent sx={{ overflowX: "auto", p: { xs: 1, sm: 3 } }}>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.5, alignItems: "center", mb: 2 }}>
-            <TextField
+            <MobileLandscapeTextField
               label="Поиск по имени"
               value={query}
               size="small"
               sx={{ width: { xs: "100%", sm: 340 } }}
               slotProps={{ htmlInput: { "aria-label": "Поиск по медиатеке" } }}
-              onChange={(event) => {
-                setQuery(event.target.value);
+              onValueChange={(value) => {
+                setQuery(value);
               }}
             />
             <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, alignItems: "center" }}>
@@ -199,17 +199,17 @@ export function MediaLibraryDialog({
                   }}
                 >
                   {editingAliasId === item.id ? (
-                    <TextField
+                    <MobileLandscapeTextField
                       autoFocus
                       value={draftAlias}
                       size="small"
                       fullWidth
                       aria-label={`Псевдоним ${item.fileName}`}
-                      onChange={(event) => {
-                        const alias = event.target.value;
-                        setDraftAlias(alias);
-                        dispatch({ type: "media/update", mediaId: item.id, alias });
+                      onValueChange={(value) => {
+                        setDraftAlias(value);
+                        dispatch({ type: "media/update", mediaId: item.id, alias: value });
                       }}
+                      onMobileCommit={finishAliasEdit}
                       onBlur={finishAliasEdit}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") {

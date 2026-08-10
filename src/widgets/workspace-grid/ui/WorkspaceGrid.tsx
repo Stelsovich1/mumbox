@@ -305,7 +305,7 @@ export function WorkspaceGrid({
 
           return (
             <Box
-              key={cell.id}
+              key={cellKey}
               component="button"
               type="button"
               data-cell-id={cell.id}
