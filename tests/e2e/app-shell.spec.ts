@@ -307,7 +307,7 @@ test("renders the MUMBOX shell", async ({ page }) => {
   await expect(page.getByText("MUMBOX", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Проект" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Panel 1" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Добавить панель" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Добавить панель" })).toHaveCount(0);
   await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
   await expect(page.getByLabel("Общая громкость")).toBeVisible();
 });
@@ -409,6 +409,7 @@ test("exports, resets, and imports a project with audio", async ({
 test("warns before overwriting layout on project import", async ({ page }) => {
   await page.goto("/");
 
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await openFileMenu(page);
   await expect(page.getByText("Импорт проекта")).toBeVisible();
@@ -422,6 +423,12 @@ test("warns before overwriting layout on project import", async ({ page }) => {
 test("manages panels and grid size", async ({ page }) => {
   await page.goto("/");
 
+  await expect(page.getByRole("button", { name: "Добавить панель" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Panel 1" }).dblclick();
+  await expect(page.getByLabel("Название панели")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await expect(page.locator("header")).toHaveCSS("border-bottom-color", "rgb(255, 204, 102)");
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await expect(page.getByRole("tab", { name: "Panel 2" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Удалить панель Panel 1" })).toHaveCount(0);
@@ -443,6 +450,32 @@ test("manages panels and grid size", async ({ page }) => {
   await page.getByRole("button", { name: "6x6" }).click();
   await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
   await expect(page.getByRole("button", { name: /Пустая ячейка/ })).toHaveCount(36);
+});
+
+test("renames panels from double tap on mobile landscape in edit mode", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "double tap rename is mobile-specific");
+  await page.goto("/");
+
+  await page.getByRole("tab", { name: "Panel 1" }).dblclick();
+  await expect(page.getByLabel("Название панели")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Добавить панель" }).click();
+  const panelTab = page.getByRole("tab", { name: "Panel 2" });
+  const panelBox = await panelTab.boundingBox();
+  if (!panelBox) {
+    throw new Error("Panel tab box is not available");
+  }
+
+  const tapX = panelBox.x + panelBox.width / 2;
+  const tapY = panelBox.y + panelBox.height / 2;
+  await page.touchscreen.tap(tapX, tapY);
+  await page.waitForTimeout(80);
+  await page.touchscreen.tap(tapX, tapY);
+
+  await page.getByLabel("Название панели").fill("Mobile Launch");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("tab", { name: "Mobile Launch" })).toBeVisible();
 });
 
 test("keeps cells outside the smaller grid after switching 12x12 to 6x6 and back", async ({ page }) => {
@@ -478,8 +511,10 @@ test("does not show playback state from another panel on empty cells", async ({ 
   await installAudioMock(page);
   await page.goto("/");
 
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await page.getByRole("tab", { name: "Panel 1" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
   await importAudio(page, "Panel One Pad");
   await assignFirstCell(page);
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
@@ -522,8 +557,10 @@ test("copies a configured cell to another panel and hides panels without free ce
   await installAudioMock(page);
   await page.goto("/");
 
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
   await page.getByRole("button", { name: "Добавить панель" }).click();
   await page.getByRole("tab", { name: "Panel 1" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
   await importAudio(page, "Shared Pad");
   await assignFirstCell(page);
   await page.getByRole("button", { name: "Скопировать", exact: true }).click();

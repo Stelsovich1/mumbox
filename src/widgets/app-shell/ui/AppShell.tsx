@@ -606,7 +606,7 @@ export function AppShell() {
           gap: 1.5,
           px: 1.5,
           borderBottom: 1,
-          borderColor: "divider",
+          borderColor: state.editMode ? "secondary.main" : "divider",
           backgroundColor: "rgba(5, 7, 13, 0.78)",
           backdropFilter: "blur(18px)",
           "@media (orientation: landscape) and (max-height: 430px)": {
@@ -763,6 +763,7 @@ export function AppShell() {
           <PanelTabs
             panels={state.panels}
             activePanelId={state.activePanelId}
+            editMode={state.editMode}
             dispatch={dispatch}
             onDeletePanel={(panelId) => {
               stopAll();

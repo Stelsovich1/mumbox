@@ -1,7 +1,7 @@
 import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
 import { Box, IconButton, Tab, Tabs, Tooltip } from "@mui/material";
-import { KeyboardEvent, useState } from "react";
+import { KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { Panel } from "../../../entities/panel/model/types";
@@ -10,20 +10,54 @@ import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeText
 type PanelTabsProps = {
   panels: Panel[];
   activePanelId: string;
+  editMode: boolean;
   dispatch: React.Dispatch<AppAction>;
   onDeletePanel: (panelId: string) => void;
 };
 
-export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: PanelTabsProps) {
+export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeletePanel }: PanelTabsProps) {
   const [renamingPanelId, setRenamingPanelId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  const lastTouchTapRef = useRef<{ panelId: string; time: number } | null>(null);
+
+  useEffect(() => {
+    if (!editMode) {
+      setRenamingPanelId(null);
+    }
+  }, [editMode]);
 
   const commitRename = () => {
-    if (!renamingPanelId) {
+    if (!renamingPanelId || !editMode) {
       return;
     }
     dispatch({ type: "panel/rename", panelId: renamingPanelId, name: draftName });
     setRenamingPanelId(null);
+  };
+
+  const startRename = (panel: Panel) => {
+    if (!editMode) {
+      return;
+    }
+    setRenamingPanelId(panel.id);
+    setDraftName(panel.name);
+  };
+
+  const handlePanelPointerUp = (event: ReactPointerEvent<HTMLElement>, panel: Panel) => {
+    if (!editMode || event.pointerType === "mouse") {
+      return;
+    }
+
+    const now = window.performance.now();
+    const previousTap = lastTouchTapRef.current;
+    if (previousTap?.panelId === panel.id && now - previousTap.time < 420) {
+      event.preventDefault();
+      event.stopPropagation();
+      lastTouchTapRef.current = null;
+      startRename(panel);
+      return;
+    }
+
+    lastTouchTapRef.current = { panelId: panel.id, time: now };
   };
 
   const handleRenameKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -110,7 +144,7 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                     alignItems: "center",
                     minWidth: 0,
                     maxWidth: 150,
-                    pr: panel === panels[0] ? 0 : 2.5,
+                    pr: editMode && panel !== panels[0] ? 2.5 : 0,
                     "&:hover .panel-delete-button, &:focus-within .panel-delete-button": {
                       opacity: 1,
                       pointerEvents: "auto"
@@ -127,7 +161,7 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                   >
                     {panel.name}
                   </Box>
-                  {panel !== panels[0] ? (
+                  {editMode && panel !== panels[0] ? (
                     <Tooltip title="Удалить панель">
                       <IconButton
                         className="panel-delete-button"
@@ -165,10 +199,24 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
                           "@media (hover: none)": {
                             opacity: 1,
                             pointerEvents: "auto"
+                          },
+                          "@media (orientation: landscape) and (max-height: 430px)": {
+                            top: -4,
+                            right: -8,
+                            width: 26,
+                            height: 26,
+                            p: 0.25
                           }
                         }}
                       >
-                        <CloseIcon sx={{ fontSize: 14 }} />
+                        <CloseIcon
+                          sx={{
+                            fontSize: 14,
+                            "@media (orientation: landscape) and (max-height: 430px)": {
+                              fontSize: 18
+                            }
+                          }}
+                        />
                       </IconButton>
                     </Tooltip>
                   ) : null}
@@ -176,8 +224,10 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
               )
             }
             onDoubleClick={() => {
-              setRenamingPanelId(panel.id);
-              setDraftName(panel.name);
+              startRename(panel);
+            }}
+            onPointerUp={(event) => {
+              handlePanelPointerUp(event, panel);
             }}
             sx={{
               minHeight: 42,
@@ -190,24 +240,26 @@ export function PanelTabs({ panels, activePanelId, dispatch, onDeletePanel }: Pa
           />
         ))}
       </Tabs>
-      <Tooltip title="Добавить панель">
-        <IconButton
-          aria-label="Добавить панель"
-          size="small"
-          onClick={() => {
-            dispatch({ type: "panel/add" });
-          }}
-          sx={{
-            "@media (orientation: landscape) and (max-height: 430px)": {
-              width: 28,
-              height: 28,
-              p: 0.25
-            }
-          }}
-        >
-          <AddIcon />
-        </IconButton>
-      </Tooltip>
+      {editMode ? (
+        <Tooltip title="Добавить панель">
+          <IconButton
+            aria-label="Добавить панель"
+            size="small"
+            onClick={() => {
+              dispatch({ type: "panel/add" });
+            }}
+            sx={{
+              "@media (orientation: landscape) and (max-height: 430px)": {
+                width: 28,
+                height: 28,
+                p: 0.25
+              }
+            }}
+          >
+            <AddIcon />
+          </IconButton>
+        </Tooltip>
+      ) : null}
     </>
   );
 }

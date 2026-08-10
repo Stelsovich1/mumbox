@@ -192,6 +192,10 @@ export function serializeState(state: AppState): SerializableAppState {
 function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "panel/add": {
+      if (!state.editMode) {
+        return state;
+      }
+
       const panel = makePanel(`Panel ${String(state.panels.length + 1)}`);
       return {
         ...state,
@@ -206,6 +210,10 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "panel/select":
       return { ...state, activePanelId: action.panelId };
     case "panel/rename":
+      if (!state.editMode) {
+        return state;
+      }
+
       return {
         ...state,
         panels: state.panels.map((panel) =>
@@ -213,6 +221,10 @@ function reducer(state: AppState, action: AppAction): AppState {
         )
       };
     case "panel/delete": {
+      if (!state.editMode) {
+        return state;
+      }
+
       const panelIndex = state.panels.findIndex((panel) => panel.id === action.panelId);
       if (panelIndex <= 0 || state.panels.length <= 1) {
         return state;
