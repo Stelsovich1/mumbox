@@ -22,6 +22,76 @@ const longAudioFile = {
   buffer: Buffer.from("RIFF....WAVEfmt ")
 };
 
+function makeCrc32Table() {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+}
+
+const crc32Table = makeCrc32Table();
+
+function getCrc32(buffer: Buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = (crc32Table[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function makeStoredZip(entries: { name: string; data: Buffer }[]) {
+  const fileParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name);
+    const crc32 = getCrc32(entry.data);
+    const local = Buffer.alloc(30 + name.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(crc32, 14);
+    local.writeUInt32LE(entry.data.length, 18);
+    local.writeUInt32LE(entry.data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    name.copy(local, 30);
+    fileParts.push(local, entry.data);
+
+    const central = Buffer.alloc(46 + name.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(crc32, 16);
+    central.writeUInt32LE(entry.data.length, 20);
+    central.writeUInt32LE(entry.data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    name.copy(central, 46);
+    centralParts.push(central);
+    offset += local.length + entry.data.length;
+  }
+
+  const centralOffset = offset;
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(centralOffset, 16);
+
+  return Buffer.concat([...fileParts, ...centralParts, end]);
+}
+
 const textFile = {
   name: "notes.txt",
   mimeType: "text/plain",
@@ -494,7 +564,7 @@ test("warns for large project files and rejects unsupported project audio", asyn
 
   const unsupportedProject = {
     kind: "mumbox-project",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     state: {
       panels: [{ id: "panel-test", name: "Panel 1", gridSize: 8, cellIds: ["cell-0"] }],
@@ -539,13 +609,18 @@ test("warns for large project files and rejects unsupported project audio", asyn
         id: "media-test",
         fileName: "unsupported.flac",
         mimeType: "audio/flac",
-        size: 4,
-        dataBase64: Buffer.from("fLaC").toString("base64")
+        size: 4
       }
     ]
   };
   const unsupportedProjectPath = join(tmpdir(), `unsupported-mumbox-${Date.now().toString()}.mumbox`);
-  await writeFile(unsupportedProjectPath, JSON.stringify(unsupportedProject));
+  await writeFile(
+    unsupportedProjectPath,
+    makeStoredZip([
+      { name: "project.json", data: Buffer.from(JSON.stringify(unsupportedProject)) },
+      { name: "media/media-test", data: Buffer.from("fLaC") }
+    ])
+  );
   await page.getByTestId("project-file-input").setInputFiles(unsupportedProjectPath);
   await expect(page.getByText("Проект содержит неподдерживаемый формат: unsupported.flac")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ячейка 1 Unsupported" })).toHaveCount(0);

@@ -16,6 +16,11 @@ type PlayingCell = {
   progress: number;
 };
 
+type WarmedMediaState = {
+  mediaId: string;
+  state: "warming" | "ready";
+};
+
 type AudioRoute = {
   mode: "buffer" | "media";
   context: AudioContext;
@@ -32,6 +37,10 @@ type AudioRoute = {
 };
 
 const RELEASE_SECONDS = 0.018;
+
+function isMediaId(value: string | null): value is string {
+  return Boolean(value);
+}
 
 function getEffectiveVolume(masterVolume: number, cellVolumeOffset: number) {
   const normalizedMaster = masterVolume / 100;
@@ -108,8 +117,10 @@ export function useAudioEngine(
   const routeByCellRef = useRef(new Map<string, AudioRoute>());
   const playTokenByCellRef = useRef(new Map<string, number>());
   const cellsRef = useRef(cells);
+  const warmupRunRef = useRef(0);
   const frameRef = useRef<number | null>(null);
   const [playingCells, setPlayingCells] = useState<PlayingCell[]>([]);
+  const [warmedMedia, setWarmedMedia] = useState<WarmedMediaState[]>([]);
 
   useEffect(() => {
     cellsRef.current = cells;
@@ -152,6 +163,35 @@ export function useAudioEngine(
       return promise;
     },
     [getContext]
+  );
+
+  const warmMedia = useCallback(
+    async (mediaId: string) => {
+      setWarmedMedia((current) => {
+        if (current.some((item) => item.mediaId === mediaId)) {
+          return current;
+        }
+        return [...current, { mediaId, state: "warming" }];
+      });
+      const buffer = await loadAudioBuffer(mediaId);
+      setWarmedMedia((current) => {
+        if (!current.some((item) => item.mediaId === mediaId)) {
+          return current;
+        }
+        if (!buffer) {
+          return current.filter((item) => item.mediaId !== mediaId);
+        }
+        return current.map((item) =>
+          item.mediaId === mediaId
+            ? {
+                ...item,
+                state: "ready"
+              }
+            : item
+        );
+      });
+    },
+    [loadAudioBuffer]
   );
 
   const stopCell = useCallback(
@@ -358,6 +398,33 @@ export function useAudioEngine(
   );
 
   useEffect(() => {
+    const runId = warmupRunRef.current + 1;
+    warmupRunRef.current = runId;
+    const mediaIds = Array.from(new Set(cells.map((cell) => cell.mediaId).filter(isMediaId)));
+
+    void (async () => {
+      for (const mediaId of mediaIds) {
+        if (warmupRunRef.current !== runId) {
+          return;
+        }
+        if (bufferByMediaRef.current.has(mediaId)) {
+          setWarmedMedia((current) => {
+            if (current.some((item) => item.mediaId === mediaId)) {
+              return current;
+            }
+            return [...current, { mediaId, state: "ready" }];
+          });
+          continue;
+        }
+        await warmMedia(mediaId);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 70);
+        });
+      }
+    })();
+  }, [cells, warmMedia]);
+
+  useEffect(() => {
     routeByCellRef.current.forEach((route, cellId) => {
       const cell = cellsRef.current.find((candidate) => candidate.id === cellId);
       const nextVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, cell?.volumeOffset ?? 0);
@@ -442,5 +509,5 @@ export function useAudioEngine(
     [stopAll]
   );
 
-  return { playingCells, playCell, toggleCell, stopCell, stopAll, isCellPlaying };
+  return { playingCells, warmedMedia, playCell, toggleCell, stopCell, stopAll, isCellPlaying };
 }

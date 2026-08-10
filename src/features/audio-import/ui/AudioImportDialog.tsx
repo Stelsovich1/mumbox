@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { makeMediaDraft, saveImportedMedia } from "../../../app/model/appState";
+import { MediaStorageProgress } from "../../../app/model/appState";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { CELL_COLORS } from "../../../shared/config/colorPalette";
 import { formatDuration, readAudioDurationMs } from "../../../shared/lib/duration";
@@ -33,6 +34,7 @@ type AudioImportDialogProps = {
   onSave: (media: MediaAsset[]) => void;
   onReady: () => void;
   onLoadingChange: (loading: boolean) => void;
+  onProgress?: (progress: MediaStorageProgress | null) => void;
 };
 
 const IMPORT_ROW_HEIGHT = 74;
@@ -53,7 +55,8 @@ export function AudioImportDialog({
   onCancel,
   onSave,
   onReady,
-  onLoadingChange
+  onLoadingChange,
+  onProgress
 }: AudioImportDialogProps) {
   const [drafts, setDrafts] = useState<MediaDraft[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -70,6 +73,7 @@ export function AudioImportDialog({
 
     if (open) {
       onLoadingChange(true);
+      onProgress?.({ completed: 0, total: files.length, label: "Чтение длительности аудио" });
       const nextDrafts = files.map((file, index) => makeMediaDraft(file, index));
       setDrafts(nextDrafts);
       setSelectedIds([]);
@@ -97,6 +101,11 @@ export function AudioImportDialog({
                 durations.find((duration) => duration.id === draft.id)?.durationMs ?? draft.durationMs
             }))
           );
+          onProgress?.({
+            completed: Math.min(index + batch.length, nextDrafts.length),
+            total: nextDrafts.length,
+            label: `Чтение длительности ${String(Math.min(index + batch.length, nextDrafts.length))} из ${String(nextDrafts.length)}`
+          });
           await waitForPaint();
         }
         if (!status.cancelled) {
@@ -105,6 +114,7 @@ export function AudioImportDialog({
             bodyRef.current.scrollTop = 0;
           }
           onLoadingChange(false);
+          onProgress?.(null);
           onReady();
         }
       })();
@@ -113,7 +123,7 @@ export function AudioImportDialog({
     return () => {
       status.cancelled = true;
     };
-  }, [files, onLoadingChange, onReady, open]);
+  }, [files, onLoadingChange, onProgress, onReady, open]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const filteredDrafts = useMemo(() => {
@@ -191,7 +201,11 @@ export function AudioImportDialog({
   const handleSave = async () => {
     stopPreview();
     onLoadingChange(true);
-    const media = await saveImportedMedia(drafts.filter((draft) => selectedSet.has(draft.id)));
+    const media = await saveImportedMedia(
+      drafts.filter((draft) => selectedSet.has(draft.id)),
+      onProgress
+    );
+    onProgress?.(null);
     onLoadingChange(false);
     onSave(media);
   };

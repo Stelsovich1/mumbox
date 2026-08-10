@@ -13,6 +13,7 @@ type WorkspaceGridProps = {
   editMode: boolean;
   selectedCellId: string | null;
   playingCells: { cellId: string; progress: number }[];
+  warmedMedia: { mediaId: string; state: "warming" | "ready" }[];
   onCellClick: (cell: GridCell) => void;
   onGateStart: (cell: GridCell) => void;
   onGateEnd: (cell: GridCell) => void;
@@ -159,6 +160,7 @@ export function WorkspaceGrid({
   editMode,
   selectedCellId,
   playingCells,
+  warmedMedia,
   onCellClick,
   onGateStart,
   onGateEnd,
@@ -281,6 +283,9 @@ export function WorkspaceGrid({
           const isPlaying = playingCells.some((item) => item.cellId === cell.id);
           const isSelected = editMode && selectedCellId === cell.id;
           const progress = playingCells.find((item) => item.cellId === cell.id)?.progress ?? 0;
+          const warmState = cell.mediaId
+            ? warmedMedia.find((item) => item.mediaId === cell.mediaId)?.state ?? "idle"
+            : "idle";
           const activeDragOverCellId = touchDrag?.overCellId ?? dragOverCellId;
           const displayColor = mediaAsset
             ? isPlaying
@@ -297,6 +302,7 @@ export function WorkspaceGrid({
               type="button"
               data-cell-id={cell.id}
               data-playing={isPlaying ? "true" : "false"}
+              data-warm-state={warmState}
               data-playback-mode={cell.playbackMode}
               data-hotkey={cell.hotkey}
               data-volume-offset={cell.volumeOffset}
@@ -469,6 +475,12 @@ export function WorkspaceGrid({
                   activeDragOverCellId === cell.id
                     ? "0 0 0 2px rgba(255, 204, 102, 0.54), 0 0 18px rgba(255, 204, 102, 0.26)"
                     : "none",
+                "&[data-warm-state='warming']": {
+                  animation: "mumbox-cell-warm 720ms ease-in-out infinite"
+                },
+                "&[data-warm-state='ready']:not([data-playing='true'])": {
+                  animation: "mumbox-cell-ready 620ms ease-out 1"
+                },
                 "&:hover": {
                   transform: "translateY(-1px)",
                   borderColor: "primary.main"

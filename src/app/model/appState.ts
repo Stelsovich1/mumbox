@@ -1,4 +1,4 @@
-import { clear, get, set } from "idb-keyval";
+import { clear, del, get, set } from "idb-keyval";
 import { useEffect, useMemo, useReducer } from "react";
 
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
@@ -33,6 +33,12 @@ type ImportMediaDraft = {
   mimeType: string;
   size: number;
   durationMs: number | null;
+};
+
+export type MediaStorageProgress = {
+  completed: number;
+  total: number;
+  label: string;
 };
 
 export type AppAction =
@@ -425,12 +431,18 @@ export function useAppStore() {
   return { state, activePanel, dispatch };
 }
 
-export async function saveImportedMedia(drafts: ImportMediaDraft[]) {
-  await Promise.all(
-    drafts.map(async (draft) => {
-      await set(`${MEDIA_BLOB_PREFIX}${draft.id}`, draft.file);
-    })
-  );
+export async function saveImportedMedia(
+  drafts: ImportMediaDraft[],
+  onProgress?: (progress: MediaStorageProgress) => void
+) {
+  for (const [index, draft] of drafts.entries()) {
+    await set(`${MEDIA_BLOB_PREFIX}${draft.id}`, draft.file);
+    onProgress?.({
+      completed: index + 1,
+      total: drafts.length,
+      label: `Сохранение аудио ${String(index + 1)} из ${String(drafts.length)}`
+    });
+  }
 
   return drafts.map<MediaAsset>((draft) => ({
     id: draft.id,
@@ -448,9 +460,57 @@ export async function getMediaBlob(mediaId: string) {
   return get<Blob>(`${MEDIA_BLOB_PREFIX}${mediaId}`);
 }
 
-export async function replaceStoredMedia(blobs: { id: string; blob: Blob }[]) {
-  await clear();
-  await Promise.all(blobs.map((item) => set(`${MEDIA_BLOB_PREFIX}${item.id}`, item.blob)));
+function remapImportedState(
+  state: SerializableAppState,
+  idByImportedId: Map<string, string>
+): SerializableAppState {
+  return {
+    ...state,
+    media: state.media.map((media) => ({
+      ...media,
+      id: idByImportedId.get(media.id) ?? media.id
+    })),
+    cellsByPanel: Object.fromEntries(
+      Object.entries(state.cellsByPanel).map(([panelId, cells]) => [
+        panelId,
+        Object.fromEntries(
+          Object.entries(cells).map(([cellId, cell]) => [
+            cellId,
+            {
+              ...cell,
+              mediaId: cell.mediaId ? idByImportedId.get(cell.mediaId) ?? cell.mediaId : null
+            }
+          ])
+        )
+      ])
+    )
+  };
+}
+
+export async function writeImportedProjectMedia(
+  state: SerializableAppState,
+  blobs: { id: string; blob: Blob }[],
+  onProgress?: (progress: MediaStorageProgress) => void
+) {
+  const idByImportedId = new Map(blobs.map((item) => [item.id, createId("media")]));
+
+  for (const [index, item] of blobs.entries()) {
+    const nextId = idByImportedId.get(item.id);
+    if (nextId) {
+      await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+    }
+    onProgress?.({
+      completed: index + 1,
+      total: blobs.length,
+      label: `Запись аудио ${String(index + 1)} из ${String(blobs.length)}`
+    });
+  }
+
+  return remapImportedState(state, idByImportedId);
+}
+
+export async function deleteStoredMedia(mediaIds: string[]) {
+  await Promise.all(mediaIds.map((mediaId) => del(`${MEDIA_BLOB_PREFIX}${mediaId}`)));
 }
 
 export async function clearStoredAppData() {

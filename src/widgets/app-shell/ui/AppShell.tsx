@@ -1,6 +1,7 @@
 import FileOpenIcon from "@mui/icons-material/FileOpen";
 import DeleteIcon from "@mui/icons-material/Delete";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
+import LibraryMusicIcon from "@mui/icons-material/LibraryMusic";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -35,9 +36,11 @@ import { useRegisterSW } from "virtual:pwa-register/react";
 
 import {
   clearStoredAppData,
-  replaceStoredMedia,
+  deleteStoredMedia,
+  MediaStorageProgress,
   serializeState,
-  useAppStore
+  useAppStore,
+  writeImportedProjectMedia
 } from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
@@ -45,12 +48,15 @@ import {
   LARGE_PROJECT_IMPORT_BYTES,
   makeProjectBlob,
   PROJECT_FILE_EXTENSION,
+  ProjectFileProgress,
   readProjectFile,
   saveProjectBlob
 } from "../../../features/file-config";
+import { MediaLibraryDialog } from "../../../features/media-library";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
+import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { RightToolbar } from "../../right-toolbar";
 import { WorkspaceGrid } from "../../workspace-grid";
 
@@ -79,6 +85,12 @@ const SETTINGS_PANEL_MOBILE_MIN_WIDTH = 170;
 const SETTINGS_PANEL_LANDSCAPE_MIN_WIDTH = 190;
 const SETTINGS_PANEL_RESIZER_WIDTH = 12;
 const pleasantPink = "rgba(236, 90, 167, 0.78)";
+
+type OperationProgress = {
+  completed: number;
+  total: number;
+  label: string;
+};
 
 function isAudioFile(file: File) {
   const fileName = file.name.toLowerCase();
@@ -173,9 +185,11 @@ export function AppShell() {
   const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
   const [pendingAudioFiles, setPendingAudioFiles] = useState<File[]>([]);
   const [importLoading, setImportLoading] = useState(false);
+  const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [configImportWarningOpen, setConfigImportWarningOpen] = useState(false);
   const [largeProjectFile, setLargeProjectFile] = useState<File | null>(null);
   const [preparedProjectBlob, setPreparedProjectBlob] = useState<Blob | null>(null);
+  const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
@@ -207,7 +221,7 @@ export function AppShell() {
     const cells = state.cellsByPanel[activePanel.id] ?? {};
     return activePanel.cellIds.map((cellId) => cells[cellId]).filter(isDefinedCell);
   }, [activePanel, state.cellsByPanel]);
-  const { playingCells, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
+  const { playingCells, warmedMedia, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
     state.media,
     activeCells,
     state.masterVolume,
@@ -377,6 +391,32 @@ export function AppShell() {
     };
   }, []);
 
+  const updateOperationProgress = useCallback(
+    (progress: MediaStorageProgress | ProjectFileProgress | null) => {
+      setOperationProgress(
+        progress
+          ? {
+              completed: progress.completed,
+              total: progress.total,
+              label: progress.label
+            }
+          : null
+      );
+    },
+    []
+  );
+
+  const deleteMediaFromLibrary = useCallback(
+    (mediaId: string) => {
+      stopAll();
+      dispatch({ type: "media/deleteMany", mediaIds: [mediaId] });
+      void deleteStoredMedia([mediaId]).catch(() => {
+        setSaveMessage("Не удалось удалить аудио из хранилища браузера");
+      });
+    },
+    [dispatch, stopAll]
+  );
+
   const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>, source: "files" | "folder") => {
     const selectedFiles = Array.from(event.target.files ?? []).filter(isAudioFile);
     const unsupportedFiles = selectedFiles.filter((file) => !isPlayableAudio(file.name, file.type));
@@ -400,15 +440,33 @@ export function AppShell() {
 
     if (files.length > 0) {
       setImportLoading(true);
-      setPendingAudioFiles(files);
+      void hasLikelyStorageForBytes(files.reduce((sum, file) => sum + file.size, 0)).then((result) => {
+        if (!result.enough) {
+          setImportLoading(false);
+          setSaveMessage("В браузерном хранилище может не хватить места для выбранных аудио");
+          return;
+        }
+        setPendingAudioFiles(files);
+      });
     }
     event.target.value = "";
   };
 
   const importProjectFile = (file: File) => {
     setImportLoading(true);
-    void readProjectFile(file)
+    updateOperationProgress({ completed: 0, total: 1, label: "Проверка хранилища" });
+    void hasLikelyStorageForBytes(file.size)
+      .then(async (storage) => {
+        if (!storage.enough) {
+          setSaveMessage("В браузерном хранилище может не хватить места для проекта");
+          return null;
+        }
+        return readProjectFile(file, updateOperationProgress);
+      })
       .then(async (project) => {
+        if (!project) {
+          return;
+        }
         const unsupportedMedia = project.mediaBlobs.filter(
           (item) => !isPlayableAudio(item.fileName, item.mimeType)
         );
@@ -422,8 +480,14 @@ export function AppShell() {
           return;
         }
         stopAll();
-        await replaceStoredMedia(project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })));
-        dispatch({ type: "state/import", state: project.state });
+        const oldMediaIds = state.media.map((item) => item.id);
+        const importedState = await writeImportedProjectMedia(
+          project.state,
+          project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
+          updateOperationProgress
+        );
+        dispatch({ type: "state/import", state: importedState });
+        await deleteStoredMedia(oldMediaIds);
         setSelectedCellId(null);
         setSaveMessage(`Проект импортирован: ${file.name}`);
       })
@@ -432,6 +496,7 @@ export function AppShell() {
       })
       .finally(() => {
         setImportLoading(false);
+        updateOperationProgress(null);
       });
   };
 
@@ -577,7 +642,8 @@ export function AppShell() {
           <MenuItem
             onClick={() => {
               setImportLoading(true);
-              void makeProjectBlob(serializeState(state))
+              updateOperationProgress({ completed: 0, total: Math.max(1, state.media.length), label: "Сборка проекта" });
+              void makeProjectBlob(serializeState(state), updateOperationProgress)
                 .then((blob) => {
                   setPreparedProjectBlob(blob);
                 })
@@ -586,12 +652,22 @@ export function AppShell() {
                 })
                 .finally(() => {
                   setImportLoading(false);
+                  updateOperationProgress(null);
                 });
               closeFileMenu();
             }}
           >
             <SaveAltIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>Экспорт проекта</Typography>
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMediaLibraryOpen(true);
+              closeFileMenu();
+            }}
+          >
+            <LibraryMusicIcon fontSize="small" />
+            <Typography sx={{ ml: 1 }}>Медиатека</Typography>
           </MenuItem>
           <MenuItem
             onClick={() => {
@@ -755,6 +831,7 @@ export function AppShell() {
           editMode={state.editMode}
           selectedCellId={selectedCellId}
           playingCells={playingCells}
+          warmedMedia={warmedMedia}
           onCellClick={(cell) => {
             if (state.editMode) {
               setSelectedCellId(cell.id);
@@ -850,10 +927,7 @@ export function AppShell() {
             dispatch({ type: "cell/clear", panelId: activePanel.id, cellId });
           }}
           panelCells={activeCells}
-          onDeleteMedia={(mediaId) => {
-            stopAll();
-            dispatch({ type: "media/deleteMany", mediaIds: [mediaId] });
-          }}
+          onDeleteMedia={deleteMediaFromLibrary}
         />
       </Box>
       <AudioImportDialog
@@ -863,13 +937,25 @@ export function AppShell() {
           dispatch({ type: "media/addMany", media });
           setPendingAudioFiles([]);
           setImportLoading(false);
+          setOperationProgress(null);
         }}
         onReady={handleImportReady}
         onLoadingChange={handleImportLoadingChange}
+        onProgress={updateOperationProgress}
         onCancel={() => {
           setPendingAudioFiles([]);
           setImportLoading(false);
+          setOperationProgress(null);
         }}
+      />
+      <MediaLibraryDialog
+        open={mediaLibraryOpen}
+        media={state.media}
+        dispatch={dispatch}
+        onClose={() => {
+          setMediaLibraryOpen(false);
+        }}
+        onDeleteMedia={deleteMediaFromLibrary}
       />
       <ProjectFaqDialog
         open={faqOpen}
@@ -1043,7 +1129,20 @@ export function AppShell() {
           backdropFilter: "blur(10px)"
         }}
       >
-        <CircularProgress color="inherit" />
+        <Box sx={{ display: "grid", gap: 1.5, placeItems: "center", textAlign: "center", px: 2 }}>
+          <CircularProgress
+            color="inherit"
+            variant={operationProgress && operationProgress.total > 0 ? "determinate" : "indeterminate"}
+            value={
+              operationProgress && operationProgress.total > 0
+                ? Math.min(100, Math.round((operationProgress.completed / operationProgress.total) * 100))
+                : undefined
+            }
+          />
+          {operationProgress ? (
+            <Typography sx={{ maxWidth: 360, color: "text.primary" }}>{operationProgress.label}</Typography>
+          ) : null}
+        </Box>
       </Backdrop>
       <Snackbar
         open={mobileBrowser && !standaloneMode && !installPromptDismissed}
