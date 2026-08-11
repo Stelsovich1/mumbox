@@ -7,6 +7,7 @@ import {
   Box,
   Button,
   Checkbox,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -22,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppAction, getMediaBlob } from "../../../app/model/appState";
 import { GridCell } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
+import { WaveformPeaks, waveformPeakCache } from "../model/waveformCache";
 import {
   getEnvelopeValue,
   getTrimEndSeconds,
@@ -57,7 +59,8 @@ type PreviewRoute = {
   volumeGain: GainNode;
 };
 
-const WAVEFORM_POINTS = 420;
+const WAVEFORM_PEAKS = 2_048;
+const WAVEFORM_BUCKETS_PER_FRAME = 16;
 const VOLUME_OFFSET_MIN = -100;
 const VOLUME_OFFSET_MAX = 300;
 
@@ -85,7 +88,8 @@ function makeDraft(cell: GridCell): AudioEditDraft {
 }
 
 function makeFallbackWaveform() {
-  return Array.from({ length: WAVEFORM_POINTS }, () => 0);
+  // Interleaved min/max peaks keep waveform state compact and avoid per-bucket GC churn.
+  return new Float32Array(WAVEFORM_PEAKS * 2);
 }
 
 function getPreviewVolume(volumeOffset: number) {
@@ -104,8 +108,30 @@ function getHtmlAudioVolume(volume: number) {
   return Math.min(1, Math.max(0, volume));
 }
 
-async function buildWaveform(mediaId: string) {
+function throwIfWaveformAborted(signal: AbortSignal) {
+  if (signal.aborted) {
+    throw new Error("waveform-build-aborted");
+  }
+}
+
+async function yieldWaveformFrame(signal: AbortSignal) {
+  throwIfWaveformAborted(signal);
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+  throwIfWaveformAborted(signal);
+}
+
+async function buildWaveform(mediaId: string, signal: AbortSignal) {
+  const cachedWaveform = waveformPeakCache.get(mediaId);
+  if (cachedWaveform) {
+    return cachedWaveform;
+  }
+
   const blob = await getMediaBlob(mediaId);
+  throwIfWaveformAborted(signal);
   if (!blob) {
     return makeFallbackWaveform();
   }
@@ -113,18 +139,36 @@ async function buildWaveform(mediaId: string) {
   const audioContext = new AudioContext();
   try {
     const audioBuffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
-    const channel = audioBuffer.getChannelData(0);
-    const bucketSize = Math.max(1, Math.floor(channel.length / WAVEFORM_POINTS));
-    return Array.from({ length: WAVEFORM_POINTS }, (_, index) => {
-      const start = index * bucketSize;
-      const end = Math.min(channel.length, start + bucketSize);
-      let sum = 0;
-      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
-        const sample = channel[sampleIndex] ?? 0;
-        sum += sample * sample;
+    throwIfWaveformAborted(signal);
+    const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) =>
+      audioBuffer.getChannelData(index)
+    );
+    const peaks = new Float32Array(WAVEFORM_PEAKS * 2);
+    for (let index = 0; index < WAVEFORM_PEAKS; index += 1) {
+      if (index > 0 && index % WAVEFORM_BUCKETS_PER_FRAME === 0) {
+        await yieldWaveformFrame(signal);
       }
-      return Math.min(1, Math.sqrt(sum / Math.max(1, end - start)) * 2.4);
-    });
+      const start = Math.floor((index / WAVEFORM_PEAKS) * audioBuffer.length);
+      const end = Math.max(start + 1, Math.floor(((index + 1) / WAVEFORM_PEAKS) * audioBuffer.length));
+      let min = 0;
+      let max = 0;
+      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+        for (const channel of channels) {
+          const sample = channel[sampleIndex] ?? 0;
+          if (sample < min) {
+            min = sample;
+          }
+          if (sample > max) {
+            max = sample;
+          }
+        }
+      }
+      const peakOffset = index * 2;
+      peaks[peakOffset] = Math.max(-1, min);
+      peaks[peakOffset + 1] = Math.min(1, max);
+    }
+    waveformPeakCache.set(mediaId, peaks);
+    return peaks;
   } catch {
     return makeFallbackWaveform();
   } finally {
@@ -137,17 +181,20 @@ function Waveform({
   draft,
   zoom,
   waveform,
+  waveformLoading,
   playheadMs,
   onSeek
 }: {
   durationMs: number;
   draft: AudioEditDraft;
   zoom: number;
-  waveform: number[];
+  waveform: WaveformPeaks;
+  waveformLoading: boolean;
   playheadMs: number;
   onSeek: (timeMs: number) => void;
 }) {
   const timelineContentRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const startPercent = ((draft.trimStartMs ?? 0) / durationMs) * 100;
   const endPercent = ((draft.trimEndMs ?? durationMs) / durationMs) * 100;
   const fadeInPercent = draft.fadeInEnabled ? (draft.fadeInMs / durationMs) * 100 : 0;
@@ -168,19 +215,60 @@ function Waveform({
     },
     [durationMs, onSeek]
   );
-  const upperPoints = waveform.map((amplitude, index) => {
-    const x = (index / Math.max(1, waveform.length - 1)) * 1000;
-    const y = 50 - amplitude * 44;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  });
-  const lowerPoints = waveform
-    .map((amplitude, index) => {
-      const x = (index / Math.max(1, waveform.length - 1)) * 1000;
-      const y = 50 + amplitude * 44;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .reverse();
-  const waveformPolygon = [...upperPoints, ...lowerPoints].join(" ");
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect();
+      const pixelRatio = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(rect.width * pixelRatio));
+      const height = Math.max(1, Math.floor(rect.height * pixelRatio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const context = canvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+
+      context.clearRect(0, 0, width, height);
+      const centerY = height / 2;
+      context.strokeStyle = "rgba(247, 251, 255, 0.22)";
+      context.lineWidth = Math.max(1, pixelRatio);
+      context.beginPath();
+      context.moveTo(0, centerY);
+      context.lineTo(width, centerY);
+      context.stroke();
+
+      context.strokeStyle = "rgba(255, 154, 173, 0.9)";
+      context.lineWidth = Math.max(1, pixelRatio);
+      context.beginPath();
+      const peakCount = waveform.length / 2;
+      for (let x = 0; x < width; x += Math.max(1, Math.floor(pixelRatio))) {
+        const peakOffset = Math.min(peakCount - 1, Math.floor((x / width) * peakCount)) * 2;
+        const min = waveform[peakOffset] ?? 0;
+        const max = waveform[peakOffset + 1] ?? 0;
+        const yMin = centerY - max * centerY * 0.88;
+        const yMax = centerY - min * centerY * 0.88;
+        context.moveTo(x + 0.5, yMin);
+        context.lineTo(x + 0.5, yMax);
+      }
+      context.stroke();
+    };
+
+    draw();
+    const resizeObserver = new ResizeObserver(draw);
+    resizeObserver.observe(canvas);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [waveform, zoom]);
 
   return (
     <Box
@@ -242,21 +330,25 @@ function Waveform({
         }}
       >
         <Box
-          component="svg"
-          viewBox="0 0 1000 100"
-          preserveAspectRatio="none"
+          component="canvas"
+          ref={canvasRef}
+          data-testid="audio-editor-waveform"
           aria-hidden="true"
           sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
-        >
-          <line x1="0" y1="50" x2="1000" y2="50" stroke="rgba(247, 251, 255, 0.22)" strokeWidth="1" />
-          <polygon
-            data-testid="audio-editor-waveform"
-            points={waveformPolygon}
-            fill="rgba(255, 74, 108, 0.64)"
-            stroke="#ff9aad"
-            strokeWidth="1.4"
-          />
-        </Box>
+        />
+        {waveformLoading ? (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              display: "grid",
+              placeItems: "center",
+              pointerEvents: "none"
+            }}
+          >
+            <CircularProgress size={28} thickness={4} sx={{ color: "#ff9aad" }} />
+          </Box>
+        ) : null}
         <Box
           data-testid="audio-editor-playhead"
           sx={{
@@ -286,7 +378,7 @@ function Waveform({
           data-testid="trim-end-flag"
           sx={{
             position: "absolute",
-            left: `${String(endPercent)}%`,
+            right: `${String(100 - endPercent)}%`,
             top: 0,
             bottom: 0,
             width: 3,
@@ -349,7 +441,8 @@ export function AudioEditorDialog({
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewLoop, setPreviewLoop] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
-  const [waveform, setWaveform] = useState<number[]>(() => makeFallbackWaveform());
+  const [waveform, setWaveform] = useState<WaveformPeaks>(() => makeFallbackWaveform());
+  const [waveformLoading, setWaveformLoading] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(cell.trimStartMs ?? 0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
@@ -391,22 +484,31 @@ export function AudioEditorDialog({
   }, []);
 
   useEffect(() => {
-    const status = { cancelled: false };
+    const controller = new AbortController();
 
     if (open) {
       setDraft(makeDraft(cell));
       setPreviewPlaying(false);
       setWaveform(makeFallbackWaveform());
+      setWaveformLoading(true);
       setPlayheadMs(cell.trimStartMs ?? 0);
-      void buildWaveform(media.id).then((nextWaveform) => {
-        if (!status.cancelled) {
-          setWaveform(nextWaveform);
-        }
-      });
+      void buildWaveform(media.id, controller.signal)
+        .then((nextWaveform) => {
+          if (!controller.signal.aborted) {
+            setWaveform(nextWaveform);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setWaveformLoading(false);
+          }
+        });
+    } else {
+      setWaveformLoading(false);
     }
 
     return () => {
-      status.cancelled = true;
+      controller.abort();
     };
   }, [cell, media.id, open]);
 
@@ -844,6 +946,7 @@ export function AudioEditorDialog({
             draft={draft}
             zoom={zoom}
             waveform={waveform}
+            waveformLoading={waveformLoading}
             playheadMs={playheadMs}
             onSeek={seekPreview}
           />
