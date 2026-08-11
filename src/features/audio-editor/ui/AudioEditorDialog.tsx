@@ -65,6 +65,13 @@ function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
 }
 
+function getEditedDurationMs(draft: AudioEditDraft, durationMs: number) {
+  const startMs = Math.min(durationMs, Math.max(0, draft.trimStartMs ?? 0));
+  const endMs = Math.min(durationMs, Math.max(startMs, draft.trimEndMs ?? durationMs));
+
+  return endMs - startMs;
+}
+
 function makeDraft(cell: GridCell): AudioEditDraft {
   return {
     trimStartMs: cell.trimStartMs,
@@ -320,6 +327,7 @@ export function AudioEditorDialog({
     () => [(draft.trimStartMs ?? 0) / 1000, (draft.trimEndMs ?? durationMs) / 1000],
     [draft.trimEndMs, draft.trimStartMs, durationMs]
   );
+  const editedDurationMs = useMemo(() => getEditedDurationMs(draft, durationMs), [draft, durationMs]);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -777,7 +785,7 @@ export function AudioEditorDialog({
                 }
               }}
             >
-              {media.fileName} · {formatDuration(durationMs)}
+              {media.fileName} · {formatDuration(editedDurationMs)}
             </Typography>
           </Box>
           <Typography
@@ -794,7 +802,7 @@ export function AudioEditorDialog({
               }
             }}
           >
-            {media.fileName} · {formatDuration(durationMs)}
+            {media.fileName} · {formatDuration(editedDurationMs)}
           </Typography>
           <Waveform
             durationMs={durationMs}

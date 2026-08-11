@@ -1278,6 +1278,7 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
     .toBeGreaterThan(0);
   await page.getByLabel("Начало сек").fill("1.2");
   await page.getByLabel("Конец сек").fill("7.4");
+  await expect(page.getByText("launch.wav · 0:06")).toHaveCount(2);
   await page.getByLabel("Нарастание").check();
   await page.getByLabel("Затухание").check();
   await page.getByLabel("Секунды").first().fill("0.5");
