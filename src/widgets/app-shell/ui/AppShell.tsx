@@ -153,6 +153,36 @@ function hasConfiguredLayout(
   );
 }
 
+function hasConfiguredCell(cell: {
+  mediaId: string | null;
+  aliasOverride: string;
+  colorOverride: string | null;
+  hotkey: string;
+  playbackMode: string;
+  volumeOffset: number;
+  trimStartMs: number | null;
+  trimEndMs: number | null;
+  fadeInEnabled: boolean;
+  fadeInMs: number;
+  fadeOutEnabled: boolean;
+  fadeOutMs: number;
+}) {
+  return (
+    Boolean(cell.mediaId) ||
+    cell.aliasOverride.length > 0 ||
+    cell.colorOverride !== null ||
+    cell.hotkey.length > 0 ||
+    cell.playbackMode !== "once" ||
+    cell.volumeOffset !== 0 ||
+    cell.trimStartMs !== null ||
+    cell.trimEndMs !== null ||
+    cell.fadeInEnabled ||
+    cell.fadeInMs !== 0 ||
+    cell.fadeOutEnabled ||
+    cell.fadeOutMs !== 0
+  );
+}
+
 function eventToHotkey(event: KeyboardEvent) {
   const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
   const parts = [
@@ -190,6 +220,8 @@ export function AppShell() {
   const [largeProjectFile, setLargeProjectFile] = useState<File | null>(null);
   const [preparedProjectBlob, setPreparedProjectBlob] = useState<Blob | null>(null);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
+  const [pendingDeletePanelId, setPendingDeletePanelId] = useState<string | null>(null);
+  const [pendingClearCellId, setPendingClearCellId] = useState<string | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
@@ -240,6 +272,53 @@ export function AppShell() {
 
   const selectedCell = activeCells.find((cell) => cell.id === selectedCellId) ?? null;
   const cellSettingsOpen = state.editMode && Boolean(selectedCell);
+  const pendingDeletePanel =
+    state.panels.find((panel) => panel.id === pendingDeletePanelId) ?? null;
+  const pendingClearCell = pendingClearCellId
+    ? state.cellsByPanel[activePanel?.id ?? ""]?.[pendingClearCellId] ?? null
+    : null;
+
+  const deletePanel = (panelId: string) => {
+    stopAll();
+    if (selectedCellId && state.activePanelId === panelId) {
+      setSelectedCellId(null);
+    }
+    dispatch({ type: "panel/delete", panelId });
+  };
+
+  const requestDeletePanel = (panelId: string) => {
+    const cells = state.cellsByPanel[panelId] ?? {};
+    const hasFilledCells = Object.values(cells).some((cell) => Boolean(cell.mediaId));
+
+    if (!hasFilledCells) {
+      deletePanel(panelId);
+      return;
+    }
+
+    setPendingDeletePanelId(panelId);
+  };
+
+  const clearCell = (cellId: string) => {
+    if (!activePanel) {
+      return;
+    }
+    stopCell(cellId);
+    dispatch({ type: "cell/clear", panelId: activePanel.id, cellId });
+    setSelectedCellId(null);
+  };
+
+  const requestClearCell = (cellId: string) => {
+    if (!activePanel) {
+      return;
+    }
+    const cell = state.cellsByPanel[activePanel.id]?.[cellId];
+    if (!cell || !hasConfiguredCell(cell)) {
+      clearCell(cellId);
+      return;
+    }
+
+    setPendingClearCellId(cellId);
+  };
 
   const clampSettingsPanelWidth = useCallback((nextWidth: number) => {
     const viewportWidth = window.innerWidth;
@@ -765,13 +844,7 @@ export function AppShell() {
             activePanelId={state.activePanelId}
             editMode={state.editMode}
             dispatch={dispatch}
-            onDeletePanel={(panelId) => {
-              stopAll();
-              if (selectedCellId && state.activePanelId === panelId) {
-                setSelectedCellId(null);
-              }
-              dispatch({ type: "panel/delete", panelId });
-            }}
+            onDeletePanel={requestDeletePanel}
           />
         </Stack>
 
@@ -927,10 +1000,7 @@ export function AppShell() {
           onClose={() => {
             setSelectedCellId(null);
           }}
-          onClearCell={(cellId) => {
-            stopCell(cellId);
-            dispatch({ type: "cell/clear", panelId: activePanel.id, cellId });
-          }}
+          onClearCell={requestClearCell}
           panelCells={activeCells}
           onDeleteMedia={deleteMediaFromLibrary}
         />
@@ -1078,6 +1148,96 @@ export function AppShell() {
             }}
           >
             Выбрать место
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={Boolean(pendingClearCell)}
+        onClose={() => {
+          setPendingClearCellId(null);
+        }}
+        aria-labelledby="clear-cell-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="clear-cell-dialog-title">Очистить ячейку?</DialogTitle>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setPendingClearCellId(null);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() => {
+              const cellId = pendingClearCell?.id;
+              if (!cellId) {
+                return;
+              }
+              clearCell(cellId);
+              setPendingClearCellId(null);
+            }}
+          >
+            Очистить
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={Boolean(pendingDeletePanel)}
+        onClose={() => {
+          setPendingDeletePanelId(null);
+        }}
+        aria-labelledby="delete-panel-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="delete-panel-dialog-title">Удалить панель?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Вы действительно хотите удалить панель "{pendingDeletePanel?.name ?? ""}"? В ней есть
+            заполненные ячейки.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setPendingDeletePanelId(null);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => {
+              const panelId = pendingDeletePanel?.id;
+              if (!panelId) {
+                return;
+              }
+              deletePanel(panelId);
+              setPendingDeletePanelId(null);
+            }}
+          >
+            Удалить
           </Button>
         </DialogActions>
       </Dialog>

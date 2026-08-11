@@ -455,6 +455,224 @@ test("manages panels and grid size", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Пустая ячейка/ })).toHaveCount(36);
 });
 
+test("copies a panel with duplicate-safe default name and independent cells", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "panel copy dialog select is covered once on desktop");
+  const mediaAsset = {
+    id: "media-source",
+    fileName: "source.wav",
+    alias: "Source Media",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 10000,
+    createdAt: new Date().toISOString()
+  };
+  const cellIds = Array.from({ length: 36 }, (_, index) => `cell-${String(index)}`);
+  const sourceCell = {
+    ...makeStoredCell("cell-0", mediaAsset.id),
+    aliasOverride: "Source Cell",
+    colorOverride: "#2f80ed",
+    playbackMode: "loop",
+    volumeOffset: -12,
+    hotkey: "K",
+    trimStartMs: 1200,
+    trimEndMs: 6400,
+    fadeInEnabled: true,
+    fadeInMs: 300,
+    fadeOutEnabled: true,
+    fadeOutMs: 450
+  };
+
+  await seedStoredState(page, {
+    panels: [
+      { id: "panel-alpha", name: "Alpha", gridSize: 6, cellIds },
+      { id: "panel-alpha-copy", name: "Alpha_copy", gridSize: 6, cellIds }
+    ],
+    activePanelId: "panel-alpha",
+    cellsByPanel: {
+      "panel-alpha": {
+        "cell-0": sourceCell,
+        "cell-1": makeStoredCell("cell-1", null)
+      },
+      "panel-alpha-copy": {
+        "cell-0": makeStoredCell("cell-0", null)
+      }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Скопировать панель" }).click();
+  const dialog = page.getByRole("dialog", { name: "Скопировать панель" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("combobox", { name: "Панель" })).toHaveText("Alpha");
+  await expect(page.getByPlaceholder("Alpha_copy")).toBeVisible();
+  await dialog.getByRole("button", { name: "Скопировать" }).click();
+
+  await expect(page.getByRole("tab", { name: "Alpha_copy_2" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Alpha_copy_2" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Source Cell" })).toBeVisible();
+  const copiedCell = page.locator('[data-cell-id="cell-0"]');
+  await expect(copiedCell).toHaveAttribute("data-hotkey", "K");
+  await expect(copiedCell).toHaveAttribute("data-playback-mode", "loop");
+  await expect(copiedCell).toHaveAttribute("data-volume-offset", "-12");
+  await expect(copiedCell).toHaveAttribute("data-trim-start-ms", "1200");
+  await expect(copiedCell).toHaveAttribute("data-trim-end-ms", "6400");
+  await expect(copiedCell).toHaveAttribute("data-fade-in-ms", "300");
+  await expect(copiedCell).toHaveAttribute("data-fade-out-ms", "450");
+
+  await page.getByRole("button", { name: "Ячейка 1 Source Cell" }).click();
+  await page.getByLabel("Псевдоним ячейки").fill("Changed Copy");
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Changed Copy" })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Alpha", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Source Cell" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Changed Copy" })).toHaveCount(0);
+});
+
+test("copies a selected panel with a custom name", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "panel copy dialog select is covered once on desktop");
+  const mediaAsset = {
+    id: "media-beta",
+    fileName: "beta.wav",
+    alias: "Beta Media",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 10000,
+    createdAt: new Date().toISOString()
+  };
+  const cellIds = Array.from({ length: 36 }, (_, index) => `cell-${String(index)}`);
+
+  await seedStoredState(page, {
+    panels: [
+      { id: "panel-alpha", name: "Alpha", gridSize: 6, cellIds },
+      { id: "panel-beta", name: "Beta", gridSize: 8, cellIds: Array.from({ length: 64 }, (_, index) => `cell-${String(index)}`) }
+    ],
+    activePanelId: "panel-alpha",
+    cellsByPanel: {
+      "panel-alpha": {
+        "cell-0": makeStoredCell("cell-0", null)
+      },
+      "panel-beta": {
+        "cell-0": {
+          ...makeStoredCell("cell-0", mediaAsset.id),
+          aliasOverride: "Beta Cell"
+        }
+      }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Скопировать панель" }).click();
+  const dialog = page.getByRole("dialog", { name: "Скопировать панель" });
+  await dialog.getByRole("combobox", { name: "Панель" }).click();
+  await page.getByRole("option", { name: "Beta" }).click();
+  await page.getByLabel("Имя копии панели").fill("Beta Stage");
+  await dialog.getByRole("button", { name: "Скопировать" }).click();
+
+  await expect(page.getByRole("tab", { name: "Beta Stage" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Beta Cell" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Пустая ячейка 2", exact: true })).toBeVisible();
+});
+
+test("asks confirmation only before deleting a panel with filled cells", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "delete confirmation dialog is covered once on desktop");
+  const mediaAsset = {
+    id: "media-delete",
+    fileName: "delete.wav",
+    alias: "Delete Media",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 10000,
+    createdAt: new Date().toISOString()
+  };
+  const cellIds = Array.from({ length: 36 }, (_, index) => `cell-${String(index)}`);
+
+  await seedStoredState(page, {
+    panels: [
+      { id: "panel-safe", name: "Safe", gridSize: 6, cellIds },
+      { id: "panel-filled", name: "Filled", gridSize: 6, cellIds }
+    ],
+    activePanelId: "panel-filled",
+    cellsByPanel: {
+      "panel-safe": {
+        "cell-0": makeStoredCell("cell-0", null)
+      },
+      "panel-filled": {
+        "cell-0": {
+          ...makeStoredCell("cell-0", mediaAsset.id),
+          aliasOverride: "Filled Cell"
+        }
+      }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("tab", { name: "Filled" }).hover();
+  await page.getByRole("button", { name: "Удалить панель Filled" }).click();
+  const dialog = page.getByRole("dialog", { name: "Удалить панель?" });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText('Вы действительно хотите удалить панель "Filled"?')).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Отмена" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Filled" })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Filled" }).hover();
+  await page.getByRole("button", { name: "Удалить панель Filled" }).click();
+  await dialog.getByRole("button", { name: "Удалить" }).click();
+  await expect(page.getByRole("tab", { name: "Filled" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Safe" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("keeps panel copy controls usable on mobile landscape", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "mobile spacing is viewport-specific");
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  const addButton = page.getByRole("button", { name: "Добавить панель" });
+  const copyButton = page.getByRole("button", { name: "Скопировать панель" });
+  await expect(addButton).toBeVisible();
+  await expect(copyButton).toBeVisible();
+
+  const addBox = await addButton.boundingBox();
+  const copyBox = await copyButton.boundingBox();
+  if (!addBox || !copyBox) {
+    throw new Error("Panel action buttons are not available");
+  }
+  const gap = copyBox.x - (addBox.x + addBox.width);
+  expect(addBox.width).toBeGreaterThanOrEqual(32);
+  expect(copyBox.width).toBeGreaterThanOrEqual(32);
+  expect(gap).toBeGreaterThanOrEqual(5);
+  expect(gap).toBeLessThanOrEqual(12);
+
+  await copyButton.click();
+  const dialog = page.getByRole("dialog", { name: "Скопировать панель" });
+  await expect(dialog).toBeVisible();
+  const dialogBox = await dialog.boundingBox();
+  if (!dialogBox) {
+    throw new Error("Panel copy dialog is not available");
+  }
+  expect(dialogBox.width).toBeLessThanOrEqual(908);
+  expect(dialogBox.height).toBeLessThanOrEqual(406);
+});
+
 test("keeps configured cells at the same coordinates when the grid grows", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
@@ -1070,8 +1288,15 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await cell.click();
   await page.getByRole("button", { name: "Очистить" }).click();
+  const clearDialog = page.getByRole("dialog", { name: "Очистить ячейку?" });
+  await expect(clearDialog).toBeVisible();
+  await clearDialog.getByRole("button", { name: "Отмена" }).click();
+  await expect(clearDialog).toHaveCount(0);
+  await expect(cell).toHaveAttribute("aria-label", "Ячейка 1 Mode Pad");
+
+  await page.getByRole("button", { name: "Очистить" }).click();
+  await clearDialog.getByRole("button", { name: "Очистить" }).click();
   await expect(cell).toHaveAttribute("data-playing", "false");
-  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click({ force: true });
   await expect(cell).toHaveAttribute("aria-label", "Пустая ячейка 1");
 });
 

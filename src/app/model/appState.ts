@@ -44,6 +44,7 @@ export type MediaStorageProgress = {
 
 export type AppAction =
   | { type: "panel/add" }
+  | { type: "panel/copy"; sourcePanelId: string; name: string }
   | { type: "panel/select"; panelId: string }
   | { type: "panel/rename"; panelId: string; name: string }
   | { type: "panel/delete"; panelId: string }
@@ -182,6 +183,25 @@ function makePanel(name: string): Panel {
   };
 }
 
+function makeUniquePanelName(panels: Panel[], requestedName: string) {
+  const trimmedName = requestedName.trim();
+  const baseName = trimmedName || "Panel_copy";
+  const existingNames = new Set(panels.map((panel) => panel.name));
+
+  if (!existingNames.has(baseName)) {
+    return baseName;
+  }
+
+  let copyIndex = 2;
+  let nextName = `${baseName}_${String(copyIndex)}`;
+  while (existingNames.has(nextName)) {
+    copyIndex += 1;
+    nextName = `${baseName}_${String(copyIndex)}`;
+  }
+
+  return nextName;
+}
+
 function ensurePanelCells(panel: Panel, cells: Record<string, GridCell> | undefined) {
   return panel.cellIds.reduce<Record<string, GridCell>>((accumulator, cellId) => {
     accumulator[cellId] = {
@@ -268,6 +288,33 @@ function reducer(state: AppState, action: AppAction): AppState {
         cellsByPanel: {
           ...state.cellsByPanel,
           [panel.id]: ensurePanelCells(panel, undefined)
+        }
+      };
+    }
+    case "panel/copy": {
+      if (!state.editMode) {
+        return state;
+      }
+
+      const sourcePanel = state.panels.find((panel) => panel.id === action.sourcePanelId);
+      if (!sourcePanel) {
+        return state;
+      }
+
+      const panel: Panel = {
+        ...sourcePanel,
+        id: createId("panel"),
+        name: makeUniquePanelName(state.panels, action.name)
+      };
+      const sourceCells = state.cellsByPanel[sourcePanel.id];
+
+      return {
+        ...state,
+        panels: [...state.panels, panel],
+        activePanelId: panel.id,
+        cellsByPanel: {
+          ...state.cellsByPanel,
+          [panel.id]: ensurePanelCells(panel, sourceCells)
         }
       };
     }

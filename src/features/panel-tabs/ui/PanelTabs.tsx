@@ -1,6 +1,21 @@
 import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
-import { Box, IconButton, Tab, Tabs, Tooltip } from "@mui/material";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  MenuItem,
+  Tab,
+  Tabs,
+  TextField,
+  Tooltip,
+  Typography
+} from "@mui/material";
 import { KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
@@ -18,11 +33,21 @@ type PanelTabsProps = {
 export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeletePanel }: PanelTabsProps) {
   const [renamingPanelId, setRenamingPanelId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  const [copyDialogOpen, setCopyDialogOpen] = useState(false);
+  const [copySourcePanelId, setCopySourcePanelId] = useState("");
+  const [copyNameDraft, setCopyNameDraft] = useState("");
   const lastTouchTapRef = useRef<{ panelId: string; time: number } | null>(null);
+  const selectedCopyPanel =
+    panels.find((panel) => panel.id === copySourcePanelId) ??
+    panels.find((panel) => panel.id === activePanelId) ??
+    panels[0] ??
+    null;
+  const copyNamePlaceholder = selectedCopyPanel ? `${selectedCopyPanel.name}_copy` : "";
 
   useEffect(() => {
     if (!editMode) {
       setRenamingPanelId(null);
+      setCopyDialogOpen(false);
     }
   }, [editMode]);
 
@@ -67,6 +92,34 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
     if (event.key === "Escape") {
       setRenamingPanelId(null);
     }
+  };
+
+  const openCopyDialog = () => {
+    const panel = panels.find((candidate) => candidate.id === activePanelId) ?? panels[0];
+    if (!panel) {
+      return;
+    }
+    setCopySourcePanelId(panel.id);
+    setCopyNameDraft("");
+    setCopyDialogOpen(true);
+  };
+
+  const closeCopyDialog = () => {
+    setCopyDialogOpen(false);
+    setCopyNameDraft("");
+  };
+
+  const copyPanel = () => {
+    if (!selectedCopyPanel || !editMode) {
+      return;
+    }
+
+    dispatch({
+      type: "panel/copy",
+      sourcePanelId: selectedCopyPanel.id,
+      name: copyNameDraft.trim() || copyNamePlaceholder
+    });
+    closeCopyDialog();
   };
 
   return (
@@ -248,26 +301,118 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
         ))}
       </Tabs>
       {editMode ? (
-        <Tooltip title="Добавить панель">
-          <IconButton
-            aria-label="Добавить панель"
-            size="small"
-            onClick={() => {
-              dispatch({ type: "panel/add" });
-            }}
-            sx={{
-              "@media (orientation: landscape) and (max-height: 430px)": {
-                width: 28,
-                height: 28,
-                p: 0.25,
-                ml: 1
-              }
-            }}
-          >
-            <AddIcon />
-          </IconButton>
-        </Tooltip>
+        <Box
+          sx={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 0.75,
+            ml: 1,
+            flexShrink: 0,
+            "@media (orientation: landscape) and (max-height: 430px)": {
+              gap: 0.75,
+              ml: 0.75
+            }
+          }}
+        >
+          <Tooltip title="Добавить панель">
+            <IconButton
+              aria-label="Добавить панель"
+              size="small"
+              onClick={() => {
+                dispatch({ type: "panel/add" });
+              }}
+              sx={{
+                width: 34,
+                height: 34,
+                "@media (orientation: landscape) and (max-height: 430px)": {
+                  width: 32,
+                  height: 32,
+                  p: 0.25
+                }
+              }}
+            >
+              <AddIcon />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Скопировать панель">
+            <IconButton
+              aria-label="Скопировать панель"
+              size="small"
+              onClick={openCopyDialog}
+              sx={{
+                width: 34,
+                height: 34,
+                "@media (orientation: landscape) and (max-height: 430px)": {
+                  width: 32,
+                  height: 32,
+                  p: 0.25
+                }
+              }}
+            >
+              <ContentCopyIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
       ) : null}
+      <Dialog
+        open={copyDialogOpen}
+        onClose={closeCopyDialog}
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle>Скопировать панель</DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: "grid", gap: 1.5, pt: 1 }}>
+            <TextField
+              select
+              label="Панель"
+              value={selectedCopyPanel?.id ?? ""}
+              onChange={(event) => {
+                setCopySourcePanelId(event.target.value);
+                setCopyNameDraft("");
+              }}
+              fullWidth
+            >
+              {panels.map((panel) => (
+                <MenuItem key={panel.id} value={panel.id}>
+                  {panel.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="Имя копии"
+              value={copyNameDraft}
+              placeholder={copyNamePlaceholder}
+              onChange={(event) => {
+                setCopyNameDraft(event.target.value);
+              }}
+              fullWidth
+              slotProps={{
+                htmlInput: {
+                  "aria-label": "Имя копии панели"
+                }
+              }}
+            />
+            <Typography color="text.secondary">
+              Если поле оставить пустым, будет использовано имя {copyNamePlaceholder || "панели_copy"}.
+            </Typography>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeCopyDialog}>Отмена</Button>
+          <Button variant="contained" disabled={!selectedCopyPanel} onClick={copyPanel}>
+            Скопировать
+          </Button>
+        </DialogActions>
+      </Dialog>
     </>
   );
 }
