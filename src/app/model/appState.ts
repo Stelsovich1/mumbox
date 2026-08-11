@@ -8,6 +8,7 @@ import { CELL_COLORS } from "../../shared/config/colorPalette";
 
 const STORAGE_KEY = "mumbox:state:v1";
 const MEDIA_BLOB_PREFIX = "mumbox:media:";
+const MAX_GRID_SIZE = 12;
 
 export type AppState = {
   panels: Panel[];
@@ -111,7 +112,64 @@ export function makeCell(id: string): GridCell {
 }
 
 export function getPanelCellIds(gridSize: GridSize) {
+  return Array.from({ length: gridSize * gridSize }, (_, index) => {
+    const row = Math.floor(index / gridSize);
+    const column = index % gridSize;
+
+    return `cell-${String(row * MAX_GRID_SIZE + column)}`;
+  });
+}
+
+function getLegacyPanelCellIds(gridSize: GridSize) {
   return Array.from({ length: gridSize * gridSize }, (_, index) => `cell-${String(index)}`);
+}
+
+function hasSameCellIds(first: string[], second: string[]) {
+  return first.length === second.length && first.every((cellId, index) => cellId === second[index]);
+}
+
+function normalizePanelCellIds(panel: Panel) {
+  const stableCellIds = getPanelCellIds(panel.gridSize);
+  const legacyCellIds = getLegacyPanelCellIds(panel.gridSize);
+
+  if (
+    hasSameCellIds(panel.cellIds, stableCellIds) ||
+    hasSameCellIds(panel.cellIds, legacyCellIds)
+  ) {
+    return stableCellIds;
+  }
+
+  return panel.cellIds;
+}
+
+function remapLegacyCells(panel: Panel, cells: Record<string, GridCell> | undefined) {
+  const legacyCellIds = getLegacyPanelCellIds(panel.gridSize);
+  if (!cells || !hasSameCellIds(panel.cellIds, legacyCellIds)) {
+    return cells;
+  }
+
+  const stableCellIds = getPanelCellIds(panel.gridSize);
+  const legacyIdsToMove = new Set(
+    legacyCellIds.filter((legacyCellId, index) => legacyCellId !== stableCellIds[index])
+  );
+  const migratedCells = Object.fromEntries(
+    Object.entries(cells).filter(([cellId]) => !legacyIdsToMove.has(cellId))
+  );
+
+  for (const [index, legacyCellId] of legacyCellIds.entries()) {
+    const stableCellId = stableCellIds[index];
+    const legacyCell = cells[legacyCellId];
+    if (!legacyCell || !stableCellId) {
+      continue;
+    }
+
+    migratedCells[stableCellId] = {
+      ...legacyCell,
+      id: stableCellId
+    };
+  }
+
+  return migratedCells;
 }
 
 function makePanel(name: string): Panel {
@@ -154,10 +212,16 @@ export function createInitialState(): AppState {
 
 function sanitizeImportedState(state: SerializableAppState): AppState {
   const fallback = createInitialState();
-  const panels = state.panels.length > 0 ? state.panels : fallback.panels;
+  const sourcePanels = state.panels.length > 0 ? state.panels : fallback.panels;
+  const panels = sourcePanels.map((panel) => ({
+    ...panel,
+    cellIds: normalizePanelCellIds(panel)
+  }));
   const cellsByPanel = panels.reduce<Record<string, Record<string, GridCell>>>(
-    (accumulator, panel) => {
-      accumulator[panel.id] = ensurePanelCells(panel, state.cellsByPanel[panel.id]);
+    (accumulator, panel, index) => {
+      const sourcePanel = sourcePanels[index] ?? panel;
+      const sourceCells = state.cellsByPanel[sourcePanel.id];
+      accumulator[panel.id] = ensurePanelCells(panel, remapLegacyCells(sourcePanel, sourceCells));
       return accumulator;
     },
     {}

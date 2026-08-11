@@ -20,7 +20,7 @@ type ProjectFaqDialogProps = {
 };
 
 const sections = [
-  { id: "about", title: "О проекте" },
+  { id: "about", title: "О приложении" },
   { id: "import", title: "Добавление аудио" },
   { id: "library", title: "Медиатека и проекты" },
   { id: "workspace", title: "Рабочая область" },

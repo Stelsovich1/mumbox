@@ -794,6 +794,7 @@ export function AudioEditorDialog({
               gridColumn: { xs: "1 / -1", sm: "auto" },
               fontSize: { xs: 11, sm: 14 },
               lineHeight: 1.2,
+              minHeight: "1.2em",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",

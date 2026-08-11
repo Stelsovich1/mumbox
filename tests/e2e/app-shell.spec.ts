@@ -455,6 +455,32 @@ test("manages panels and grid size", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Пустая ячейка/ })).toHaveCount(36);
 });
 
+test("keeps configured cells at the same coordinates when the grid grows", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Stable Pad");
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
+
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await assignCell(page, 8);
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+  await expect(page.locator('[data-cell-id="cell-13"]')).toHaveAttribute("aria-label", "Ячейка 8 Stable Pad");
+
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "8x8" }).click();
+  await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-13"]')).toHaveAttribute("aria-label", "Ячейка 10 Stable Pad");
+  await expect(page.getByRole("button", { name: "Ячейка 8 Stable Pad" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "12x12" }).click();
+  await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-13"]')).toHaveAttribute("aria-label", "Ячейка 14 Stable Pad");
+});
+
 test("renames panels from double tap on mobile landscape in edit mode", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile-landscape", "double tap rename is mobile-specific");
   await page.goto("/");
@@ -491,23 +517,23 @@ test("keeps cells outside the smaller grid after switching 12x12 to 6x6 and back
   await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
 
   await page.getByRole("button", { name: "Режим редактирования" }).click();
-  await assignCell(page, 40);
+  await assignCell(page, 84);
   await page.getByLabel("Псевдоним ячейки").fill("Outer Cell");
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
-  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 84 Outer Cell" })).toBeVisible();
 
   await page.getByRole("button", { name: "Размер сетки" }).click();
   await page.getByRole("button", { name: "6x6" }).click();
   await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Ячейка 84 Outer Cell" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Размер сетки" }).click();
   await page.getByRole("button", { name: "12x12" }).click();
-  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 84 Outer Cell" })).toBeVisible();
 
   await page.reload();
   await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ячейка 40 Outer Cell" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 84 Outer Cell" })).toBeVisible();
 });
 
 test("does not show playback state from another panel on empty cells", async ({ page }) => {
