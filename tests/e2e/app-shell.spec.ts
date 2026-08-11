@@ -1364,3 +1364,83 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
   await expect(cell).toHaveAttribute("data-trim-start-ms", "");
   await expect(cell).toHaveAttribute("data-trim-end-ms", "");
 });
+
+test("keeps the zoomed waveform scrollable while preserving pointer editing modes", async ({
+  context,
+  page
+}, testInfo) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await importAudio(page, "Scroll Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Открыть редактор аудио" }).click();
+  await expect(page.getByRole("dialog", { name: "Редактор аудио" })).toBeVisible();
+  await page.getByLabel("Масштаб таймлайна").fill("8");
+  await expect(page.getByText("Масштаб: 8.0x")).toBeVisible();
+
+  const timeline = page.getByTestId("audio-editor-timeline");
+  await expect
+    .poll(async () =>
+      timeline.evaluate((element) => element.scrollWidth - element.clientWidth)
+    )
+    .toBeGreaterThan(0);
+
+  await timeline.evaluate((element) => {
+    element.scrollLeft = 96;
+  });
+  await expect.poll(async () => timeline.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+
+  if (testInfo.project.name === "mobile-landscape") {
+    await timeline.evaluate((element) => {
+      element.scrollLeft = 0;
+    });
+    await expect(timeline).toHaveCSS("touch-action", "pan-x");
+
+    const box = await timeline.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) {
+      return;
+    }
+
+    const client = await context.newCDPSession(page);
+    const y = box.y + box.height / 2;
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: box.x + box.width * 0.8, y }]
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: box.x + box.width * 0.2, y }]
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: []
+    });
+
+    await expect.poll(async () => timeline.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    return;
+  }
+
+  await expect(timeline).toHaveCSS("touch-action", "none");
+  await timeline.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+
+  const playhead = page.getByTestId("audio-editor-playhead");
+  const beforeLeft = await playhead.evaluate((element) => getComputedStyle(element).left);
+  const box = await timeline.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    return;
+  }
+
+  await page.mouse.move(box.x + 24, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height / 2);
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => playhead.evaluate((element) => getComputedStyle(element).left))
+    .not.toBe(beforeLeft);
+});

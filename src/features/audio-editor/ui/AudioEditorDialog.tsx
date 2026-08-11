@@ -60,6 +60,7 @@ type PreviewRoute = {
 const WAVEFORM_POINTS = 420;
 const VOLUME_OFFSET_MIN = -100;
 const VOLUME_OFFSET_MAX = 300;
+const TOUCH_TAP_TOLERANCE_PX = 8;
 
 function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
@@ -148,6 +149,13 @@ function Waveform({
   onSeek: (timeMs: number) => void;
 }) {
   const timelineContentRef = useRef<HTMLDivElement | null>(null);
+  const touchInteractionRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    latestX: number;
+    moved: boolean;
+  } | null>(null);
   const startPercent = ((draft.trimStartMs ?? 0) / durationMs) * 100;
   const endPercent = ((draft.trimEndMs ?? durationMs) / durationMs) * 100;
   const fadeInPercent = draft.fadeInEnabled ? (draft.fadeInMs / durationMs) * 100 : 0;
@@ -189,11 +197,32 @@ function Waveform({
         if (event.pointerType === "mouse" && event.button !== 0) {
           return;
         }
+        if (event.pointerType !== "mouse") {
+          touchInteractionRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            latestX: event.clientX,
+            moved: false
+          };
+          return;
+        }
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         seekFromClientX(event.clientX);
       }}
       onPointerMove={(event) => {
+        const touchInteraction = touchInteractionRef.current;
+        if (touchInteraction?.pointerId === event.pointerId) {
+          touchInteraction.latestX = event.clientX;
+          if (
+            Math.abs(event.clientX - touchInteraction.startX) > TOUCH_TAP_TOLERANCE_PX ||
+            Math.abs(event.clientY - touchInteraction.startY) > TOUCH_TAP_TOLERANCE_PX
+          ) {
+            touchInteraction.moved = true;
+          }
+          return;
+        }
         if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
           return;
         }
@@ -201,11 +230,23 @@ function Waveform({
         seekFromClientX(event.clientX);
       }}
       onPointerUp={(event) => {
+        const touchInteraction = touchInteractionRef.current;
+        if (touchInteraction?.pointerId === event.pointerId) {
+          touchInteractionRef.current = null;
+          if (!touchInteraction.moved) {
+            seekFromClientX(touchInteraction.latestX);
+          }
+          return;
+        }
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
       }}
       onPointerCancel={(event) => {
+        if (touchInteractionRef.current?.pointerId === event.pointerId) {
+          touchInteractionRef.current = null;
+          return;
+        }
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
@@ -214,6 +255,8 @@ function Waveform({
         position: "relative",
         height: { xs: 76, sm: 210 },
         overflowX: "auto",
+        overflowY: "hidden",
+        scrollbarGutter: "stable",
         touchAction: "none",
         cursor: "pointer",
         border: 1,
@@ -221,12 +264,32 @@ function Waveform({
         borderRadius: 2,
         backgroundColor: "rgba(29, 5, 12, 0.72)",
         p: { xs: 1, sm: 2 },
+        pb: { xs: 1.5, sm: 2.5 },
+        "&::-webkit-scrollbar": {
+          height: 10
+        },
+        "&::-webkit-scrollbar-thumb": {
+          backgroundColor: "rgba(255, 154, 173, 0.58)",
+          borderRadius: 999,
+          border: "2px solid rgba(29, 5, 12, 0.72)"
+        },
+        "&::-webkit-scrollbar-track": {
+          backgroundColor: "rgba(247, 251, 255, 0.08)",
+          borderRadius: 999
+        },
+        scrollbarColor: "rgba(255, 154, 173, 0.58) rgba(247, 251, 255, 0.08)",
+        scrollbarWidth: "thin",
+        "@media (hover: none), (pointer: coarse)": {
+          touchAction: "pan-x",
+          cursor: "default"
+        },
         "@media (max-height: 480px)": {
           gridArea: "wave",
           alignSelf: "stretch",
           height: "auto",
           minHeight: 104,
           p: 0.5,
+          pb: 1.5,
           borderRadius: 1
         }
       }}
