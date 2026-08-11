@@ -147,11 +147,27 @@ function Waveform({
   playheadMs: number;
   onSeek: (timeMs: number) => void;
 }) {
+  const timelineContentRef = useRef<HTMLDivElement | null>(null);
   const startPercent = ((draft.trimStartMs ?? 0) / durationMs) * 100;
   const endPercent = ((draft.trimEndMs ?? durationMs) / durationMs) * 100;
   const fadeInPercent = draft.fadeInEnabled ? (draft.fadeInMs / durationMs) * 100 : 0;
   const fadeOutPercent = draft.fadeOutEnabled ? (draft.fadeOutMs / durationMs) * 100 : 0;
   const playheadPercent = (playheadMs / durationMs) * 100;
+  const seekFromClientX = useCallback(
+    (clientX: number) => {
+      const timelineContent = timelineContentRef.current;
+      if (!timelineContent) {
+        return;
+      }
+      const rect = timelineContent.getBoundingClientRect();
+      if (rect.width <= 0) {
+        return;
+      }
+      const position = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      onSeek(Math.round(position * durationMs));
+    },
+    [durationMs, onSeek]
+  );
   const upperPoints = waveform.map((amplitude, index) => {
     const x = (index / Math.max(1, waveform.length - 1)) * 1000;
     const y = 50 - amplitude * 44;
@@ -169,19 +185,36 @@ function Waveform({
   return (
     <Box
       data-testid="audio-editor-timeline"
-      onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        const position = Math.min(
-          1,
-          Math.max(0, (event.clientX - rect.left + event.currentTarget.scrollLeft) / (rect.width * zoom))
-        );
-        onSeek(Math.round(position * durationMs));
+      onPointerDown={(event) => {
+        if (event.pointerType === "mouse" && event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        seekFromClientX(event.clientX);
+      }}
+      onPointerMove={(event) => {
+        if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+          return;
+        }
+        event.preventDefault();
+        seekFromClientX(event.clientX);
+      }}
+      onPointerUp={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+      }}
+      onPointerCancel={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
       }}
       sx={{
         position: "relative",
         height: { xs: 76, sm: 210 },
         overflowX: "auto",
-        touchAction: "pan-x",
+        touchAction: "none",
         cursor: "pointer",
         border: 1,
         borderColor: "rgba(255, 107, 138, 0.42)",
@@ -199,6 +232,7 @@ function Waveform({
       }}
     >
       <Box
+        ref={timelineContentRef}
         sx={{
           position: "relative",
           width: `${String(100 * zoom)}%`,
