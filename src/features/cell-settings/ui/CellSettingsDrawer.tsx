@@ -187,6 +187,7 @@ export function CellSettingsDrawer({
     Math.ceil((pickerScrollTop + MEDIA_PICKER_VIEWPORT_HEIGHT) / MEDIA_PICKER_ROW_HEIGHT) + 6
   );
   const visibleMedia = filteredMedia.length > 80 ? filteredMedia.slice(pickerStart, pickerEnd) : filteredMedia;
+  const emptyPickerText = colorFilter ? "по фильтру нет аудио" : "Нет аудио";
 
   const captureHotkey = (event: KeyboardEvent) => {
     event.preventDefault();
@@ -469,15 +470,17 @@ export function CellSettingsDrawer({
               <Typography variant="body2" color="text.secondary">
                 Фильтр по цвету
               </Typography>
-                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center", minWidth: 0 }}>
-                <ColorSwatches
-                  value={colorFilter}
-                  onChange={(color) => {
-                    setColorFilter((current) => (current === color ? "" : color));
-                    setPickerScrollTop(0);
-                  }}
-                  label="Фильтр по цвету медиа"
-                />
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center", minWidth: 0 }}>
+                <Box sx={{ pl: 0.5 }}>
+                  <ColorSwatches
+                    value={colorFilter}
+                    onChange={(color) => {
+                      setColorFilter((current) => (current === color ? "" : color));
+                      setPickerScrollTop(0);
+                    }}
+                    label="Фильтр по цвету медиа"
+                  />
+                </Box>
                 <Button
                   size="small"
                   disabled={!colorFilter}
@@ -652,7 +655,7 @@ export function CellSettingsDrawer({
                       borderColor: "rgba(169, 183, 207, 0.12)"
                     }}
                   >
-                    <Typography color="text.secondary">Нет аудио</Typography>
+                    <Typography color="text.secondary">{emptyPickerText}</Typography>
                   </Box>
                 ) : null}
                 </Box>

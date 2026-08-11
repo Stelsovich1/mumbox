@@ -1064,6 +1064,13 @@ test("deletes media from the edit picker with confirmation", async ({ page }) =>
   await expect(page.getByText("alarm.mp3")).toBeVisible();
   await expect(page.getByText("launch.wav")).toHaveCount(0);
   await page.getByLabel("Поиск медиа").fill("");
+  await page.getByRole("radio", { name: "Фильтр по цвету медиа #ffcc66" }).click();
+  await expect(page.getByText("по фильтру нет аудио")).toBeVisible();
+  await page.getByLabel("Поиск медиа").fill("missing");
+  await expect(page.getByText("по фильтру нет аудио")).toBeVisible();
+  await page.getByRole("button", { name: "Сбросить" }).click();
+  await expect(page.getByText("Нет аудио")).toBeVisible();
+  await page.getByLabel("Поиск медиа").fill("");
   await page.getByRole("radio", { name: "Фильтр по цвету медиа #6df7a5" }).click();
   await expect(page.getByText("alarm.mp3")).toBeVisible();
   await expect(page.getByText("launch.wav")).toHaveCount(0);

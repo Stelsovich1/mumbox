@@ -944,14 +944,22 @@ export function AudioEditorDialog({
                     whiteSpace: "nowrap"
                   }
                 },
+                "& .MuiSlider-markLabel[data-index='0']": {
+                  transform: "translateX(0)",
+                  left: "12px !important"
+                },
+                "& .MuiSlider-markLabel[data-index='2']": {
+                  transform: "translateX(-100%)",
+                  left: "calc(100% - 12px) !important"
+                },
                 "@media (max-height: 480px)": {
                   "& .MuiSlider-markLabel[data-index='0']": {
                     transform: "translateX(0)",
-                    left: "0% !important"
+                    left: "8px !important"
                   },
                   "& .MuiSlider-markLabel[data-index='2']": {
                     transform: "translateX(-100%)",
-                    left: "100% !important"
+                    left: "calc(100% - 8px) !important"
                   }
                 }
               }}
