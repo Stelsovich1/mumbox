@@ -7,6 +7,7 @@ import {
   Box,
   Button,
   Checkbox,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -17,11 +18,12 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import { AppAction, getMediaBlob } from "../../../app/model/appState";
 import { GridCell } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
+import { WaveformPeaks, waveformPeakCache } from "../model/waveformCache";
 import {
   getEnvelopeValue,
   getTrimEndSeconds,
@@ -57,7 +59,9 @@ type PreviewRoute = {
   volumeGain: GainNode;
 };
 
-const WAVEFORM_POINTS = 420;
+const WAVEFORM_PEAKS = 2_048;
+const WAVEFORM_BUCKETS_PER_FRAME = 16;
+const ZOOM_COMMIT_DELAY_MS = 90;
 const VOLUME_OFFSET_MIN = -100;
 const VOLUME_OFFSET_MAX = 300;
 const TOUCH_TAP_TOLERANCE_PX = 8;
@@ -86,7 +90,8 @@ function makeDraft(cell: GridCell): AudioEditDraft {
 }
 
 function makeFallbackWaveform() {
-  return Array.from({ length: WAVEFORM_POINTS }, () => 0);
+  // Interleaved min/max peaks keep waveform state compact and avoid per-bucket GC churn.
+  return new Float32Array(WAVEFORM_PEAKS * 2);
 }
 
 function getPreviewVolume(volumeOffset: number) {
@@ -105,8 +110,30 @@ function getHtmlAudioVolume(volume: number) {
   return Math.min(1, Math.max(0, volume));
 }
 
-async function buildWaveform(mediaId: string) {
+function throwIfWaveformAborted(signal: AbortSignal) {
+  if (signal.aborted) {
+    throw new Error("waveform-build-aborted");
+  }
+}
+
+async function yieldWaveformFrame(signal: AbortSignal) {
+  throwIfWaveformAborted(signal);
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+  throwIfWaveformAborted(signal);
+}
+
+async function buildWaveform(mediaId: string, signal: AbortSignal) {
+  const cachedWaveform = waveformPeakCache.get(mediaId);
+  if (cachedWaveform) {
+    return cachedWaveform;
+  }
+
   const blob = await getMediaBlob(mediaId);
+  throwIfWaveformAborted(signal);
   if (!blob) {
     return makeFallbackWaveform();
   }
@@ -114,18 +141,36 @@ async function buildWaveform(mediaId: string) {
   const audioContext = new AudioContext();
   try {
     const audioBuffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
-    const channel = audioBuffer.getChannelData(0);
-    const bucketSize = Math.max(1, Math.floor(channel.length / WAVEFORM_POINTS));
-    return Array.from({ length: WAVEFORM_POINTS }, (_, index) => {
-      const start = index * bucketSize;
-      const end = Math.min(channel.length, start + bucketSize);
-      let sum = 0;
-      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
-        const sample = channel[sampleIndex] ?? 0;
-        sum += sample * sample;
+    throwIfWaveformAborted(signal);
+    const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) =>
+      audioBuffer.getChannelData(index)
+    );
+    const peaks = new Float32Array(WAVEFORM_PEAKS * 2);
+    for (let index = 0; index < WAVEFORM_PEAKS; index += 1) {
+      if (index > 0 && index % WAVEFORM_BUCKETS_PER_FRAME === 0) {
+        await yieldWaveformFrame(signal);
       }
-      return Math.min(1, Math.sqrt(sum / Math.max(1, end - start)) * 2.4);
-    });
+      const start = Math.floor((index / WAVEFORM_PEAKS) * audioBuffer.length);
+      const end = Math.max(start + 1, Math.floor(((index + 1) / WAVEFORM_PEAKS) * audioBuffer.length));
+      let min = 0;
+      let max = 0;
+      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+        for (const channel of channels) {
+          const sample = channel[sampleIndex] ?? 0;
+          if (sample < min) {
+            min = sample;
+          }
+          if (sample > max) {
+            max = sample;
+          }
+        }
+      }
+      const peakOffset = index * 2;
+      peaks[peakOffset] = Math.max(-1, min);
+      peaks[peakOffset + 1] = Math.min(1, max);
+    }
+    waveformPeakCache.set(mediaId, peaks);
+    return peaks;
   } catch {
     return makeFallbackWaveform();
   } finally {
@@ -133,22 +178,29 @@ async function buildWaveform(mediaId: string) {
   }
 }
 
-function Waveform({
+const Waveform = memo(function Waveform({
   durationMs,
   draft,
   zoom,
   waveform,
+  waveformLoading,
   playheadMs,
+  playheadRef,
   onSeek
 }: {
   durationMs: number;
   draft: AudioEditDraft;
   zoom: number;
-  waveform: number[];
+  waveform: WaveformPeaks;
+  waveformLoading: boolean;
   playheadMs: number;
+  playheadRef: RefObject<HTMLDivElement | null>;
   onSeek: (timeMs: number) => void;
 }) {
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const timelineContentRef = useRef<HTMLDivElement | null>(null);
+  const waveformViewportRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const touchInteractionRef = useRef<{
     pointerId: number;
     startX: number;
@@ -176,22 +228,92 @@ function Waveform({
     },
     [durationMs, onSeek]
   );
-  const upperPoints = waveform.map((amplitude, index) => {
-    const x = (index / Math.max(1, waveform.length - 1)) * 1000;
-    const y = 50 - amplitude * 44;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  });
-  const lowerPoints = waveform
-    .map((amplitude, index) => {
-      const x = (index / Math.max(1, waveform.length - 1)) * 1000;
-      const y = 50 + amplitude * 44;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .reverse();
-  const waveformPolygon = [...upperPoints, ...lowerPoints].join(" ");
+
+  useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    const timelineContent = timelineContentRef.current;
+    const waveformViewport = waveformViewportRef.current;
+    const canvas = canvasRef.current;
+    if (!scrollContainer || !timelineContent || !waveformViewport || !canvas) {
+      return;
+    }
+
+    let frame: number | null = null;
+    const draw = () => {
+      frame = null;
+      const viewportWidth = Math.max(1, scrollContainer.clientWidth);
+      waveformViewport.style.width = `${String(viewportWidth)}px`;
+      waveformViewport.style.transform = `translateX(${String(scrollContainer.scrollLeft)}px)`;
+
+      const pixelRatio = window.devicePixelRatio || 1;
+      const cssWidth = Math.max(1, Math.floor(waveformViewport.clientWidth));
+      const cssHeight = Math.max(1, Math.floor(waveformViewport.clientHeight));
+      const width = Math.max(1, Math.floor(cssWidth * pixelRatio));
+      const height = Math.max(1, Math.floor(cssHeight * pixelRatio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const context = canvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+
+      context.clearRect(0, 0, width, height);
+      const centerY = height / 2;
+      context.strokeStyle = "rgba(247, 251, 255, 0.22)";
+      context.lineWidth = Math.max(1, pixelRatio);
+      context.beginPath();
+      context.moveTo(0, centerY);
+      context.lineTo(width, centerY);
+      context.stroke();
+
+      const totalWidth = Math.max(1, timelineContent.clientWidth);
+      const scrollLeft = scrollContainer.scrollLeft;
+      const peakCount = Math.max(1, waveform.length / 2);
+      context.strokeStyle = "rgba(255, 154, 173, 0.9)";
+      context.lineWidth = Math.max(1, pixelRatio);
+      context.beginPath();
+      for (let cssX = 0; cssX < cssWidth; cssX += 1) {
+        const progress = Math.min(1, Math.max(0, (scrollLeft + cssX) / totalWidth));
+        const peakOffset = Math.min(peakCount - 1, Math.floor(progress * peakCount)) * 2;
+        const min = waveform[peakOffset] ?? 0;
+        const max = waveform[peakOffset + 1] ?? 0;
+        const x = cssX * pixelRatio + 0.5;
+        const yMin = centerY - max * centerY * 0.88;
+        const yMax = centerY - min * centerY * 0.88;
+        context.moveTo(x, yMin);
+        context.lineTo(x, yMax);
+      }
+      context.stroke();
+    };
+    const scheduleDraw = () => {
+      if (frame !== null) {
+        return;
+      }
+      frame = requestAnimationFrame(draw);
+    };
+
+    draw();
+    scrollContainer.addEventListener("scroll", scheduleDraw, { passive: true });
+    const resizeObserver = new ResizeObserver(scheduleDraw);
+    resizeObserver.observe(scrollContainer);
+    resizeObserver.observe(timelineContent);
+    resizeObserver.observe(waveformViewport);
+
+    return () => {
+      scrollContainer.removeEventListener("scroll", scheduleDraw);
+      resizeObserver.disconnect();
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+    };
+  }, [waveform, zoom]);
 
   return (
     <Box
+      ref={scrollContainerRef}
       data-testid="audio-editor-timeline"
       onPointerDown={(event) => {
         if (event.pointerType === "mouse" && event.button !== 0) {
@@ -305,22 +427,40 @@ function Waveform({
         }}
       >
         <Box
-          component="svg"
-          viewBox="0 0 1000 100"
-          preserveAspectRatio="none"
+          ref={waveformViewportRef}
           aria-hidden="true"
-          sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+          sx={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: "100%",
+            height: "100%",
+            pointerEvents: "none",
+            zIndex: 0
+          }}
         >
-          <line x1="0" y1="50" x2="1000" y2="50" stroke="rgba(247, 251, 255, 0.22)" strokeWidth="1" />
-          <polygon
+          <Box
+            component="canvas"
+            ref={canvasRef}
             data-testid="audio-editor-waveform"
-            points={waveformPolygon}
-            fill="rgba(255, 74, 108, 0.64)"
-            stroke="#ff9aad"
-            strokeWidth="1.4"
+            sx={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
           />
+          {waveformLoading ? (
+            <Box
+              sx={{
+                position: "absolute",
+                inset: 0,
+                display: "grid",
+                placeItems: "center",
+                pointerEvents: "none"
+              }}
+            >
+              <CircularProgress size={28} thickness={4} sx={{ color: "#ff9aad" }} />
+            </Box>
+          ) : null}
         </Box>
         <Box
+          ref={playheadRef}
           data-testid="audio-editor-playhead"
           sx={{
             position: "absolute",
@@ -330,7 +470,8 @@ function Waveform({
             width: 2,
             backgroundColor: "#f7fbff",
             boxShadow: "0 0 14px rgba(247, 251, 255, 0.9)",
-            pointerEvents: "none"
+            pointerEvents: "none",
+            zIndex: 2
           }}
         />
         <Box
@@ -342,7 +483,8 @@ function Waveform({
             bottom: 0,
             width: 3,
             backgroundColor: "#ffcc66",
-            boxShadow: "0 0 14px rgba(255, 204, 102, 0.8)"
+            boxShadow: "0 0 14px rgba(255, 204, 102, 0.8)",
+            zIndex: 2
           }}
         />
         <Box
@@ -354,7 +496,8 @@ function Waveform({
             bottom: 0,
             width: 3,
             backgroundColor: "#ec5aa7",
-            boxShadow: "0 0 14px rgba(236, 90, 167, 0.8)"
+            boxShadow: "0 0 14px rgba(236, 90, 167, 0.8)",
+            zIndex: 2
           }}
         />
         {draft.fadeInEnabled ? (
@@ -367,7 +510,8 @@ function Waveform({
               width: `${String(fadeInPercent)}%`,
               height: "100%",
               minWidth: 4,
-              pointerEvents: "none"
+              pointerEvents: "none",
+              zIndex: 1
             }}
           >
             <Box component="svg" viewBox="0 0 100 100" preserveAspectRatio="none" sx={{ width: "100%", height: "100%" }}>
@@ -385,7 +529,8 @@ function Waveform({
               width: `${String(fadeOutPercent)}%`,
               height: "100%",
               minWidth: 4,
-              pointerEvents: "none"
+              pointerEvents: "none",
+              zIndex: 1
             }}
           >
             <Box component="svg" viewBox="0 0 100 100" preserveAspectRatio="none" sx={{ width: "100%", height: "100%" }}>
@@ -396,7 +541,7 @@ function Waveform({
       </Box>
     </Box>
   );
-}
+});
 
 export function AudioEditorDialog({
   open,
@@ -409,14 +554,18 @@ export function AudioEditorDialog({
   const durationMs = getDurationMs(media);
   const [draft, setDraft] = useState<AudioEditDraft>(() => makeDraft(cell));
   const [zoom, setZoom] = useState(1);
+  const [draftZoom, setDraftZoom] = useState(1);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewLoop, setPreviewLoop] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
-  const [waveform, setWaveform] = useState<number[]>(() => makeFallbackWaveform());
-  const [playheadMs, setPlayheadMs] = useState(cell.trimStartMs ?? 0);
+  const [waveform, setWaveform] = useState<WaveformPeaks>(() => makeFallbackWaveform());
+  const [waveformLoading, setWaveformLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const previewRouteRef = useRef<PreviewRoute | null>(null);
+  const playheadRef = useRef<HTMLDivElement | null>(null);
+  const playheadMsRef = useRef(cell.trimStartMs ?? 0);
+  const zoomCommitTimeoutRef = useRef<number | null>(null);
   const draftRef = useRef(draft);
   const previewLoopRef = useRef(false);
   const previewFrameRef = useRef<number | null>(null);
@@ -429,6 +578,53 @@ export function AudioEditorDialog({
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+
+  const updatePlayheadPosition = useCallback(
+    (timeMs: number) => {
+      playheadMsRef.current = timeMs;
+      const playhead = playheadRef.current;
+      if (!playhead) {
+        return;
+      }
+      const percent = (timeMs / durationMs) * 100;
+      playhead.style.left = `${String(percent)}%`;
+    },
+    [durationMs]
+  );
+
+  useEffect(() => {
+    updatePlayheadPosition(playheadMsRef.current);
+  }, [durationMs, updatePlayheadPosition]);
+
+  useEffect(() => {
+    if (Math.abs(draftZoom - zoom) < 0.001) {
+      return;
+    }
+
+    if (zoomCommitTimeoutRef.current !== null) {
+      window.clearTimeout(zoomCommitTimeoutRef.current);
+    }
+    zoomCommitTimeoutRef.current = window.setTimeout(() => {
+      setZoom(draftZoom);
+      zoomCommitTimeoutRef.current = null;
+    }, ZOOM_COMMIT_DELAY_MS);
+
+    return () => {
+      if (zoomCommitTimeoutRef.current !== null) {
+        window.clearTimeout(zoomCommitTimeoutRef.current);
+        zoomCommitTimeoutRef.current = null;
+      }
+    };
+  }, [draftZoom, zoom]);
+
+  const commitZoom = useCallback((nextZoom: number) => {
+    if (zoomCommitTimeoutRef.current !== null) {
+      window.clearTimeout(zoomCommitTimeoutRef.current);
+      zoomCommitTimeoutRef.current = null;
+    }
+    setDraftZoom(nextZoom);
+    setZoom(nextZoom);
+  }, []);
 
   const stopPreview = useCallback(() => {
     audioRef.current?.pause();
@@ -450,28 +646,37 @@ export function AudioEditorDialog({
     audioRef.current = null;
     objectUrlRef.current = null;
     setPreviewPlaying(false);
-    setPlayheadMs(draftRef.current.trimStartMs ?? 0);
-  }, []);
+    updatePlayheadPosition(draftRef.current.trimStartMs ?? 0);
+  }, [updatePlayheadPosition]);
 
   useEffect(() => {
-    const status = { cancelled: false };
+    const controller = new AbortController();
 
     if (open) {
       setDraft(makeDraft(cell));
       setPreviewPlaying(false);
       setWaveform(makeFallbackWaveform());
-      setPlayheadMs(cell.trimStartMs ?? 0);
-      void buildWaveform(media.id).then((nextWaveform) => {
-        if (!status.cancelled) {
-          setWaveform(nextWaveform);
-        }
-      });
+      setWaveformLoading(true);
+      updatePlayheadPosition(cell.trimStartMs ?? 0);
+      void buildWaveform(media.id, controller.signal)
+        .then((nextWaveform) => {
+          if (!controller.signal.aborted) {
+            setWaveform(nextWaveform);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setWaveformLoading(false);
+          }
+        });
+    } else {
+      setWaveformLoading(false);
     }
 
     return () => {
-      status.cancelled = true;
+      controller.abort();
     };
-  }, [cell, media.id, open]);
+  }, [cell, media.id, open, updatePlayheadPosition]);
 
   useEffect(() => {
     previewLoopRef.current = previewLoop;
@@ -497,9 +702,9 @@ export function AudioEditorDialog({
             )
         );
     }
-    setPlayheadMs(Math.round(audio.currentTime * 1000));
+    updatePlayheadPosition(Math.round(audio.currentTime * 1000));
     previewFrameRef.current = requestAnimationFrame(updatePreviewVolumeAndPosition);
-  }, [durationMs]);
+  }, [durationMs, updatePlayheadPosition]);
 
   const schedulePreviewEnvelope = useCallback(() => {
     const audio = audioRef.current;
@@ -614,16 +819,16 @@ export function AudioEditorDialog({
     setPreviewPlaying(false);
   };
 
-  const seekPreview = (timeMs: number) => {
+  const seekPreview = useCallback((timeMs: number) => {
     const startMs = draft.trimStartMs ?? 0;
     const endMs = draft.trimEndMs ?? durationMs;
     const nextTimeMs = Math.min(endMs, Math.max(startMs, timeMs));
-    setPlayheadMs(nextTimeMs);
+    updatePlayheadPosition(nextTimeMs);
     if (audioRef.current) {
       audioRef.current.currentTime = nextTimeMs / 1000;
       schedulePreviewEnvelope();
     }
-  };
+  }, [draft.trimEndMs, draft.trimStartMs, durationMs, schedulePreviewEnvelope, updatePlayheadPosition]);
 
   const saveAndClose = () => {
     stopPreview();
@@ -851,16 +1056,19 @@ export function AudioEditorDialog({
                   "@media (max-height: 480px)": { fontSize: 10, lineHeight: 1, mb: 0 }
                 }}
               >
-                Масштаб: {zoom.toFixed(1)}x
+                Масштаб: {draftZoom.toFixed(1)}x
               </Typography>
               <Slider
                 aria-label="Масштаб таймлайна"
                 min={1}
                 max={8}
                 step={0.1}
-                value={zoom}
+                value={draftZoom}
                 onChange={(_, value: number | number[]) => {
-                  setZoom(Array.isArray(value) ? value[0] ?? 1 : value);
+                  setDraftZoom(Array.isArray(value) ? value[0] ?? 1 : value);
+                }}
+                onChangeCommitted={(_, value: number | number[]) => {
+                  commitZoom(Array.isArray(value) ? value[0] ?? 1 : value);
                 }}
                 size="small"
                 sx={{ "@media (max-height: 480px)": { ml: 0.75, width: "calc(100% - 12px)" } }}
@@ -907,7 +1115,9 @@ export function AudioEditorDialog({
             draft={draft}
             zoom={zoom}
             waveform={waveform}
-            playheadMs={playheadMs}
+            waveformLoading={waveformLoading}
+            playheadMs={playheadMsRef.current}
+            playheadRef={playheadRef}
             onSeek={seekPreview}
           />
           <Box

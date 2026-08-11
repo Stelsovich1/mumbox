@@ -1386,10 +1386,30 @@ test("keeps the zoomed waveform scrollable while preserving pointer editing mode
     )
     .toBeGreaterThan(0);
 
+  const waveformCanvas = page.getByTestId("audio-editor-waveform");
+  await expect
+    .poll(async () =>
+      waveformCanvas.evaluate((element) => {
+        const canvasWidth = element.getBoundingClientRect().width;
+        const timeline = element.closest('[data-testid="audio-editor-timeline"]');
+        return timeline ? canvasWidth <= timeline.clientWidth + 1 : false;
+      })
+    )
+    .toBe(true);
+  const initialCanvasLeft = await waveformCanvas.evaluate((element) => element.getBoundingClientRect().left);
+
   await timeline.evaluate((element) => {
     element.scrollLeft = 96;
   });
   await expect.poll(async () => timeline.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expect
+    .poll(async () =>
+      waveformCanvas.evaluate(
+        (element, expectedLeft) => Math.abs(element.getBoundingClientRect().left - expectedLeft) <= 1,
+        initialCanvasLeft
+      )
+    )
+    .toBe(true);
 
   if (testInfo.project.name === "mobile-landscape") {
     await timeline.evaluate((element) => {
