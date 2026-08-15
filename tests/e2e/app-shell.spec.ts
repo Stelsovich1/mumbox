@@ -98,8 +98,8 @@ const textFile = {
   buffer: Buffer.from("not audio")
 };
 
-async function installAudioMock(page: Page) {
-  await page.addInitScript(() => {
+async function installAudioMock(page: Page, options: { decodedDuration?: number } = {}) {
+  await page.addInitScript(({ decodedDuration }) => {
     class MockAudio extends EventTarget {
       currentTime = 0;
       duration = 10;
@@ -178,6 +178,9 @@ async function installAudioMock(page: Page) {
         const audioWindow = window as Window & { __mumboxDecodeAudioCalls?: number };
         audioWindow.__mumboxDecodeAudioCalls = (audioWindow.__mumboxDecodeAudioCalls ?? 0) + 1;
         return Promise.resolve({
+          duration: decodedDuration ?? 10,
+          length: 4096,
+          numberOfChannels: 1,
           getChannelData: () =>
             Float32Array.from({ length: 4096 }, (_, index) => Math.sin(index / 18) * 0.7)
         });
@@ -206,7 +209,7 @@ async function installAudioMock(page: Page) {
     Object.defineProperty(window, "AudioContext", {
       value: MockAudioContext
     });
-  });
+  }, options);
 }
 
 async function importAudio(page: Page, alias: string) {
@@ -283,22 +286,61 @@ async function touchDragCell(page: Page, fromCellId: string, toCellId: string) {
     y: targetBox.y + targetBox.height / 2
   };
 
-  await source.dispatchEvent("touchstart", {
-    touches: [{ identifier: 7, clientX: start.x, clientY: start.y }],
-    targetTouches: [{ identifier: 7, clientX: start.x, clientY: start.y }],
-    changedTouches: [{ identifier: 7, clientX: start.x, clientY: start.y }]
-  });
+  await source.evaluate(
+    (element, point) => {
+      element.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 7,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: point.x,
+          clientY: point.y,
+          button: 0,
+          buttons: 1
+        })
+      );
+    },
+    start
+  );
   await page.waitForTimeout(220);
-  await source.dispatchEvent("touchmove", {
-    touches: [{ identifier: 7, clientX: end.x, clientY: end.y }],
-    targetTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }],
-    changedTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }]
-  });
-  await source.dispatchEvent("touchend", {
-    touches: [],
-    targetTouches: [],
-    changedTouches: [{ identifier: 7, clientX: end.x, clientY: end.y }]
-  });
+  await source.evaluate(
+    (element, point) => {
+      element.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 7,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: point.x,
+          clientY: point.y,
+          button: 0,
+          buttons: 1
+        })
+      );
+    },
+    end
+  );
+  await source.evaluate(
+    (element, point) => {
+      element.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 7,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: point.x,
+          clientY: point.y,
+          button: 0,
+          buttons: 0
+        })
+      );
+    },
+    end
+  );
 }
 
 test("renders the MUMBOX shell", async ({ page }) => {
@@ -324,6 +366,33 @@ test("shows a dismissible mobile browser install recommendation", async ({ page 
 
   await page.setViewportSize({ width: 844, height: 390 });
   await expect(page.getByLabel("Рабочая сетка 8 на 8")).toBeVisible();
+});
+
+test("ignores a stale visual viewport keyboard height when no field is focused", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "visual viewport behavior is mobile-specific.");
+  await page.addInitScript(() => {
+    const viewport = new EventTarget() as EventTarget & {
+      height: number;
+      width: number;
+      offsetTop: number;
+      offsetLeft: number;
+      scale: number;
+    };
+    viewport.height = 260;
+    viewport.width = 932;
+    viewport.offsetTop = 0;
+    viewport.offsetLeft = 0;
+    viewport.scale = 1;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 430 });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+  });
+  await page.goto("/");
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => document.documentElement.style.getPropertyValue("--app-height"))
+    )
+    .toBe("430px");
 });
 
 test("opens project FAQ from the file menu", async ({ page }) => {
@@ -913,6 +982,32 @@ test("imports audio and assigns it to a grid cell", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Ячейка 1 Launch Pad" })).toBeVisible();
 });
 
+test("wraps cell labels to two lines and breaks long file names", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByTestId("audio-file-input").setInputFiles([longAudioFile]);
+  await page.getByLabel(`Выбрать ${longAudioFile.name}`).click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать " + longAudioFile.name }).click();
+
+  const label = page.getByTestId("cell-label-cell-0");
+  await expect(label).toHaveText(longAudioFile.name);
+  await expect(label).toHaveCSS("white-space", "normal");
+  await expect(label).toHaveCSS("overflow-wrap", "anywhere");
+  const labelStyle = await label.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      lineClamp: style.getPropertyValue("-webkit-line-clamp"),
+      fontSize: Number.parseFloat(style.fontSize)
+    };
+  });
+  expect(labelStyle.lineClamp).toBe("2");
+  expect(labelStyle.fontSize).toBeGreaterThanOrEqual(9);
+});
+
 test("selects imported audio by clicking the import table row", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
@@ -1220,22 +1315,13 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
   await page.getByRole("button", { name: "Включить звук" }).click();
   await expect(page.getByLabel("Общая громкость")).toBeEnabled();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await expect(cell).toHaveAttribute("data-playing", "false");
   await cell.click();
   await expect(page.getByText("Длительность: 0:10")).toBeVisible();
   await expect(page.getByLabel("Значение громкости аудио")).toHaveCount(0);
   await page.getByRole("button", { name: "Открыть редактор аудио" }).click();
   await page.getByLabel("Значение громкости аудио в редакторе").fill("50");
   await page.getByRole("button", { name: "Сохранить редактор аудио" }).click();
-  await expect
-    .poll(async () =>
-      page.evaluate(() => {
-        const audioWindow = window as Window & {
-          __mumboxGainNodes?: { gain: { value: number } }[];
-        };
-        return audioWindow.__mumboxGainNodes?.at(-1)?.gain.value;
-      })
-    )
-    .toBeCloseTo(1.2);
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await expect(page.getByRole("button", { name: "Режим редактирования" })).toHaveAttribute(
@@ -1298,6 +1384,21 @@ test("playback modes toggle, stop, clear, and react to cell volume", async ({ pa
   await clearDialog.getByRole("button", { name: "Очистить" }).click();
   await expect(cell).toHaveAttribute("data-playing", "false");
   await expect(cell).toHaveAttribute("aria-label", "Пустая ячейка 1");
+});
+
+test("uses decoded audio duration for the editor timeline", async ({ page }) => {
+  await installAudioMock(page, { decodedDuration: 12.5 });
+  await page.goto("/");
+
+  await importAudio(page, "Decoded Pad");
+  await assignFirstCell(page);
+  await page.getByRole("button", { name: "Открыть редактор аудио" }).click();
+
+  await expect(page.locator("p", { hasText: "launch.wav · 0:13" }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "Диапазон воспроизведения" }).first()).toHaveAttribute(
+    "aria-valuemax",
+    "12.5"
+  );
 });
 
 test("deletes media from the edit picker with confirmation", async ({ page }) => {
@@ -1434,6 +1535,7 @@ test("moves cells on touch after a short hold in edit mode", async ({ page }, te
 
   await importAudio(page, "Touch Move Pad");
   await assignFirstCell(page);
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveCSS("touch-action", "none");
   await touchDragCell(page, "cell-0", "cell-3");
 
   await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("aria-label", "Пустая ячейка 1");

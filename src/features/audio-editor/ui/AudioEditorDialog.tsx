@@ -59,12 +59,18 @@ type PreviewRoute = {
   volumeGain: GainNode;
 };
 
+type WaveformBuildResult = {
+  peaks: WaveformPeaks;
+  durationMs: number | null;
+};
+
 const WAVEFORM_PEAKS = 2_048;
 const WAVEFORM_BUCKETS_PER_FRAME = 16;
 const ZOOM_COMMIT_DELAY_MS = 90;
 const VOLUME_OFFSET_MIN = -100;
 const VOLUME_OFFSET_MAX = 300;
 const TOUCH_TAP_TOLERANCE_PX = 8;
+const decodedDurationCache = new Map<string, number>();
 
 function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
@@ -126,16 +132,16 @@ async function yieldWaveformFrame(signal: AbortSignal) {
   throwIfWaveformAborted(signal);
 }
 
-async function buildWaveform(mediaId: string, signal: AbortSignal) {
+async function buildWaveform(mediaId: string, signal: AbortSignal): Promise<WaveformBuildResult> {
   const cachedWaveform = waveformPeakCache.get(mediaId);
   if (cachedWaveform) {
-    return cachedWaveform;
+    return { peaks: cachedWaveform, durationMs: decodedDurationCache.get(mediaId) ?? null };
   }
 
   const blob = await getMediaBlob(mediaId);
   throwIfWaveformAborted(signal);
   if (!blob) {
-    return makeFallbackWaveform();
+    return { peaks: makeFallbackWaveform(), durationMs: null };
   }
 
   const audioContext = new AudioContext();
@@ -170,9 +176,11 @@ async function buildWaveform(mediaId: string, signal: AbortSignal) {
       peaks[peakOffset + 1] = Math.min(1, max);
     }
     waveformPeakCache.set(mediaId, peaks);
-    return peaks;
+    const durationMs = Math.round(audioBuffer.duration * 1000);
+    decodedDurationCache.set(mediaId, durationMs);
+    return { peaks, durationMs };
   } catch {
-    return makeFallbackWaveform();
+    return { peaks: makeFallbackWaveform(), durationMs: null };
   } finally {
     await audioContext.close();
   }
@@ -551,7 +559,9 @@ export function AudioEditorDialog({
   dispatch,
   onClose
 }: AudioEditorDialogProps) {
-  const durationMs = getDurationMs(media);
+  const fallbackDurationMs = getDurationMs(media);
+  const [decodedDurationMs, setDecodedDurationMs] = useState<number | null>(null);
+  const durationMs = decodedDurationMs ?? fallbackDurationMs;
   const [draft, setDraft] = useState<AudioEditDraft>(() => makeDraft(cell));
   const [zoom, setZoom] = useState(1);
   const [draftZoom, setDraftZoom] = useState(1);
@@ -654,14 +664,16 @@ export function AudioEditorDialog({
 
     if (open) {
       setDraft(makeDraft(cell));
+      setDecodedDurationMs(null);
       setPreviewPlaying(false);
       setWaveform(makeFallbackWaveform());
       setWaveformLoading(true);
       updatePlayheadPosition(cell.trimStartMs ?? 0);
       void buildWaveform(media.id, controller.signal)
-        .then((nextWaveform) => {
+        .then((result) => {
           if (!controller.signal.aborted) {
-            setWaveform(nextWaveform);
+            setWaveform(result.peaks);
+            setDecodedDurationMs(result.durationMs);
           }
         })
         .finally(() => {
@@ -670,6 +682,7 @@ export function AudioEditorDialog({
           }
         });
     } else {
+      setDecodedDurationMs(null);
       setWaveformLoading(false);
     }
 

@@ -209,6 +209,23 @@ function isStandaloneDisplayMode() {
   return window.matchMedia("(display-mode: standalone)").matches || standaloneNavigator.standalone === true;
 }
 
+function getStableAppHeight() {
+  const viewport = window.visualViewport;
+  const focusedElement = document.activeElement;
+  const editableFocused = isEditableTarget(focusedElement);
+
+  if (!viewport) {
+    return window.innerHeight;
+  }
+
+  const keyboardLikeReduction = viewport.height < window.innerHeight - 80;
+  if (keyboardLikeReduction && editableFocused) {
+    return viewport.height;
+  }
+
+  return window.innerHeight;
+}
+
 export function AppShell() {
   const { state, activePanel, dispatch } = useAppStore();
   const [fileAnchor, setFileAnchor] = useState<HTMLElement | null>(null);
@@ -374,6 +391,12 @@ export function AppShell() {
     };
   }, [clampSettingsPanelWidth]);
 
+  useEffect(() => {
+    if (state.editMode) {
+      stopAll();
+    }
+  }, [state.editMode, stopAll]);
+
   const requestAppUpdate = useCallback(() => {
     closeFileMenu();
     stopAll();
@@ -423,14 +446,19 @@ export function AppShell() {
     const syncAppHeight = () => {
       window.cancelAnimationFrame(animationFrameId);
       animationFrameId = window.requestAnimationFrame(() => {
-        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+        const viewportHeight = getStableAppHeight();
         document.documentElement.style.setProperty("--app-height", `${String(viewportHeight)}px`);
       });
     };
     const syncAppHeightAfterRotation = () => {
+      if (isEditableTarget(document.activeElement)) {
+        (document.activeElement as HTMLElement).blur();
+      }
+      window.scrollTo(0, 0);
       syncAppHeight();
       window.setTimeout(syncAppHeight, 120);
       window.setTimeout(syncAppHeight, 360);
+      window.setTimeout(syncAppHeight, 720);
     };
 
     syncAppHeight();

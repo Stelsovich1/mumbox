@@ -154,6 +154,10 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
   );
 }
 
+function supportsPointerEvents() {
+  return "PointerEvent" in window;
+}
+
 export function WorkspaceGrid({
   panelId,
   gridSize,
@@ -173,6 +177,7 @@ export function WorkspaceGrid({
   const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
   const pointerActivatedCellIdRef = useRef<string | null>(null);
   const touchDragRef = useRef<TouchDragState | null>(null);
+  const activeTouchPointerIdRef = useRef<number | null>(null);
   const touchDragTimerRef = useRef<number | null>(null);
   const suppressClickTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
@@ -191,6 +196,7 @@ export function WorkspaceGrid({
   const finishTouchDrag = (move: boolean) => {
     clearTouchDragTimer();
     const current = touchDragRef.current;
+    activeTouchPointerIdRef.current = null;
     touchDragRef.current = null;
     setTouchDrag(null);
     setDragOverCellId(null);
@@ -378,7 +384,13 @@ export function WorkspaceGrid({
               onPointerDown={(event) => {
                 if (editMode) {
                   if (event.pointerType !== "mouse" && mediaAsset) {
-                    event.currentTarget.setPointerCapture(event.pointerId);
+                    event.preventDefault();
+                    try {
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                    } catch {
+                      // Synthetic and older mobile pointer streams may not be capturable.
+                    }
+                    activeTouchPointerIdRef.current = event.pointerId;
                     beginTouchDrag(cell.id);
                   }
                   return;
@@ -395,18 +407,28 @@ export function WorkspaceGrid({
               }}
               onPointerMove={(event) => {
                 const currentDrag = touchDragRef.current;
-                if (!editMode || !currentDrag?.active) {
+                if (
+                  !editMode ||
+                  !currentDrag?.active ||
+                  (event.pointerType !== "mouse" && activeTouchPointerIdRef.current !== event.pointerId)
+                ) {
                   return;
                 }
                 event.preventDefault();
                 updateTouchDragTarget(event.clientX, event.clientY);
               }}
               onTouchStart={() => {
+                if (supportsPointerEvents()) {
+                  return;
+                }
                 if (editMode && mediaAsset) {
                   beginTouchDrag(cell.id);
                 }
               }}
               onTouchMove={(event) => {
+                if (supportsPointerEvents()) {
+                  return;
+                }
                 const currentDrag = touchDragRef.current;
                 if (!editMode || !currentDrag?.active) {
                   return;
@@ -418,6 +440,9 @@ export function WorkspaceGrid({
                 }
               }}
               onTouchEnd={(event) => {
+                if (supportsPointerEvents()) {
+                  return;
+                }
                 if (!editMode || !touchDragRef.current) {
                   return;
                 }
@@ -433,6 +458,14 @@ export function WorkspaceGrid({
                   const wasActive = touchDragRef.current.active;
                   if (wasActive) {
                     event.preventDefault();
+                    updateTouchDragTarget(event.clientX, event.clientY);
+                  }
+                  if (
+                    event.pointerType !== "mouse" &&
+                    activeTouchPointerIdRef.current !== null &&
+                    activeTouchPointerIdRef.current !== event.pointerId
+                  ) {
+                    return;
                   }
                   finishTouchDrag(wasActive);
                   return;
@@ -515,7 +548,7 @@ export function WorkspaceGrid({
                 },
                 "@media (hover: none), (pointer: coarse)": {
                   WebkitTapHighlightColor: "transparent",
-                  touchAction: "manipulation",
+                  touchAction: editMode ? "none" : "manipulation",
                   "&:hover": {
                     transform: "none"
                   },
@@ -576,14 +609,22 @@ export function WorkspaceGrid({
                   />
                   <Typography
                     variant="caption"
+                    data-testid={`cell-label-${cell.id}`}
                     sx={{
                       alignSelf: "end",
                       maxWidth: "100%",
                       overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitBoxOrient: "vertical",
+                      WebkitLineClamp: 2,
                       textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      fontSize: "clamp(6px, 11cqw, 11px)",
-                      lineHeight: 1.15
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      hyphens: "auto",
+                      textAlign: "center",
+                      fontSize: "clamp(9px, min(15cqw, 18cqh), 16px)",
+                      lineHeight: 1.05
                     }}
                   >
                     {label}
