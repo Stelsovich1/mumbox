@@ -442,9 +442,21 @@ test("does not keep cell selection highlighted outside edit mode", async ({ page
 
 test("exports, resets, and imports a project with audio", async ({
   page
-}) => {
+}, testInfo) => {
   await installAudioMock(page);
   await page.goto("/");
+
+  const projectInput = page.getByTestId("project-file-input");
+  const projectAccept = await projectInput.getAttribute("accept");
+  await expect(projectInput).toHaveAttribute("accept", /\.mumbox/);
+  await expect(projectInput).toHaveAttribute("accept", /application\/vnd\.mumbox\.project\+zip/);
+  await expect(projectInput).toHaveAttribute("accept", /application\/zip/);
+  expect(projectAccept).not.toContain("application/vnd.mumbox.project+json");
+  if (testInfo.project.name === "mobile-landscape") {
+    await expect(projectInput).toHaveAttribute("accept", /application\/octet-stream/);
+  } else {
+    expect(projectAccept).not.toContain("application/octet-stream");
+  }
 
   await importAudio(page, "Portable Pad");
   await assignFirstCell(page);

@@ -47,7 +47,8 @@ import { CellSettingsDrawer } from "../../../features/cell-settings";
 import {
   LARGE_PROJECT_IMPORT_BYTES,
   makeProjectBlob,
-  PROJECT_FILE_EXTENSION,
+  PROJECT_FILE_ACCEPT_TYPES,
+  PROJECT_FILE_ACCEPT_TYPES_MOBILE,
   ProjectFileProgress,
   readProjectFile,
   saveProjectBlob
@@ -839,7 +840,7 @@ export function AppShell() {
           ref={projectInputRef}
           data-testid="project-file-input"
           type="file"
-          accept={`${PROJECT_FILE_EXTENSION},application/vnd.mumbox.project+json,application/json`}
+          accept={mobileBrowser ? PROJECT_FILE_ACCEPT_TYPES_MOBILE : PROJECT_FILE_ACCEPT_TYPES}
           hidden
           onChange={handleProjectFile}
         />

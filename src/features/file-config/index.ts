@@ -2,6 +2,19 @@ import { getMediaBlob } from "../../app/model/appState";
 import { SerializableAppState } from "../../app/model/appState";
 
 export const PROJECT_FILE_EXTENSION = ".mumbox";
+export const PROJECT_FILE_MIME_TYPE = "application/vnd.mumbox.project+zip";
+export const PROJECT_FILE_ACCEPT_TYPES = [
+  PROJECT_FILE_EXTENSION,
+  PROJECT_FILE_MIME_TYPE,
+  "application/zip"
+].join(",");
+// iOS Safari ignores unknown extensions like .mumbox and matches only MIME types.
+export const PROJECT_FILE_ACCEPT_TYPES_MOBILE = [
+  PROJECT_FILE_EXTENSION,
+  PROJECT_FILE_MIME_TYPE,
+  "application/zip",
+  "application/octet-stream"
+].join(",");
 export const LARGE_PROJECT_IMPORT_BYTES = 100 * 1024 * 1024;
 const PROJECT_MANIFEST_NAME = "project.json";
 const PROJECT_MEDIA_DIR = "media/";
@@ -153,7 +166,7 @@ async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?:
   const centralDirectoryOffset = offset;
   const centralDirectorySize = centralParts.reduce((sum, part) => sum + (part as ArrayBuffer).byteLength, 0);
   return new Blob([...parts, ...centralParts, makeZipEndRecord(entries.length, centralDirectorySize, centralDirectoryOffset)], {
-    type: "application/vnd.mumbox.project+zip"
+    type: PROJECT_FILE_MIME_TYPE
   });
 }
 
