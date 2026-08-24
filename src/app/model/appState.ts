@@ -5,6 +5,7 @@ import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
 import { MediaAsset } from "../../entities/media/model/types";
 import { GridSize, Panel } from "../../entities/panel/model/types";
 import { CELL_COLORS } from "../../shared/config/colorPalette";
+import { readAudioDurationMs } from "../../shared/lib/duration";
 
 const STORAGE_KEY = "mumbox:state:v1";
 const MEDIA_BLOB_PREFIX = "mumbox:media:";
@@ -688,4 +689,37 @@ export function makeMediaDraft(file: File, index: number): ImportMediaDraft {
     size: file.size,
     durationMs: null
   };
+}
+
+export async function autoImportAudioFiles(
+  files: File[],
+  onProgress?: (progress: MediaStorageProgress) => void
+): Promise<MediaAsset[]> {
+  const drafts = files.map((file, index) => makeMediaDraft(file, index));
+  const DURATION_BATCH_SIZE = 24;
+
+  for (let index = 0; index < drafts.length; index += DURATION_BATCH_SIZE) {
+    const batch = drafts.slice(index, index + DURATION_BATCH_SIZE);
+    const durations = await Promise.all(
+      batch.map(async (draft) => ({
+        id: draft.id,
+        durationMs: await readAudioDurationMs(draft.file)
+      }))
+    );
+
+    drafts.forEach((draft) => {
+      const duration = durations.find((d) => d.id === draft.id);
+      if (duration) {
+        draft.durationMs = duration.durationMs;
+      }
+    });
+
+    onProgress?.({
+      completed: Math.min(index + batch.length, drafts.length),
+      total: drafts.length,
+      label: `Чтение длительности ${String(Math.min(index + batch.length, drafts.length))} из ${String(drafts.length)}`
+    });
+  }
+
+  return saveImportedMedia(drafts, onProgress);
 }

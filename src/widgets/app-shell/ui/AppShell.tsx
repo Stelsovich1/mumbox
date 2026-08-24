@@ -35,6 +35,7 @@ import {
 import { useRegisterSW } from "virtual:pwa-register/react";
 
 import {
+  autoImportAudioFiles,
   clearStoredAppData,
   deleteStoredMedia,
   MediaStorageProgress,
@@ -58,6 +59,7 @@ import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
+import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
 import { RightToolbar } from "../../right-toolbar";
 import { WorkspaceGrid } from "../../workspace-grid";
 
@@ -65,9 +67,15 @@ function isDefinedCell<T>(cell: T | undefined): cell is T {
   return Boolean(cell);
 }
 
-const audioExtensions = [".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".webm"];
 const audioAcceptTypes = [
-  ...audioExtensions,
+  ".mp3",
+  ".wav",
+  ".ogg",
+  ".m4a",
+  ".aac",
+  ".flac",
+  ".opus",
+  ".webm",
   "audio/mpeg",
   "audio/mp3",
   "audio/wav",
@@ -92,53 +100,6 @@ type OperationProgress = {
   total: number;
   label: string;
 };
-
-function isAudioFile(file: File) {
-  const fileName = file.name.toLowerCase();
-  return file.type.startsWith("audio/") || audioExtensions.some((extension) => fileName.endsWith(extension));
-}
-
-function getAudioMimeCandidates(fileName: string, mimeType: string) {
-  if (mimeType) {
-    return [mimeType];
-  }
-  const extension = fileName.toLowerCase().slice(fileName.lastIndexOf("."));
-  const mimeByExtension: Record<string, string[]> = {
-    ".mp3": ["audio/mpeg"],
-    ".wav": ["audio/wav", "audio/x-wav"],
-    ".ogg": ["audio/ogg"],
-    ".m4a": ["audio/mp4", "audio/x-m4a"],
-    ".aac": ["audio/aac"],
-    ".flac": ["audio/flac"],
-    ".opus": ["audio/opus", "audio/ogg"],
-    ".webm": ["audio/webm"]
-  };
-
-  return mimeByExtension[extension] ?? [];
-}
-
-function isPlayableAudio(fileName: string, mimeType: string) {
-  const audio = document.createElement("audio");
-  const candidates = getAudioMimeCandidates(fileName, mimeType);
-
-  return candidates.length === 0 || candidates.some((candidate) => audio.canPlayType(candidate) !== "");
-}
-
-function isDuplicateMediaFile(
-  file: File,
-  media: { fileName: string; size?: number; mimeType: string }[]
-) {
-  return media.some((item) => {
-    if (item.fileName !== file.name) {
-      return false;
-    }
-    if (typeof item.size === "number") {
-      return item.size === file.size;
-    }
-
-    return item.mimeType === file.type || !file.type;
-  });
-}
 
 function hasConfiguredLayout(
   panelsCount: number,
@@ -527,14 +488,12 @@ export function AppShell() {
   );
 
   const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>, source: "files" | "folder") => {
-    const selectedFiles = Array.from(event.target.files ?? []).filter(isAudioFile);
-    const unsupportedFiles = selectedFiles.filter((file) => !isPlayableAudio(file.name, file.type));
-    const playableFiles = selectedFiles.filter((file) => isPlayableAudio(file.name, file.type));
-    const files =
-      source === "files"
-        ? playableFiles.filter((file) => !isDuplicateMediaFile(file, state.media))
-        : playableFiles;
-    const duplicateCount = source === "files" ? playableFiles.length - files.length : 0;
+    const { unsupportedFiles, duplicateFiles, validFiles } = filterValidAudioFiles(
+      Array.from(event.target.files ?? []),
+      state.media
+    );
+    const files = source === "files" ? validFiles : [...validFiles, ...duplicateFiles];
+    const duplicateCount = source === "files" ? duplicateFiles.length : 0;
 
     if (unsupportedFiles.length > 0) {
       setSaveMessage(
@@ -576,14 +535,15 @@ export function AppShell() {
         if (!project) {
           return;
         }
-        const unsupportedMedia = project.mediaBlobs.filter(
-          (item) => !isPlayableAudio(item.fileName, item.mimeType)
+        const { unsupportedFiles: unsupportedMedia } = filterValidAudioFiles(
+          project.mediaBlobs.map((blob) => new File([blob.blob], blob.fileName, { type: blob.mimeType })),
+          []
         );
         if (unsupportedMedia.length > 0) {
           setSaveMessage(
             `Проект содержит неподдерживаемый формат: ${unsupportedMedia
               .slice(0, 3)
-              .map((item) => item.fileName)
+              .map((item) => item.name)
               .join(", ")}`
           );
           return;
@@ -630,6 +590,77 @@ export function AppShell() {
 
     projectInputRef.current?.click();
   };
+
+  const handleAudioDrop = useCallback(
+    async (files: File[]) => {
+      const { unsupportedFiles, duplicateFiles, validFiles } = filterValidAudioFiles(files, state.media);
+
+      if (unsupportedFiles.length > 0) {
+        setSaveMessage(
+          `Формат не поддерживается на этом устройстве: ${unsupportedFiles
+            .slice(0, 3)
+            .map((file) => file.name)
+            .join(", ")}`
+        );
+      }
+
+      if (duplicateFiles.length > 0) {
+        setSaveMessage(`Дубликаты уже есть в медиатеке и пропущены: ${String(duplicateFiles.length)}`);
+      }
+
+      if (validFiles.length === 0) {
+        return;
+      }
+
+      setImportLoading(true);
+      updateOperationProgress({ completed: 0, total: validFiles.length, label: "Проверка хранилища" });
+
+      const storageCheck = await hasLikelyStorageForBytes(
+        validFiles.reduce((sum, file) => sum + file.size, 0)
+      );
+
+      if (!storageCheck.enough) {
+        setImportLoading(false);
+        updateOperationProgress(null);
+        setSaveMessage("В браузерном хранилище может не хватить места для выбранных аудио");
+        return;
+      }
+
+      try {
+        const importedMedia = await autoImportAudioFiles(validFiles, updateOperationProgress);
+        dispatch({ type: "media/addMany", media: importedMedia });
+
+        const cells = activePanel ? state.cellsByPanel[activePanel.id] ?? {} : {};
+        const freeCellIds = activePanel ? activePanel.cellIds.filter((id) => !cells[id]?.mediaId) : [];
+        const cellsToAssign = Math.min(importedMedia.length, freeCellIds.length);
+
+        for (let i = 0; i < cellsToAssign; i++) {
+          const cellId = freeCellIds[i];
+          const media = importedMedia[i];
+          if (!cellId || !media || !activePanel) continue;
+          dispatch({
+            type: "cell/assign",
+            panelId: activePanel.id,
+            cellId,
+            mediaId: media.id
+          });
+        }
+
+        const message =
+          cellsToAssign > 0
+            ? `Импортировано ${String(importedMedia.length)} аудио, назначено ${String(cellsToAssign)} ячеек`
+            : `Импортировано ${String(importedMedia.length)} аудио в медиатеку`;
+
+        setSaveMessage(message);
+      } catch (error) {
+        setSaveMessage("Не удалось импортировать аудио");
+      } finally {
+        setImportLoading(false);
+        updateOperationProgress(null);
+      }
+    },
+    [state.media, state.cellsByPanel, activePanel, dispatch, updateOperationProgress]
+  );
 
   const handleImportReady = useCallback(() => {
     setImportLoading(false);
@@ -967,6 +998,7 @@ export function AppShell() {
             });
             dispatch({ type: "cell/move", panelId: activePanel.id, fromCellId, toCellId });
           }}
+          onAudioDrop={handleAudioDrop}
         />
         <RightToolbar
           masterVolume={state.masterVolume}

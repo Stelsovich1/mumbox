@@ -6,6 +6,18 @@ import { MediaAsset } from "../../../entities/media/model/types";
 import { GridSize } from "../../../entities/panel/model/types";
 import { getReadableTextColor } from "../../../shared/lib/contrast";
 
+type FileSystemEntryLike = {
+  isFile: boolean;
+  isDirectory: boolean;
+  file: (callback: (file: File) => void, errorCallback?: (error: Error) => void) => void;
+  createReader: () => {
+    readEntries: (
+      callback: (entries: FileSystemEntryLike[]) => void,
+      errorCallback?: (error: Error) => void
+    ) => void;
+  };
+};
+
 type WorkspaceGridProps = {
   panelId: string;
   gridSize: GridSize;
@@ -19,6 +31,7 @@ type WorkspaceGridProps = {
   onGateStart: (cell: GridCell) => void;
   onGateEnd: (cell: GridCell) => void;
   onCellMove: (fromCellId: string, toCellId: string) => void;
+  onAudioDrop?: (files: File[]) => void;
 };
 
 type PlaybackIndicatorProps = {
@@ -170,11 +183,13 @@ export function WorkspaceGrid({
   onCellClick,
   onGateStart,
   onGateEnd,
-  onCellMove
+  onCellMove,
+  onAudioDrop
 }: WorkspaceGridProps) {
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
   const [draggingCellId, setDraggingCellId] = useState<string | null>(null);
   const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
+  const [isAudioDragOver, setIsAudioDragOver] = useState(false);
   const pointerActivatedCellIdRef = useRef<string | null>(null);
   const touchDragRef = useRef<TouchDragState | null>(null);
   const activeTouchPointerIdRef = useRef<number | null>(null);
@@ -247,10 +262,105 @@ export function WorkspaceGrid({
     }
   };
 
+  const handleGridDragOver = (event: React.DragEvent) => {
+    if (!editMode || !onAudioDrop) {
+      return;
+    }
+    // Only handle file drops, not cell drags
+    // Cell drags don't have "Files" type, only file drops do
+    const hasFiles = event.dataTransfer.types.includes("Files");
+    if (!hasFiles) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsAudioDragOver(true);
+  };
+
+  const handleGridDragLeave = (event: React.DragEvent) => {
+    if (!editMode || !onAudioDrop) {
+      return;
+    }
+    // Only handle file drops, not cell drags
+    const hasFiles = event.dataTransfer.types.includes("Files");
+    if (!hasFiles) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX;
+    const y = event.clientY;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+      setIsAudioDragOver(false);
+    }
+  };
+
+  const handleGridDrop = async (event: React.DragEvent) => {
+    if (!editMode || !onAudioDrop) {
+      return;
+    }
+    // Check if this is a cell drag (has cell data)
+    const cellData = event.dataTransfer.getData("text/plain");
+    if (cellData) {
+      return; // Let cell handlers handle it
+    }
+    // Only handle file drops
+    const hasFiles = event.dataTransfer.types.includes("Files");
+    if (!hasFiles) {
+      return;
+    }
+    event.preventDefault();
+    setIsAudioDragOver(false);
+
+    const items = Array.from(event.dataTransfer.items);
+    const files: File[] = [];
+
+    if (items.length > 0 && items[0] && "webkitGetAsEntry" in items[0]) {
+      const entries = items
+        .map((item) => (item as any).webkitGetAsEntry() as FileSystemEntryLike | null)
+        .filter((entry): entry is FileSystemEntryLike => entry !== null);
+
+      const processEntry = async (entry: FileSystemEntryLike): Promise<void> => {
+        if (entry.isFile) {
+          const file = await new Promise<File>((resolve, reject) => {
+            entry.file(resolve, reject);
+          });
+          files.push(file);
+        } else if (entry.isDirectory) {
+          const dirReader = entry.createReader();
+          const readEntries = async (): Promise<void> => {
+            const childEntries = await new Promise<FileSystemEntryLike[]>((resolve, reject) => {
+              dirReader.readEntries(resolve, reject);
+            });
+            for (const childEntry of childEntries) {
+              await processEntry(childEntry);
+            }
+            if (childEntries.length > 0) {
+              await readEntries();
+            }
+          };
+          await readEntries();
+        }
+      };
+
+      for (const entry of entries) {
+        await processEntry(entry);
+      }
+    } else {
+      files.push(...Array.from(event.dataTransfer.files));
+    }
+
+    if (files.length > 0) {
+      onAudioDrop(files);
+    }
+  };
+
   return (
     <Box
       data-noselect
       aria-label={`Рабочая сетка ${String(gridSize)} на ${String(gridSize)}`}
+      onDragOver={handleGridDragOver}
+      onDragLeave={handleGridDragLeave}
+      onDrop={handleGridDrop}
       sx={{
         minWidth: 0,
         minHeight: 0,
@@ -258,14 +368,16 @@ export function WorkspaceGrid({
         display: "grid",
         placeItems: "center",
         border: 1,
-        borderColor: editMode ? "secondary.main" : "divider",
+        borderColor: isAudioDragOver ? "primary.main" : editMode ? "secondary.main" : "divider",
         borderRadius: 2,
-        backgroundColor: "rgba(7, 11, 20, 0.62)",
+        backgroundColor: isAudioDragOver ? "rgba(236, 90, 167, 0.12)" : "rgba(7, 11, 20, 0.62)",
         p: { xs: 0.5, md: 0.75 },
-        boxShadow: editMode
-          ? "0 0 0 1px rgba(255, 204, 102, 0.42), 0 0 22px rgba(255, 204, 102, 0.18), inset 0 0 36px rgba(255, 204, 102, 0.05)"
+        boxShadow: isAudioDragOver
+          ? "0 0 0 2px rgba(236, 90, 167, 0.54), 0 0 18px rgba(236, 90, 167, 0.26)"
+          : editMode
+            ? "0 0 0 1px rgba(255, 204, 102, 0.42), 0 0 22px rgba(255, 204, 102, 0.18), inset 0 0 36px rgba(255, 204, 102, 0.05)"
           : "inset 0 0 36px rgba(236, 90, 167, 0.07)",
-        transition: "border-color 160ms ease, box-shadow 160ms ease"
+        transition: "border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease"
       }}
     >
       <Box
