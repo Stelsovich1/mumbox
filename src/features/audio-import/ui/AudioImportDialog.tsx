@@ -22,6 +22,9 @@ import { MediaStorageProgress } from "../../../app/model/appState";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { CELL_COLORS } from "../../../shared/config/colorPalette";
 import { formatDuration, readAudioDurationMs } from "../../../shared/lib/duration";
+import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
+import { getSelectAllState } from "../../../shared/lib/rowSelection";
+import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
@@ -59,7 +62,7 @@ export function AudioImportDialog({
   onProgress
 }: AudioImportDialogProps) {
   const [drafts, setDrafts] = useState<MediaDraft[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const { selectedIds, toggle: toggleDraftSelection, setMany, clear: clearSelection } = useRowSelection();
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -76,7 +79,7 @@ export function AudioImportDialog({
       onProgress?.({ completed: 0, total: files.length, label: "Чтение длительности аудио" });
       const nextDrafts = files.map((file, index) => makeMediaDraft(file, index));
       setDrafts(nextDrafts);
-      setSelectedIds([]);
+      clearSelection();
       setQuery("");
       setScrollTop(0);
       if (bodyRef.current) {
@@ -123,9 +126,8 @@ export function AudioImportDialog({
     return () => {
       status.cancelled = true;
     };
-  }, [files, onLoadingChange, onProgress, onReady, open]);
+  }, [clearSelection, files, onLoadingChange, onProgress, onReady, open]);
 
-  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const filteredDrafts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
@@ -134,7 +136,8 @@ export function AudioImportDialog({
 
     return drafts.filter((draft) => draft.fileName.toLowerCase().includes(normalizedQuery));
   }, [drafts, query]);
-  const selectedFilteredCount = filteredDrafts.filter((draft) => selectedSet.has(draft.id)).length;
+  const filteredDraftIds = useMemo(() => filteredDrafts.map((draft) => draft.id), [filteredDrafts]);
+  const selectAllState = getSelectAllState(selectedIds, filteredDraftIds);
   const virtualStart = Math.max(0, Math.floor(scrollTop / IMPORT_ROW_HEIGHT) - 6);
   const virtualEnd = Math.min(
     filteredDrafts.length,
@@ -177,24 +180,14 @@ export function AudioImportDialog({
     );
   };
 
-  const toggleDraftSelection = (id: string) => {
-    setSelectedIds((current) =>
-      current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id]
-    );
-  };
-
-  const isInteractiveRowTarget = (target: EventTarget | null) =>
-    target instanceof HTMLElement &&
-    Boolean(target.closest("button, input, textarea, [role='button'], [role='checkbox'], [role='radio']"));
-
   const applyColorToAll = (color: string) => {
     setDrafts((current) => current.map((draft) => ({ ...draft, color })));
   };
 
   const deleteSelected = () => {
-    const ids = selectedIds.length > 0 ? selectedIds : drafts[0] ? [drafts[0].id] : [];
-    setDrafts((current) => current.filter((draft) => !ids.includes(draft.id)));
-    setSelectedIds([]);
+    const ids = selectedIds.size > 0 ? selectedIds : new Set(drafts[0] ? [drafts[0].id] : []);
+    setDrafts((current) => current.filter((draft) => !ids.has(draft.id)));
+    clearSelection();
     setConfirmDeleteOpen(false);
   };
 
@@ -202,7 +195,7 @@ export function AudioImportDialog({
     stopPreview();
     onLoadingChange(true);
     const media = await saveImportedMedia(
-      drafts.filter((draft) => selectedSet.has(draft.id)),
+      drafts.filter((draft) => selectedIds.has(draft.id)),
       onProgress
     );
     onProgress?.(null);
@@ -271,15 +264,10 @@ export function AudioImportDialog({
               <Box role="columnheader" sx={{ px: 1 }}>
                   <Checkbox
                     aria-label="Выбрать все аудио"
-                    checked={filteredDrafts.length > 0 && selectedFilteredCount === filteredDrafts.length}
-                    indeterminate={selectedFilteredCount > 0 && selectedFilteredCount < filteredDrafts.length}
+                    checked={selectAllState === "all"}
+                    indeterminate={selectAllState === "some"}
                     onChange={(event) => {
-                      const filteredIds = new Set(filteredDrafts.map((draft) => draft.id));
-                      setSelectedIds((current) =>
-                        event.target.checked
-                          ? Array.from(new Set([...current, ...filteredIds]))
-                          : current.filter((id) => !filteredIds.has(id))
-                      );
+                      setMany(filteredDraftIds, event.target.checked);
                     }}
                   />
               </Box>
@@ -347,7 +335,7 @@ export function AudioImportDialog({
                     cursor: "pointer",
                     borderBottom: 1,
                     borderColor: "rgba(169, 183, 207, 0.12)",
-                    backgroundColor: selectedSet.has(draft.id)
+                    backgroundColor: selectedIds.has(draft.id)
                       ? "rgba(236, 90, 167, 0.09)"
                       : "transparent",
                     transition: "background-color 160ms ease",
@@ -367,13 +355,9 @@ export function AudioImportDialog({
                   <Box role="cell" sx={{ px: 1 }}>
                     <Checkbox
                       aria-label={`Выбрать ${draft.fileName}`}
-                      checked={selectedSet.has(draft.id)}
-                      onChange={(event) => {
-                        setSelectedIds((current) =>
-                          event.target.checked
-                            ? [...current, draft.id]
-                            : current.filter((id) => id !== draft.id)
-                        );
+                      checked={selectedIds.has(draft.id)}
+                      onChange={() => {
+                        toggleDraftSelection(draft.id);
                       }}
                     />
                   </Box>
@@ -434,7 +418,7 @@ export function AudioImportDialog({
                     <IconButton
                       aria-label={`Удалить ${draft.fileName}`}
                       onClick={() => {
-                        setSelectedIds([draft.id]);
+                        setMany([draft.id], true);
                         setConfirmDeleteOpen(true);
                       }}
                     >
@@ -466,7 +450,7 @@ export function AudioImportDialog({
           <Button onClick={onCancel}>Отменить</Button>
           <Button
             variant="contained"
-            disabled={selectedIds.length === 0}
+            disabled={selectedIds.size === 0}
             onClick={() => {
               void handleSave();
             }}

@@ -1,15 +1,27 @@
 import { clear, del, get, set } from "idb-keyval";
 import { useEffect, useMemo, useReducer } from "react";
 
+import { makeCell } from "../../entities/cell/model/makeCell";
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
 import { MediaAsset } from "../../entities/media/model/types";
+import {
+  ensurePanelCells,
+  getPanelCellIds,
+  normalizePanelCellIds,
+  remapLegacyCells
+} from "../../entities/panel/model/panelCells";
+import { makeUniquePanelName } from "../../entities/panel/model/panelName";
 import { GridSize, Panel } from "../../entities/panel/model/types";
 import { CELL_COLORS } from "../../shared/config/colorPalette";
 import { readAudioDurationMs } from "../../shared/lib/duration";
 
+// Re-exported so callers keep one import site while the implementations stay in pure, unit-testable
+// modules. This file imports `react` and `idb-keyval`, which the unit tier cannot load.
+export { makeCell } from "../../entities/cell/model/makeCell";
+export { getPanelCellIds } from "../../entities/panel/model/panelCells";
+
 const STORAGE_KEY = "mumbox:state:v1";
 const MEDIA_BLOB_PREFIX = "mumbox:media:";
-const MAX_GRID_SIZE = 12;
 
 export type AppState = {
   panels: Panel[];
@@ -106,85 +118,6 @@ function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-export function makeCell(id: string): GridCell {
-  return {
-    id,
-    mediaId: null,
-    aliasOverride: "",
-    colorOverride: null,
-    playbackMode: "once",
-    volumeOffset: 0,
-    hotkey: "",
-    trimStartMs: null,
-    trimEndMs: null,
-    fadeInEnabled: false,
-    fadeInMs: 0,
-    fadeOutEnabled: false,
-    fadeOutMs: 0
-  };
-}
-
-export function getPanelCellIds(gridSize: GridSize) {
-  return Array.from({ length: gridSize * gridSize }, (_, index) => {
-    const row = Math.floor(index / gridSize);
-    const column = index % gridSize;
-
-    return `cell-${String(row * MAX_GRID_SIZE + column)}`;
-  });
-}
-
-function getLegacyPanelCellIds(gridSize: GridSize) {
-  return Array.from({ length: gridSize * gridSize }, (_, index) => `cell-${String(index)}`);
-}
-
-function hasSameCellIds(first: string[], second: string[]) {
-  return first.length === second.length && first.every((cellId, index) => cellId === second[index]);
-}
-
-function normalizePanelCellIds(panel: Panel) {
-  const stableCellIds = getPanelCellIds(panel.gridSize);
-  const legacyCellIds = getLegacyPanelCellIds(panel.gridSize);
-
-  if (
-    hasSameCellIds(panel.cellIds, stableCellIds) ||
-    hasSameCellIds(panel.cellIds, legacyCellIds)
-  ) {
-    return stableCellIds;
-  }
-
-  return panel.cellIds;
-}
-
-function remapLegacyCells(panel: Panel, cells: Record<string, GridCell> | undefined) {
-  const legacyCellIds = getLegacyPanelCellIds(panel.gridSize);
-  if (!cells || !hasSameCellIds(panel.cellIds, legacyCellIds)) {
-    return cells;
-  }
-
-  const stableCellIds = getPanelCellIds(panel.gridSize);
-  const legacyIdsToMove = new Set(
-    legacyCellIds.filter((legacyCellId, index) => legacyCellId !== stableCellIds[index])
-  );
-  const migratedCells = Object.fromEntries(
-    Object.entries(cells).filter(([cellId]) => !legacyIdsToMove.has(cellId))
-  );
-
-  for (const [index, legacyCellId] of legacyCellIds.entries()) {
-    const stableCellId = stableCellIds[index];
-    const legacyCell = cells[legacyCellId];
-    if (!legacyCell || !stableCellId) {
-      continue;
-    }
-
-    migratedCells[stableCellId] = {
-      ...legacyCell,
-      id: stableCellId
-    };
-  }
-
-  return migratedCells;
-}
-
 function makePanel(name: string): Panel {
   const id = createId("panel");
   return {
@@ -193,36 +126,6 @@ function makePanel(name: string): Panel {
     gridSize: 8,
     cellIds: getPanelCellIds(8)
   };
-}
-
-function makeUniquePanelName(panels: Panel[], requestedName: string) {
-  const trimmedName = requestedName.trim();
-  const baseName = trimmedName || "Panel_copy";
-  const existingNames = new Set(panels.map((panel) => panel.name));
-
-  if (!existingNames.has(baseName)) {
-    return baseName;
-  }
-
-  let copyIndex = 2;
-  let nextName = `${baseName}_${String(copyIndex)}`;
-  while (existingNames.has(nextName)) {
-    copyIndex += 1;
-    nextName = `${baseName}_${String(copyIndex)}`;
-  }
-
-  return nextName;
-}
-
-function ensurePanelCells(panel: Panel, cells: Record<string, GridCell> | undefined) {
-  return panel.cellIds.reduce<Record<string, GridCell>>((accumulator, cellId) => {
-    accumulator[cellId] = {
-      ...makeCell(cellId),
-      ...cells?.[cellId],
-      id: cellId
-    };
-    return accumulator;
-  }, {});
 }
 
 export function createInitialState(): AppState {
