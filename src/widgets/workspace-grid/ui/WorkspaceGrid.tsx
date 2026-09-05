@@ -1,5 +1,5 @@
 import { Box, Typography } from "@mui/material";
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
@@ -26,7 +26,9 @@ type WorkspaceGridProps = {
   editMode: boolean;
   selectedCellId: string | null;
   playingCells: { cellKey: string; progress: number }[];
-  warmedMedia: { mediaId: string; state: "warming" | "ready" }[];
+  /** Warm state per cell id. Keyed by cell, not by media: two cells on one media can have
+   * different trims, hence different cache entries, hence different warm states. */
+  warmedCells: Record<string, "warming" | "ready">;
   onCellClick: (cell: GridCell) => void;
   onGateStart: (cell: GridCell) => void;
   onGateEnd: (cell: GridCell) => void;
@@ -171,6 +173,421 @@ function supportsPointerEvents() {
   return "PointerEvent" in window;
 }
 
+type CellController = {
+  editMode: boolean;
+  onCellClick: (cell: GridCell) => void;
+  onGateStart: (cell: GridCell) => void;
+  onGateEnd: (cell: GridCell) => void;
+  onCellMove: (fromCellId: string, toCellId: string) => void;
+  setDraggingCellId: (next: string | null) => void;
+  setDragOverCellId: (next: string | null | ((current: string | null) => string | null)) => void;
+  suppressNextClick: () => void;
+  beginTouchDrag: (cellId: string) => void;
+  updateTouchDragTarget: (clientX: number, clientY: number) => void;
+  finishTouchDrag: (move: boolean) => void;
+  suppressClickRef: { current: boolean };
+  pointerActivatedCellIdRef: { current: string | null };
+  activeTouchPointerIdRef: { current: number | null };
+  touchDragRef: { current: TouchDragState | null };
+};
+
+type WorkspaceGridCellProps = {
+  cell: GridCell;
+  index: number;
+  mediaAsset: MediaAsset | null;
+  isPlaying: boolean;
+  progress: number;
+  warmState: "idle" | "warming" | "ready";
+  isSelected: boolean;
+  isDragging: boolean;
+  activeDragOverCellId: string | null;
+  editMode: boolean;
+  /**
+   * A ref, not a plain object: its identity must never change, or memoising the cell buys
+   * nothing. Handlers read `controller.current` at call time, so they always see the latest
+   * parent state without the parent invalidating every cell.
+   */
+  controller: { current: CellController };
+};
+
+/**
+ * Memoised on purpose, and it is not a micro-optimisation.
+ *
+ * Every warm-up state change re-rendered the whole grid. Measured on a 12x12 panel with 40 media:
+ * 89 long tasks totalling 5.6 s of blocked main thread, against 287 ms for the same work on a 6x6
+ * panel — the cost scales with cell count, not with decoding. That is what made the hover
+ * highlight stutter while cells were warming.
+ */
+const WorkspaceGridCell = memo(function WorkspaceGridCell({
+  cell,
+  index,
+  mediaAsset,
+  isPlaying,
+  progress,
+  warmState,
+  isSelected,
+  isDragging,
+  activeDragOverCellId,
+  editMode,
+  controller
+}: WorkspaceGridCellProps) {
+  // Derived here rather than in the parent: these are four string builds and two colour parses
+  // per cell, and running them in the parent meant paying them for all 144 cells every time one
+  // cell's warm state changed.
+  const label = cell.aliasOverride.trim()
+    ? cell.aliasOverride
+    : mediaAsset?.alias.trim()
+      ? mediaAsset.alias
+      : mediaAsset?.fileName ?? "";
+  const color = cell.colorOverride ?? mediaAsset?.color ?? "rgba(34, 43, 60, 0.76)";
+  const baseColor = mediaAsset
+    ? isPlaying
+      ? mixHexColor(color, "#ffffff", 0.24)
+      : mixHexColor(color, "#070b14", 0.54)
+    : "rgba(34, 43, 60, 0.76)";
+  // A cell holding media that is not decoded yet is a third state, and it needs to look like one:
+  // until now it was indistinguishable from a ready cell, so there was no way to tell which pads
+  // would start instantly and which would pay for a decode.
+  const displayColor =
+    mediaAsset && warmState === "idle" ? mixHexColor(baseColor, "#000000", 0.3) : baseColor;
+  const textColor = mediaAsset ? getReadableTextColor(displayColor) : "#a9b7cf";
+  const innerMutedColor = `color-mix(in srgb, ${textColor} 82%, transparent)`;
+
+  return (
+    <Box
+        component="button"
+        type="button"
+        data-cell-id={cell.id}
+        data-playing={isPlaying ? "true" : "false"}
+        data-progress={progress.toFixed(4)}
+        data-warm-state={warmState}
+        data-playback-mode={cell.playbackMode}
+        data-hotkey={cell.hotkey}
+        data-volume-offset={cell.volumeOffset}
+        data-trim-start-ms={cell.trimStartMs ?? ""}
+        data-trim-end-ms={cell.trimEndMs ?? ""}
+        data-fade-in-ms={cell.fadeInEnabled ? cell.fadeInMs : ""}
+        data-fade-out-ms={cell.fadeOutEnabled ? cell.fadeOutMs : ""}
+        data-selected={isSelected ? "true" : "false"}
+        draggable={editMode && Boolean(mediaAsset)}
+        aria-label={
+          label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
+        }
+        onDragStart={(event) => {
+          if (!editMode || !mediaAsset) {
+            event.preventDefault();
+            return;
+          }
+          controller.current.setDraggingCellId(cell.id);
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", cell.id);
+        }}
+        onDragEnd={() => {
+          controller.current.suppressNextClick();
+          controller.current.setDraggingCellId(null);
+          controller.current.setDragOverCellId(null);
+        }}
+        onDragOver={(event) => {
+          if (!editMode) {
+            return;
+          }
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          controller.current.setDragOverCellId(cell.id);
+        }}
+        onDragLeave={() => {
+          controller.current.setDragOverCellId((current) => (current === cell.id ? null : current));
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          controller.current.setDraggingCellId(null);
+          controller.current.setDragOverCellId(null);
+          const fromCellId = event.dataTransfer.getData("text/plain");
+          if (fromCellId) {
+            controller.current.suppressNextClick();
+            controller.current.onCellMove(fromCellId, cell.id);
+          }
+        }}
+        onClick={() => {
+          if (controller.current.suppressClickRef.current) {
+            controller.current.suppressClickRef.current = false;
+            return;
+          }
+          if (controller.current.pointerActivatedCellIdRef.current === cell.id) {
+            controller.current.pointerActivatedCellIdRef.current = null;
+            return;
+          }
+          controller.current.onCellClick(cell);
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+        }}
+        onPointerDown={(event) => {
+          if (editMode) {
+            if (event.pointerType !== "mouse" && mediaAsset) {
+              event.preventDefault();
+              try {
+                event.currentTarget.setPointerCapture(event.pointerId);
+              } catch {
+                // Synthetic and older mobile pointer streams may not be capturable.
+              }
+              controller.current.activeTouchPointerIdRef.current = event.pointerId;
+              controller.current.beginTouchDrag(cell.id);
+            }
+            return;
+          }
+          if (cell.playbackMode === "gate") {
+            controller.current.onGateStart(cell);
+            return;
+          }
+          if (event.pointerType !== "mouse") {
+            controller.current.pointerActivatedCellIdRef.current = cell.id;
+            event.currentTarget.blur();
+            controller.current.onCellClick(cell);
+          }
+        }}
+        onPointerMove={(event) => {
+          const currentDrag = controller.current.touchDragRef.current;
+          if (
+            !editMode ||
+            !currentDrag?.active ||
+            (event.pointerType !== "mouse" && controller.current.activeTouchPointerIdRef.current !== event.pointerId)
+          ) {
+            return;
+          }
+          event.preventDefault();
+          controller.current.updateTouchDragTarget(event.clientX, event.clientY);
+        }}
+        onTouchStart={() => {
+          if (supportsPointerEvents()) {
+            return;
+          }
+          if (editMode && mediaAsset) {
+            controller.current.beginTouchDrag(cell.id);
+          }
+        }}
+        onTouchMove={(event) => {
+          if (supportsPointerEvents()) {
+            return;
+          }
+          const currentDrag = controller.current.touchDragRef.current;
+          if (!editMode || !currentDrag?.active) {
+            return;
+          }
+          event.preventDefault();
+          const touch = event.touches[0];
+          if (touch) {
+            controller.current.updateTouchDragTarget(touch.clientX, touch.clientY);
+          }
+        }}
+        onTouchEnd={(event) => {
+          if (supportsPointerEvents()) {
+            return;
+          }
+          if (!editMode || !controller.current.touchDragRef.current) {
+            return;
+          }
+          const wasActive = controller.current.touchDragRef.current.active;
+          if (wasActive) {
+            event.preventDefault();
+          }
+          controller.current.finishTouchDrag(wasActive);
+        }}
+        onPointerUp={(event) => {
+          event.currentTarget.blur();
+          if (editMode && controller.current.touchDragRef.current) {
+            const wasActive = controller.current.touchDragRef.current.active;
+            if (wasActive) {
+              event.preventDefault();
+              controller.current.updateTouchDragTarget(event.clientX, event.clientY);
+            }
+            if (
+              event.pointerType !== "mouse" &&
+              controller.current.activeTouchPointerIdRef.current !== null &&
+              controller.current.activeTouchPointerIdRef.current !== event.pointerId
+            ) {
+              return;
+            }
+            controller.current.finishTouchDrag(wasActive);
+            return;
+          }
+          if (!editMode && cell.playbackMode === "gate") {
+            controller.current.onGateEnd(cell);
+          }
+        }}
+        onPointerCancel={() => {
+          controller.current.pointerActivatedCellIdRef.current = null;
+          if (editMode && controller.current.touchDragRef.current) {
+            controller.current.suppressNextClick();
+            controller.current.finishTouchDrag(false);
+            return;
+          }
+          if (!editMode && cell.playbackMode === "gate") {
+            controller.current.onGateEnd(cell);
+          }
+        }}
+        onPointerLeave={(event) => {
+          event.currentTarget.blur();
+          if (!editMode && cell.playbackMode === "gate") {
+            controller.current.onGateEnd(cell);
+          }
+        }}
+        sx={{
+          position: "relative",
+          minWidth: 0,
+          minHeight: 0,
+          containerType: "size",
+          overflow: "hidden",
+          border: 1,
+          borderColor:
+            activeDragOverCellId === cell.id
+              ? "secondary.main"
+              : isSelected
+              ? "secondary.main"
+              : isPlaying
+                ? "primary.main"
+                : "rgba(169, 183, 207, 0.2)",
+          borderRadius: 1,
+          color: textColor,
+          backgroundColor: displayColor,
+          display: "grid",
+          placeItems: "center",
+          cursor: isDragging
+            ? "grabbing"
+            : editMode && mediaAsset
+              ? "grab"
+              : editMode || mediaAsset
+                ? "pointer"
+                : "default",
+          transition:
+            "transform 160ms ease, border-color 160ms ease, filter 160ms ease, background-color 160ms ease",
+          filter:
+            isPlaying || activeDragOverCellId === cell.id
+              ? "brightness(1.12) saturate(1.22)"
+              : "none",
+          boxShadow:
+            activeDragOverCellId === cell.id
+              ? "0 0 0 2px rgba(255, 204, 102, 0.54), 0 0 18px rgba(255, 204, 102, 0.26)"
+              : "none",
+          "&[data-warm-state='warming']": {
+            animation: "mumbox-cell-warm 720ms ease-in-out infinite"
+          },
+          "&[data-warm-state='ready']:not([data-playing='true'])": {
+            animation: "mumbox-cell-ready 620ms ease-out 1"
+          },
+          // The warm-up pulse is a status signal, not decoration. The global
+          // `prefers-reduced-motion` rule in global.css collapses every animation to a
+          // single 0.01 ms frame, which here does not calm the motion down — it deletes the
+          // information and leaves a twitch. Respect the setting by dropping the motion and
+          // keeping the state visible statically.
+          "@media (prefers-reduced-motion: reduce)": {
+            "&[data-warm-state='warming']": {
+              opacity: 0.6,
+              borderStyle: "dashed",
+              borderColor: "primary.main"
+            }
+          },
+          "&:hover": {
+            transform: "translateY(-1px)",
+            borderColor: "primary.main"
+          },
+          '&[draggable="true"]:active': {
+            cursor: "grabbing"
+          },
+          "&:focus-visible": {
+            outline: "2px solid",
+            outlineColor: "primary.main",
+            outlineOffset: 2
+          },
+          "@media (hover: none), (pointer: coarse)": {
+            WebkitTapHighlightColor: "transparent",
+            touchAction: editMode ? "none" : "manipulation",
+            "&:hover": {
+              transform: "none"
+            },
+            "&:focus, &:focus-visible": {
+              outline: "none"
+            }
+          }
+        }}
+      >
+        {mediaAsset ? (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              display: "grid",
+              gridTemplateRows: "minmax(0, 1fr) auto",
+              placeItems: "center",
+              gap: "clamp(1px, 4cqh, 6px)",
+              p: "clamp(2px, 6cqw, 6px)"
+            }}
+          >
+            {cell.hotkey ? (
+              <Typography
+                component="span"
+                data-testid={`cell-hotkey-${cell.id}`}
+                aria-label={`Комбинация клавиш ${cell.hotkey}`}
+                sx={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  maxWidth: "68%",
+                  px: "clamp(2px, 4cqw, 4px)",
+                  py: "clamp(1px, 2cqh, 2px)",
+                  border: "1px solid rgba(247, 251, 255, 0.18)",
+                  borderRadius: 0.75,
+                  backgroundColor:
+                    textColor === "#031014"
+                      ? "rgba(247, 251, 255, 0.28)"
+                      : "rgba(5, 7, 13, 0.42)",
+                  color: textColor,
+                  fontSize: "clamp(5px, 9cqw, 9px)",
+                  lineHeight: 1.2,
+                  opacity: 0.72,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none"
+                }}
+              >
+                {cell.hotkey}
+              </Typography>
+            ) : null}
+            <PlaybackIndicator
+              mode={cell.playbackMode}
+              progress={progress}
+              active={isPlaying}
+              color={innerMutedColor}
+            />
+            <Typography
+              variant="caption"
+              data-testid={`cell-label-${cell.id}`}
+              sx={{
+                alignSelf: "end",
+                maxWidth: "100%",
+                overflow: "hidden",
+                display: "-webkit-box",
+                WebkitBoxOrient: "vertical",
+                WebkitLineClamp: 2,
+                textOverflow: "ellipsis",
+                whiteSpace: "normal",
+                overflowWrap: "anywhere",
+                wordBreak: "break-word",
+                hyphens: "auto",
+                textAlign: "center",
+                fontSize: "clamp(9px, min(15cqw, 18cqh), 16px)",
+                lineHeight: 1.05
+              }}
+            >
+              {label}
+            </Typography>
+          </Box>
+        ) : null}
+      </Box>
+  );
+});
+
 export function WorkspaceGrid({
   panelId,
   gridSize,
@@ -179,7 +596,7 @@ export function WorkspaceGrid({
   editMode,
   selectedCellId,
   playingCells,
-  warmedMedia,
+  warmedCells,
   onCellClick,
   onGateStart,
   onGateEnd,
@@ -200,6 +617,31 @@ export function WorkspaceGrid({
     () => new Map(playingCells.map((cell) => [cell.cellKey, cell.progress])),
     [playingCells]
   );
+  // A linear scan per cell made this O(cells x media) on every repaint — 5 760 comparisons for a
+  // 144-cell panel with 40 media, repeated on every frame of playback.
+  const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
+
+  /**
+   * Mutated in place on every render so its identity never changes. Passing the callbacks
+   * directly would give each cell new props every render and defeat the memoisation entirely.
+   */
+  const controllerRef = useRef<CellController>({
+    editMode,
+    onCellClick,
+    onGateStart,
+    onGateEnd,
+    onCellMove,
+    setDraggingCellId,
+    setDragOverCellId,
+    suppressNextClick: () => undefined,
+    beginTouchDrag: () => undefined,
+    updateTouchDragTarget: () => undefined,
+    finishTouchDrag: () => undefined,
+    suppressClickRef: { current: false },
+    pointerActivatedCellIdRef: { current: null },
+    activeTouchPointerIdRef: { current: null },
+    touchDragRef: { current: null }
+  });
 
   const clearTouchDragTimer = () => {
     if (touchDragTimerRef.current) {
@@ -262,6 +704,26 @@ export function WorkspaceGrid({
     }
   };
 
+  // Refreshed after every handler above is defined, so the cells always call the current ones
+  // while the ref itself stays identical.
+  controllerRef.current = {
+    editMode,
+    onCellClick,
+    onGateStart,
+    onGateEnd,
+    onCellMove,
+    setDraggingCellId,
+    setDragOverCellId,
+    suppressNextClick,
+    beginTouchDrag,
+    updateTouchDragTarget,
+    finishTouchDrag,
+    suppressClickRef,
+    pointerActivatedCellIdRef,
+    activeTouchPointerIdRef,
+    touchDragRef
+  };
+
   const handleGridDragOver = (event: React.DragEvent) => {
     if (!editMode || !onAudioDrop) {
       return;
@@ -316,7 +778,11 @@ export function WorkspaceGrid({
 
     if (items.length > 0 && items[0] && "webkitGetAsEntry" in items[0]) {
       const entries = items
-        .map((item) => (item as any).webkitGetAsEntry() as FileSystemEntryLike | null)
+        .map((item) =>
+          (
+            item as unknown as { webkitGetAsEntry: () => FileSystemEntryLike | null }
+          ).webkitGetAsEntry()
+        )
         .filter((entry): entry is FileSystemEntryLike => entry !== null);
 
       const processEntry = async (entry: FileSystemEntryLike): Promise<void> => {
@@ -360,7 +826,9 @@ export function WorkspaceGrid({
       aria-label={`Рабочая сетка ${String(gridSize)} на ${String(gridSize)}`}
       onDragOver={handleGridDragOver}
       onDragLeave={handleGridDragLeave}
-      onDrop={handleGridDrop}
+      onDrop={(event) => {
+        void handleGridDrop(event);
+      }}
       sx={{
         minWidth: 0,
         minHeight: 0,
@@ -399,351 +867,31 @@ export function WorkspaceGrid({
       >
         {cells.map((cell, index) => {
           const cellKey = `${panelId}:${cell.id}`;
-          const mediaAsset = media.find((item) => item.id === cell.mediaId) ?? null;
-          const label = cell.aliasOverride.trim()
-            ? cell.aliasOverride
-            : mediaAsset?.alias.trim()
-              ? mediaAsset.alias
-              : mediaAsset?.fileName ?? "";
-          const color = cell.colorOverride ?? mediaAsset?.color ?? "rgba(34, 43, 60, 0.76)";
+          const mediaAsset = cell.mediaId ? (mediaById.get(cell.mediaId) ?? null) : null;
           const playingProgress = playingByCellKey.get(cellKey);
           const isPlaying = playingProgress !== undefined;
           const isSelected = editMode && selectedCellId === cell.id;
           const isDragging =
             draggingCellId === cell.id || (touchDrag?.active && touchDrag.fromCellId === cell.id);
           const progress = playingProgress ?? 0;
-          const warmState = cell.mediaId
-            ? warmedMedia.find((item) => item.mediaId === cell.mediaId)?.state ?? "idle"
-            : "idle";
+          const warmState = cell.mediaId ? (warmedCells[cell.id] ?? "idle") : "idle";
           const activeDragOverCellId = touchDrag?.overCellId ?? dragOverCellId;
-          const displayColor = mediaAsset
-            ? isPlaying
-              ? mixHexColor(color, "#ffffff", 0.24)
-              : mixHexColor(color, "#070b14", 0.54)
-            : "rgba(34, 43, 60, 0.76)";
-          const textColor = mediaAsset ? getReadableTextColor(displayColor) : "#a9b7cf";
-          const innerMutedColor = `color-mix(in srgb, ${textColor} 82%, transparent)`;
 
           return (
-            <Box
+            <WorkspaceGridCell
               key={cellKey}
-              component="button"
-              type="button"
-              data-cell-id={cell.id}
-              data-playing={isPlaying ? "true" : "false"}
-              data-warm-state={warmState}
-              data-playback-mode={cell.playbackMode}
-              data-hotkey={cell.hotkey}
-              data-volume-offset={cell.volumeOffset}
-              data-trim-start-ms={cell.trimStartMs ?? ""}
-              data-trim-end-ms={cell.trimEndMs ?? ""}
-              data-fade-in-ms={cell.fadeInEnabled ? cell.fadeInMs : ""}
-              data-fade-out-ms={cell.fadeOutEnabled ? cell.fadeOutMs : ""}
-              data-selected={isSelected ? "true" : "false"}
-              draggable={editMode && Boolean(mediaAsset)}
-              aria-label={
-                label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
-              }
-              onDragStart={(event) => {
-                if (!editMode || !mediaAsset) {
-                  event.preventDefault();
-                  return;
-                }
-                setDraggingCellId(cell.id);
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", cell.id);
-              }}
-              onDragEnd={() => {
-                suppressNextClick();
-                setDraggingCellId(null);
-                setDragOverCellId(null);
-              }}
-              onDragOver={(event) => {
-                if (!editMode) {
-                  return;
-                }
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                setDragOverCellId(cell.id);
-              }}
-              onDragLeave={() => {
-                setDragOverCellId((current) => (current === cell.id ? null : current));
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDraggingCellId(null);
-                setDragOverCellId(null);
-                const fromCellId = event.dataTransfer.getData("text/plain");
-                if (fromCellId) {
-                  suppressNextClick();
-                  onCellMove(fromCellId, cell.id);
-                }
-              }}
-              onClick={() => {
-                if (suppressClickRef.current) {
-                  suppressClickRef.current = false;
-                  return;
-                }
-                if (pointerActivatedCellIdRef.current === cell.id) {
-                  pointerActivatedCellIdRef.current = null;
-                  return;
-                }
-                onCellClick(cell);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-              }}
-              onPointerDown={(event) => {
-                if (editMode) {
-                  if (event.pointerType !== "mouse" && mediaAsset) {
-                    event.preventDefault();
-                    try {
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                    } catch {
-                      // Synthetic and older mobile pointer streams may not be capturable.
-                    }
-                    activeTouchPointerIdRef.current = event.pointerId;
-                    beginTouchDrag(cell.id);
-                  }
-                  return;
-                }
-                if (cell.playbackMode === "gate") {
-                  onGateStart(cell);
-                  return;
-                }
-                if (event.pointerType !== "mouse") {
-                  pointerActivatedCellIdRef.current = cell.id;
-                  event.currentTarget.blur();
-                  onCellClick(cell);
-                }
-              }}
-              onPointerMove={(event) => {
-                const currentDrag = touchDragRef.current;
-                if (
-                  !editMode ||
-                  !currentDrag?.active ||
-                  (event.pointerType !== "mouse" && activeTouchPointerIdRef.current !== event.pointerId)
-                ) {
-                  return;
-                }
-                event.preventDefault();
-                updateTouchDragTarget(event.clientX, event.clientY);
-              }}
-              onTouchStart={() => {
-                if (supportsPointerEvents()) {
-                  return;
-                }
-                if (editMode && mediaAsset) {
-                  beginTouchDrag(cell.id);
-                }
-              }}
-              onTouchMove={(event) => {
-                if (supportsPointerEvents()) {
-                  return;
-                }
-                const currentDrag = touchDragRef.current;
-                if (!editMode || !currentDrag?.active) {
-                  return;
-                }
-                event.preventDefault();
-                const touch = event.touches[0];
-                if (touch) {
-                  updateTouchDragTarget(touch.clientX, touch.clientY);
-                }
-              }}
-              onTouchEnd={(event) => {
-                if (supportsPointerEvents()) {
-                  return;
-                }
-                if (!editMode || !touchDragRef.current) {
-                  return;
-                }
-                const wasActive = touchDragRef.current.active;
-                if (wasActive) {
-                  event.preventDefault();
-                }
-                finishTouchDrag(wasActive);
-              }}
-              onPointerUp={(event) => {
-                event.currentTarget.blur();
-                if (editMode && touchDragRef.current) {
-                  const wasActive = touchDragRef.current.active;
-                  if (wasActive) {
-                    event.preventDefault();
-                    updateTouchDragTarget(event.clientX, event.clientY);
-                  }
-                  if (
-                    event.pointerType !== "mouse" &&
-                    activeTouchPointerIdRef.current !== null &&
-                    activeTouchPointerIdRef.current !== event.pointerId
-                  ) {
-                    return;
-                  }
-                  finishTouchDrag(wasActive);
-                  return;
-                }
-                if (!editMode && cell.playbackMode === "gate") {
-                  onGateEnd(cell);
-                }
-              }}
-              onPointerCancel={() => {
-                pointerActivatedCellIdRef.current = null;
-                if (editMode && touchDragRef.current) {
-                  suppressNextClick();
-                  finishTouchDrag(false);
-                  return;
-                }
-                if (!editMode && cell.playbackMode === "gate") {
-                  onGateEnd(cell);
-                }
-              }}
-              onPointerLeave={(event) => {
-                event.currentTarget.blur();
-                if (!editMode && cell.playbackMode === "gate") {
-                  onGateEnd(cell);
-                }
-              }}
-              sx={{
-                position: "relative",
-                minWidth: 0,
-                minHeight: 0,
-                containerType: "size",
-                overflow: "hidden",
-                border: 1,
-                borderColor:
-                  activeDragOverCellId === cell.id
-                    ? "secondary.main"
-                    : isSelected
-                    ? "secondary.main"
-                    : isPlaying
-                      ? "primary.main"
-                      : "rgba(169, 183, 207, 0.2)",
-                borderRadius: 1,
-                color: textColor,
-                backgroundColor: displayColor,
-                display: "grid",
-                placeItems: "center",
-                cursor: isDragging
-                  ? "grabbing"
-                  : editMode && mediaAsset
-                    ? "grab"
-                    : editMode || mediaAsset
-                      ? "pointer"
-                      : "default",
-                transition:
-                  "transform 160ms ease, border-color 160ms ease, filter 160ms ease, background-color 160ms ease",
-                filter:
-                  isPlaying || activeDragOverCellId === cell.id
-                    ? "brightness(1.12) saturate(1.22)"
-                    : "none",
-                boxShadow:
-                  activeDragOverCellId === cell.id
-                    ? "0 0 0 2px rgba(255, 204, 102, 0.54), 0 0 18px rgba(255, 204, 102, 0.26)"
-                    : "none",
-                "&[data-warm-state='warming']": {
-                  animation: "mumbox-cell-warm 720ms ease-in-out infinite"
-                },
-                "&[data-warm-state='ready']:not([data-playing='true'])": {
-                  animation: "mumbox-cell-ready 620ms ease-out 1"
-                },
-                "&:hover": {
-                  transform: "translateY(-1px)",
-                  borderColor: "primary.main"
-                },
-                '&[draggable="true"]:active': {
-                  cursor: "grabbing"
-                },
-                "&:focus-visible": {
-                  outline: "2px solid",
-                  outlineColor: "primary.main",
-                  outlineOffset: 2
-                },
-                "@media (hover: none), (pointer: coarse)": {
-                  WebkitTapHighlightColor: "transparent",
-                  touchAction: editMode ? "none" : "manipulation",
-                  "&:hover": {
-                    transform: "none"
-                  },
-                  "&:focus, &:focus-visible": {
-                    outline: "none"
-                  }
-                }
-              }}
-            >
-              {mediaAsset ? (
-                <Box
-                  sx={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "grid",
-                    gridTemplateRows: "minmax(0, 1fr) auto",
-                    placeItems: "center",
-                    gap: "clamp(1px, 4cqh, 6px)",
-                    p: "clamp(2px, 6cqw, 6px)"
-                  }}
-                >
-                  {cell.hotkey ? (
-                    <Typography
-                      component="span"
-                      data-testid={`cell-hotkey-${cell.id}`}
-                      aria-label={`Комбинация клавиш ${cell.hotkey}`}
-                      sx={{
-                        position: "absolute",
-                        top: 4,
-                        right: 4,
-                        maxWidth: "68%",
-                        px: "clamp(2px, 4cqw, 4px)",
-                        py: "clamp(1px, 2cqh, 2px)",
-                        border: "1px solid rgba(247, 251, 255, 0.18)",
-                        borderRadius: 0.75,
-                        backgroundColor:
-                          textColor === "#031014"
-                            ? "rgba(247, 251, 255, 0.28)"
-                            : "rgba(5, 7, 13, 0.42)",
-                        color: textColor,
-                        fontSize: "clamp(5px, 9cqw, 9px)",
-                        lineHeight: 1.2,
-                        opacity: 0.72,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        pointerEvents: "none"
-                      }}
-                    >
-                      {cell.hotkey}
-                    </Typography>
-                  ) : null}
-                  <PlaybackIndicator
-                    mode={cell.playbackMode}
-                    progress={progress}
-                    active={isPlaying}
-                    color={innerMutedColor}
-                  />
-                  <Typography
-                    variant="caption"
-                    data-testid={`cell-label-${cell.id}`}
-                    sx={{
-                      alignSelf: "end",
-                      maxWidth: "100%",
-                      overflow: "hidden",
-                      display: "-webkit-box",
-                      WebkitBoxOrient: "vertical",
-                      WebkitLineClamp: 2,
-                      textOverflow: "ellipsis",
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                      hyphens: "auto",
-                      textAlign: "center",
-                      fontSize: "clamp(9px, min(15cqw, 18cqh), 16px)",
-                      lineHeight: 1.05
-                    }}
-                  >
-                    {label}
-                  </Typography>
-                </Box>
-              ) : null}
-            </Box>
+              cell={cell}
+              index={index}
+              mediaAsset={mediaAsset}
+              isPlaying={isPlaying}
+              progress={progress}
+              warmState={warmState}
+              isSelected={isSelected}
+              isDragging={Boolean(isDragging)}
+              activeDragOverCellId={activeDragOverCellId}
+              editMode={editMode}
+              controller={controllerRef}
+            />
           );
         })}
       </Box>

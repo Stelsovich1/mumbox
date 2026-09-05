@@ -20,10 +20,20 @@ export type AppState = {
   masterMuted: boolean;
   editMode: boolean;
   stopOthers: boolean;
+  /**
+   * Halves the decoded PCM footprint by downmixing to one channel. Off by default: stereo
+   * material collapses, so this is a user decision, never an automatic optimization.
+   */
+  monoPlayback: boolean;
 };
 
-export type SerializableAppState = Omit<AppState, "editMode" | "masterMuted"> & {
+export type SerializableAppState = Omit<
+  AppState,
+  "editMode" | "masterMuted" | "monoPlayback"
+> & {
   masterMuted?: boolean;
+  // Optional so projects and saves written before mono existed still import.
+  monoPlayback?: boolean;
 };
 
 type ImportMediaDraft = {
@@ -88,6 +98,7 @@ export type AppAction =
   | { type: "volume/muteToggle" }
   | { type: "editMode/toggle" }
   | { type: "stopOthers/toggle" }
+  | { type: "mono/set"; value: boolean }
   | { type: "state/reset" }
   | { type: "state/import"; state: SerializableAppState };
 
@@ -227,7 +238,8 @@ export function createInitialState(): AppState {
     masterVolume: 80,
     masterMuted: false,
     editMode: false,
-    stopOthers: false
+    stopOthers: false,
+    monoPlayback: false
   };
 }
 
@@ -258,7 +270,8 @@ function sanitizeImportedState(state: SerializableAppState): AppState {
     masterVolume: state.masterVolume,
     masterMuted: state.masterMuted ?? false,
     editMode: false,
-    stopOthers: state.stopOthers
+    stopOthers: state.stopOthers,
+    monoPlayback: state.monoPlayback ?? false
   };
 }
 
@@ -270,7 +283,8 @@ export function serializeState(state: AppState): SerializableAppState {
     media: state.media,
     masterVolume: state.masterVolume,
     masterMuted: state.masterMuted,
-    stopOthers: state.stopOthers
+    stopOthers: state.stopOthers,
+    monoPlayback: state.monoPlayback
   };
 }
 
@@ -554,6 +568,8 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, editMode: !state.editMode };
     case "stopOthers/toggle":
       return { ...state, stopOthers: !state.stopOthers };
+    case "mono/set":
+      return state.monoPlayback === action.value ? state : { ...state, monoPlayback: action.value };
     case "state/reset":
       return createInitialState();
     case "state/import":

@@ -58,6 +58,12 @@ import { MediaLibraryDialog } from "../../../features/media-library";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
+import {
+  recordPanelSwitchPaint,
+  setActivePanelId,
+  setDiagnosticsSinks
+} from "../../../shared/lib/diagnostics";
+import { clearMediaCaches, purgeMediaCaches } from "../../../shared/lib/mediaCacheRegistry";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
 import { RightToolbar } from "../../right-toolbar";
@@ -232,14 +238,44 @@ export function AppShell() {
     const cells = state.cellsByPanel[activePanel.id] ?? {};
     return activePanel.cellIds.map((cellId) => cells[cellId]).filter(isDefinedCell);
   }, [activePanel, state.cellsByPanel]);
-  const { playingCells, warmedMedia, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
+  const { playingCells, warmedCells, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
     activePanel?.id ?? "",
     state.media,
     activeCells,
     state.masterVolume,
     state.masterMuted,
-    state.stopOthers
+    state.stopOthers,
+    state.monoPlayback
   );
+
+  useEffect(() => {
+    // Mono is deliberately not in the toolbar yet: it is off by default and unproven until the
+    // on-device numbers land, so it is reachable only through the diagnostics API.
+    setDiagnosticsSinks({
+      setMono: (mono) => {
+        dispatch({ type: "mono/set", value: mono });
+      },
+      clearCaches: () => {
+        clearMediaCaches();
+      }
+    });
+  }, [dispatch]);
+
+  const activePanelId = activePanel?.id ?? null;
+  useEffect(() => {
+    setActivePanelId(activePanelId);
+    // Double rAF measures what the user feels — the engine-side switch cost is recorded
+    // separately inside the audio engine, and the two answer different questions.
+    const startedAt = performance.now();
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        recordPanelSwitchPaint(performance.now() - startedAt);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [activePanelId]);
 
   const handleOpenFileMenu = (event: MouseEvent<HTMLButtonElement>) => {
     setFileAnchor(event.currentTarget);
@@ -480,6 +516,9 @@ export function AppShell() {
     (mediaId: string) => {
       stopAll();
       dispatch({ type: "media/deleteMany", mediaIds: [mediaId] });
+      // The IndexedDB blob and the decoded PCM are two separate stores; deleting one without the
+      // other left the decoded copy resident for the rest of the session.
+      purgeMediaCaches([mediaId]);
       void deleteStoredMedia([mediaId]).catch(() => {
         setSaveMessage("Не удалось удалить аудио из хранилища браузера");
       });
@@ -556,6 +595,8 @@ export function AppShell() {
           updateOperationProgress
         );
         dispatch({ type: "state/import", state: importedState });
+        // Import regenerates every media id, so nothing in the caches can be reused.
+        clearMediaCaches();
         await deleteStoredMedia(oldMediaIds);
         setSelectedCellId(null);
         setSaveMessage(`Проект импортирован: ${file.name}`);
@@ -652,7 +693,7 @@ export function AppShell() {
             : `Импортировано ${String(importedMedia.length)} аудио в медиатеку`;
 
         setSaveMessage(message);
-      } catch (error) {
+      } catch {
         setSaveMessage("Не удалось импортировать аудио");
       } finally {
         setImportLoading(false);
@@ -967,7 +1008,7 @@ export function AppShell() {
           editMode={state.editMode}
           selectedCellId={selectedCellId}
           playingCells={playingCells}
-          warmedMedia={warmedMedia}
+          warmedCells={warmedCells}
           onCellClick={(cell) => {
             if (state.editMode) {
               setSelectedCellId(cell.id);
@@ -998,7 +1039,9 @@ export function AppShell() {
             });
             dispatch({ type: "cell/move", panelId: activePanel.id, fromCellId, toCellId });
           }}
-          onAudioDrop={handleAudioDrop}
+          onAudioDrop={(files) => {
+            void handleAudioDrop(files);
+          }}
         />
         <RightToolbar
           masterVolume={state.masterVolume}
@@ -1334,6 +1377,7 @@ export function AppShell() {
                   stopAll();
                   setSelectedCellId(null);
                   dispatch({ type: "state/reset" });
+                  clearMediaCaches();
                   setSaveMessage("Все данные MUMBOX стерты");
                 })
                 .finally(() => {

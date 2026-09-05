@@ -23,7 +23,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject
 import { AppAction, getMediaBlob } from "../../../app/model/appState";
 import { GridCell } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
-import { WaveformPeaks, waveformPeakCache } from "../model/waveformCache";
+import {
+  decodedDurationCache,
+  WaveformPeaks,
+  waveformPeakCache
+} from "../model/waveformCache";
 import {
   getEnvelopeValue,
   getTrimEndSeconds,
@@ -65,12 +69,14 @@ type WaveformBuildResult = {
 };
 
 const WAVEFORM_PEAKS = 2_048;
-const WAVEFORM_BUCKETS_PER_FRAME = 16;
+// A time budget instead of a fixed bucket count. At 16 buckets per frame, 2048 buckets took
+// about 128 animation frames — roughly two seconds during which the FULL decoded buffer stays
+// pinned. On a 15 MB MP3 that is a 220 MiB spike just to open the editor.
+const WAVEFORM_FRAME_BUDGET_MS = 8;
 const ZOOM_COMMIT_DELAY_MS = 90;
 const VOLUME_OFFSET_MIN = -100;
 const VOLUME_OFFSET_MAX = 300;
 const TOUCH_TAP_TOLERANCE_PX = 8;
-const decodedDurationCache = new Map<string, number>();
 
 function getDurationMs(media: MediaAsset) {
   return media.durationMs ?? 10_000;
@@ -135,7 +141,7 @@ async function yieldWaveformFrame(signal: AbortSignal) {
 async function buildWaveform(mediaId: string, signal: AbortSignal): Promise<WaveformBuildResult> {
   const cachedWaveform = waveformPeakCache.get(mediaId);
   if (cachedWaveform) {
-    return { peaks: cachedWaveform, durationMs: decodedDurationCache.get(mediaId) ?? null };
+    return { peaks: cachedWaveform, durationMs: decodedDurationCache.get(mediaId) };
   }
 
   const blob = await getMediaBlob(mediaId);
@@ -144,7 +150,9 @@ async function buildWaveform(mediaId: string, signal: AbortSignal): Promise<Wave
     return { peaks: makeFallbackWaveform(), durationMs: null };
   }
 
-  const audioContext = new AudioContext();
+  // An OfflineAudioContext, not a live one: iOS caps concurrent AudioContexts at a handful and
+  // burning one purely to decode a waveform is a real failure source.
+  const audioContext = new OfflineAudioContext(1, 1, 44_100);
   try {
     const audioBuffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
     throwIfWaveformAborted(signal);
@@ -152,9 +160,11 @@ async function buildWaveform(mediaId: string, signal: AbortSignal): Promise<Wave
       audioBuffer.getChannelData(index)
     );
     const peaks = new Float32Array(WAVEFORM_PEAKS * 2);
+    let frameStartedAt = performance.now();
     for (let index = 0; index < WAVEFORM_PEAKS; index += 1) {
-      if (index > 0 && index % WAVEFORM_BUCKETS_PER_FRAME === 0) {
+      if (index > 0 && performance.now() - frameStartedAt > WAVEFORM_FRAME_BUDGET_MS) {
         await yieldWaveformFrame(signal);
+        frameStartedAt = performance.now();
       }
       const start = Math.floor((index / WAVEFORM_PEAKS) * audioBuffer.length);
       const end = Math.max(start + 1, Math.floor(((index + 1) / WAVEFORM_PEAKS) * audioBuffer.length));
@@ -181,8 +191,6 @@ async function buildWaveform(mediaId: string, signal: AbortSignal): Promise<Wave
     return { peaks, durationMs };
   } catch {
     return { peaks: makeFallbackWaveform(), durationMs: null };
-  } finally {
-    await audioContext.close();
   }
 }
 
@@ -731,16 +739,20 @@ export function AudioEditorDialog({
       audio.currentTime = startSeconds;
     }
     route.volumeGain.gain.setValueAtTime(getPreviewVolume(draftRef.current.volumeOffset), route.context.currentTime);
+    // `scheduleEnvelope` now absorbs an InvalidStateError from `setValueCurveAtTime` itself and
+    // leaves the gain at the analytic value, so this catch only covers a Web Audio graph that is
+    // broken outright. It deliberately does NOT branch on the boolean return: `false` also means
+    // "no curve was needed", and tearing the preview route down at the end of the region would
+    // be a behaviour change, not a fix.
     try {
       scheduleEnvelope(route.envelopeGain, draftRef.current, audio.currentTime, endSeconds);
     } catch {
       void route.context.close();
       previewRouteRef.current = null;
-      audio.volume =
-        getHtmlAudioVolume(
-          getPreviewVolume(draftRef.current.volumeOffset) *
-            getEnvelopeValue(draftRef.current, audio.currentTime, endSeconds)
-        );
+      audio.volume = getHtmlAudioVolume(
+        getPreviewVolume(draftRef.current.volumeOffset) *
+          getEnvelopeValue(draftRef.current, audio.currentTime, endSeconds)
+      );
     }
   }, [durationMs]);
 
@@ -845,6 +857,12 @@ export function AudioEditorDialog({
 
   const saveAndClose = () => {
     stopPreview();
+    // No cache purge here on purpose. A trim change moves the cell to a different playback cache
+    // key, and the engine's panel-eviction pass drops the key that is no longer referenced on the
+    // very next commit. Purging by media id instead would take out the waveform peaks and the
+    // decoded duration — neither of which depends on the trim — forcing a full re-decode the next
+    // time this editor opens, and would also drop the buffers of every other cell using this
+    // media, whose trim windows did not change.
     dispatch({
       type: "cell/update",
       panelId,

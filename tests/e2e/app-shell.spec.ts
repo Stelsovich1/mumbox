@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { mkdir, readFile, truncate, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const audioFile = {
@@ -127,6 +127,16 @@ async function installAudioMock(page: Page, options: { decodedDuration?: number 
         this.paused = true;
         this.dispatchEvent(new Event("pause"));
       }
+
+      // Part of HTMLMediaElement, and `readAudioDurationMs` uses both to make Safari release the
+      // media resource loader. A double that omits them is not standing in for the real thing.
+      removeAttribute() {
+        // no-op
+      }
+
+      load() {
+        // no-op
+      }
     }
 
     Object.defineProperty(window, "Audio", {
@@ -207,6 +217,12 @@ async function installAudioMock(page: Page, options: { decodedDuration?: number 
     }
 
     Object.defineProperty(window, "AudioContext", {
+      value: MockAudioContext
+    });
+    // The waveform builder decodes through an OfflineAudioContext now, so that a live context is
+    // not burned purely to read a file. Without this the editor falls back to a flat waveform and
+    // `__mumboxDecodeAudioCalls` never moves.
+    Object.defineProperty(window, "OfflineAudioContext", {
       value: MockAudioContext
     });
   }, options);
@@ -483,7 +499,7 @@ test("exports, resets, and imports a project with audio", async ({
   await expect(page.getByRole("button", { name: "Пустая ячейка 1", exact: true })).toBeVisible();
 
   await page.getByTestId("project-file-input").setInputFiles(projectPath);
-  await expect(page.getByText(`Проект импортирован: ${projectPath.split("/").at(-1) ?? ""}`)).toBeVisible();
+  await expect(page.getByText(`Проект импортирован: ${basename(projectPath)}`)).toBeVisible();
   await expect(page.getByRole("button", { name: "Ячейка 1 Portable Pad" })).toBeVisible();
 });
 

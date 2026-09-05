@@ -15,5 +15,11 @@
     "noImplicitOverride": true,
     "noEmit": true
   },
-  "include": ["vite.config.ts", "playwright.config.ts", "tests/e2e/**/*.ts"]
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "playwright.unit.config.ts",
+    "playwright.perf.config.ts",
+    "tests/**/*.ts"
+  ]
 }

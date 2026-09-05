@@ -9,7 +9,10 @@
     "preview": "vite preview --host 127.0.0.1",
     "deploy": "gh-pages -d dist",
     "lint": "eslint .",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:unit": "playwright test -c playwright.unit.config.ts",
+    "test:perf": "playwright test -c playwright.perf.config.ts",
+    "test": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
