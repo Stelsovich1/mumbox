@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { installBufferAudioMock } from "../support/audioMock";
+import { makeWavBuffer } from "../support/audioFixtures";
 import {
   diagCacheKeys,
   diagCacheStats,
@@ -448,4 +449,48 @@ test("retention survives an edit made without leaving the panel", async ({ page 
   await page.waitForTimeout(500);
   // Panel 1's buffer was retained across the edit, so returning costs no decode.
   expect(await diagDecodeCount(page)).toBe(3);
+});
+
+test("a multi-cell drop decodes each media exactly once", async ({ page }) => {
+  // Six cells filled in one gesture must cost six decodes, not more. React already batches the
+  // dispatches inside one handler, so this does not discriminate batched from unbatched assignment;
+  // what it guards is that the warm-up does not restart mid-flight and re-decode what its own
+  // still-running workers were about to cache.
+  await installBufferAudioMock(page);
+  const wav = makeWavBuffer(SPEC).toString("base64");
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 0,
+    spec: SPEC,
+    filledCellsPerPanel: 0
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+  await page.locator('[aria-label^="Рабочая сетка"]').evaluate(
+    (grid, payload) => {
+      const bytes = Uint8Array.from(atob(payload.wav), (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      for (let index = 0; index < 6; index += 1) {
+        transfer.items.add(
+          new File([bytes], `batched-${String(index)}.wav`, { type: "audio/wav" })
+        );
+      }
+      for (const type of ["dragover", "drop"]) {
+        const event = new DragEvent(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(event, "dataTransfer", { value: transfer });
+        grid.dispatchEvent(event);
+      }
+    },
+    { wav }
+  );
+
+  await waitForWarm(page, 6);
+  await expect.poll(async () => diagDecodeCount(page), { timeout: 15_000 }).toBe(6);
+
+  // The count must not climb once the run has settled: a restarted warm-up shows up here.
+  await page.waitForTimeout(750);
+  expect(await diagDecodeCount(page)).toBe(6);
+  expect(await diagCacheKeys(page)).toHaveLength(6);
 });

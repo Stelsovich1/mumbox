@@ -811,7 +811,12 @@ export function WorkspaceGrid({
       for (const entry of entries) {
         await processEntry(entry);
       }
-    } else {
+    }
+
+    // A drag whose items carry no filesystem entry (a programmatic DataTransfer, and some
+    // non-explorer sources) yields no entries at all. Falling back to `files` keeps those drops
+    // working instead of swallowing them silently.
+    if (files.length === 0) {
       files.push(...Array.from(event.dataTransfer.files));
     }
 

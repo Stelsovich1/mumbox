@@ -673,18 +673,14 @@ export function AppShell() {
 
         const cells = activePanel ? state.cellsByPanel[activePanel.id] ?? {} : {};
         const freeCellIds = activePanel ? activePanel.cellIds.filter((id) => !cells[id]?.mediaId) : [];
-        const cellsToAssign = Math.min(importedMedia.length, freeCellIds.length);
+        const assignments = freeCellIds
+          .slice(0, importedMedia.length)
+          .map((cellId, index) => ({ cellId, mediaId: importedMedia[index]?.id ?? "" }))
+          .filter((assignment) => assignment.mediaId !== "");
+        const cellsToAssign = assignments.length;
 
-        for (let i = 0; i < cellsToAssign; i++) {
-          const cellId = freeCellIds[i];
-          const media = importedMedia[i];
-          if (!cellId || !media || !activePanel) continue;
-          dispatch({
-            type: "cell/assign",
-            panelId: activePanel.id,
-            cellId,
-            mediaId: media.id
-          });
+        if (activePanel && cellsToAssign > 0) {
+          dispatch({ type: "cell/assignMany", panelId: activePanel.id, assignments });
         }
 
         const message =
