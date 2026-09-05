@@ -1604,6 +1604,60 @@ test("swaps configured cells when dragging onto an occupied cell", async ({ page
   await expect(page.getByTestId("cell-hotkey-cell-1")).toHaveText("L");
 });
 
+async function dropAudioFilesOnGrid(page: Page, fileNames: string[]) {
+  await page.locator('[aria-label^="Рабочая сетка"]').evaluate((grid, names) => {
+    const transfer = new DataTransfer();
+    for (const name of names) {
+      transfer.items.add(new File([new Uint8Array([82, 73, 70, 70])], name, { type: "audio/wav" }));
+    }
+    for (const type of ["dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      grid.dispatchEvent(event);
+    }
+  }, fileNames);
+}
+
+test("assigns free cells when audio files are dropped on the grid", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+  await dropAudioFilesOnGrid(page, ["drop-a.wav", "drop-b.wav", "drop-c.wav"]);
+
+  await expect(page.getByText("Импортировано 3 аудио, назначено 3 ячеек")).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 drop-a.wav"
+  );
+  await expect(page.locator('[data-cell-id="cell-1"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 2 drop-b.wav"
+  );
+  await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 3 drop-c.wav"
+  );
+});
+
+test("keeps dropped audio in the library when no cell is free", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await page.keyboard.press("Escape");
+
+  // Fill the whole 6x6 panel, then drop one more file: it must land in the library only.
+  const fillNames = Array.from({ length: 36 }, (_, index) => `fill-${String(index)}.wav`);
+  await dropAudioFilesOnGrid(page, fillNames);
+  await expect(page.getByText("Импортировано 36 аудио, назначено 36 ячеек")).toBeVisible();
+
+  await dropAudioFilesOnGrid(page, ["extra.wav"]);
+
+  await expect(page.getByText("Импортировано 1 аудио в медиатеку")).toBeVisible();
+});
+
 test("binds hotkeys only once per panel and triggers playback outside edit mode", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "hotkey settings are desktop-only");
   await installAudioMock(page);

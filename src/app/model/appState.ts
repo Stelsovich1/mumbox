@@ -83,6 +83,11 @@ export type AppAction =
       playbackMode?: PlaybackMode;
     }
   | {
+      type: "cell/assignMany";
+      panelId: string;
+      assignments: { cellId: string; mediaId: string; playbackMode?: PlaybackMode }[];
+    }
+  | {
       type: "cell/update";
       panelId: string;
       cellId: string;
@@ -116,6 +121,15 @@ export type AppAction =
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
+}
+
+/** Shared by `cell/assign` and `cell/assignMany` so the two cannot drift. */
+function assignCellMedia(cell: GridCell, mediaId: string, playbackMode?: PlaybackMode): GridCell {
+  return {
+    ...cell,
+    mediaId,
+    playbackMode: playbackMode ?? cell.playbackMode
+  };
 }
 
 function makePanel(name: string): Panel {
@@ -353,12 +367,44 @@ function reducer(state: AppState, action: AppAction): AppState {
           ...state.cellsByPanel,
           [action.panelId]: {
             ...state.cellsByPanel[action.panelId],
-            [action.cellId]: {
-              ...cell,
-              mediaId: action.mediaId,
-              playbackMode: action.playbackMode ?? cell.playbackMode
-            }
+            [action.cellId]: assignCellMedia(cell, action.mediaId, action.playbackMode)
           }
+        }
+      };
+    }
+    case "cell/assignMany": {
+      // One dispatch for a whole multi-drop. N separate `cell/assign` calls change the warm-up
+      // signature N times, and every restart wipes the shared-decode staging, so the same media is
+      // decoded again by workers that are still in flight.
+      const panel = state.panels.find((candidate) => candidate.id === action.panelId);
+      if (!panel || action.assignments.length === 0) {
+        return state;
+      }
+
+      const panelCellIds = new Set(panel.cellIds);
+      const cells = { ...state.cellsByPanel[action.panelId] };
+      let changed = false;
+
+      for (const assignment of action.assignments) {
+        if (!panelCellIds.has(assignment.cellId)) {
+          continue;
+        }
+        const cell = cells[assignment.cellId] ?? makeCell(assignment.cellId);
+        cells[assignment.cellId] = assignCellMedia(cell, assignment.mediaId, assignment.playbackMode);
+        changed = true;
+      }
+
+      // Returning the same object identity skips the localStorage write and leaves the warm-up
+      // signature untouched.
+      if (!changed) {
+        return state;
+      }
+
+      return {
+        ...state,
+        cellsByPanel: {
+          ...state.cellsByPanel,
+          [action.panelId]: cells
         }
       };
     }
