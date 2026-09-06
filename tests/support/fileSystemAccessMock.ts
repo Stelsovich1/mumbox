@@ -22,6 +22,8 @@ export type FilePickerMockOptions = {
   saveName?: string;
   /** File names the open picker returns, one handle each. */
   openNames?: string[];
+  /** Makes both pickers reject, exactly as a dismissed native dialog does. */
+  cancel?: boolean;
 };
 
 type PickerCalls = {
@@ -101,6 +103,9 @@ export async function installFilePickerMock(page: Page, options: FilePickerMockO
       configurable: true,
       value: () => {
         calls.save += 1;
+        if (config.cancel) {
+          return Promise.reject(new DOMException("dismissed", "AbortError"));
+        }
 
         return Promise.resolve(makeHandle(config.saveName ?? "project.mumbox"));
       }
@@ -109,6 +114,10 @@ export async function installFilePickerMock(page: Page, options: FilePickerMockO
       configurable: true,
       value: () => {
         calls.open += 1;
+
+        if (config.cancel) {
+          return Promise.reject(new DOMException("dismissed", "AbortError"));
+        }
 
         return Promise.resolve((config.openNames ?? ["project.mumbox"]).map(makeHandle));
       }

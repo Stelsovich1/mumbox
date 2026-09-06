@@ -38,10 +38,10 @@ export function useProjectLibrary(open: boolean) {
     setProbes(await probeProjectRows(stored));
   }, []);
 
+  // Also on mount, not only when the dialog opens: the save dialog needs the existing names to
+  // pick a default that is not taken, and the user may never have opened the list.
   useEffect(() => {
-    if (open) {
-      void refresh();
-    }
+    void refresh();
   }, [open, refresh]);
 
   const upsertRow = useCallback(

@@ -1840,6 +1840,32 @@ test("reports the media that did not fit on the grid", async ({ page }, testInfo
   await expect(page.getByText("Назначено ячеек: 1, не поместилось: 2")).toBeVisible();
 });
 
+test("assigns media by dragging the picker handle with a mouse", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "mouse drag is desktop-specific");
+  await openPickerWithMedia(page, [audioFile]);
+
+  // The handle drives the pointer session for every pointer type, not only touch: gating it on
+  // `pointerType` left it inert under devtools device emulation and on hybrid laptops.
+  const handle = page.getByRole("button", { name: "Перетащить launch.wav" });
+  const target = page.locator('[data-cell-id="cell-2"]');
+  const handleBox = await handle.boundingBox();
+  const targetBox = await target.boundingBox();
+  if (!handleBox || !targetBox) {
+    throw new Error("Element boxes are not available");
+  }
+
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, {
+    steps: 8
+  });
+  await expect(target).toHaveAttribute("data-drop-target", "true");
+  await page.mouse.up();
+
+  await expect(target).toHaveAttribute("aria-label", "Ячейка 3 launch.wav");
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+});
+
 test("assigns media by dragging the picker handle on touch", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile-landscape", "pointer drag is the touch path");
   await openPickerWithMedia(page, [audioFile]);
