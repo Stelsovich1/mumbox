@@ -277,8 +277,8 @@ async function fileNameOrder(page: Page) {
 test("cycles a column through three sort states", async ({ page }) => {
   await openLibrary(page, buildState(DATED_MEDIA, [[]]));
 
-  const header = page.getByRole("columnheader", { name: "Дата добавления" });
-  const button = page.getByRole("button", { name: "Дата добавления" });
+  const header = page.getByRole("columnheader", { name: "Добавлено" });
+  const button = page.getByRole("button", { name: "Добавлено" });
 
   await expect(header).toHaveAttribute("aria-sort", "none");
   await expect.poll(async () => fileNameOrder(page)).toEqual([

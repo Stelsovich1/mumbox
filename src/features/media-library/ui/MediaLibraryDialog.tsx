@@ -50,7 +50,7 @@ type MediaLibraryDialogProps = {
 };
 
 // The date track is a fixed width on purpose: the header and every row are separate grids, so a
-// content-derived track resolves differently for "Дата добавления" than for "05.01.2024 09:07" and
+// content-derived track resolves differently for the header than for "05.01.2024 09:07" and
 // the columns stop lining up. The colour track stays wide enough for its inline swatch popover.
 const MEDIA_LIBRARY_COLUMNS =
   "44px minmax(200px, 1.25fr) minmax(160px, 1fr) 72px 124px minmax(200px, max-content) 52px";
@@ -246,7 +246,7 @@ export function MediaLibraryDialog({
                   { key: "fileName", title: "Файл" },
                   { key: "alias", title: "Псевдоним" },
                   { key: "durationMs", title: "Время" },
-                  { key: "createdAt", title: "Дата добавления" },
+                  { key: "createdAt", title: "Добавлено" },
                   { key: "color", title: "Цвет" }
                 ] as const
               ).map((column) => (

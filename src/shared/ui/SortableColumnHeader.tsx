@@ -36,10 +36,13 @@ export function SortableColumnHeader<TKey extends string>({
         sx={{
           display: "flex",
           alignItems: "center",
-          gap: 0.5,
+          // Wraps the sort icon onto a second line rather than stealing width from the label: in a
+          // 52px column an inline icon leaves the text two characters.
+          flexWrap: "wrap",
+          gap: 0.25,
           width: "100%",
           minWidth: 0,
-          px: 1,
+          px: 0.75,
           py: 1,
           border: 0,
           background: "none",
@@ -54,27 +57,32 @@ export function SortableColumnHeader<TKey extends string>({
           "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main" }
         }}
       >
-        {/* Clipped inside its own track: a header must never spill into the next column, and
-            breaking it mid-word is worse than an ellipsis in a narrow side panel. */}
+        {/* Wraps onto a second line rather than truncating: an ellipsis in a narrow column costs
+            the whole word, and the header row has no fixed height. `hyphens: none` keeps it from
+            breaking mid-word; `overflow: hidden` keeps it out of the next column either way. */}
         <Box
           component="span"
           title={title}
           sx={{
             minWidth: 0,
             overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap"
+            lineHeight: 1.15,
+            // `break-word`, not `anywhere`: a word breaks only when it genuinely does not fit, so a
+            // column wide enough keeps its label on one line instead of being chopped everywhere.
+            overflowWrap: "break-word"
           }}
         >
           {title}
         </Box>
-        {ariaSort === "ascending" ? (
-          <ArrowUpwardIcon fontSize="small" />
-        ) : ariaSort === "descending" ? (
-          <ArrowDownwardIcon fontSize="small" />
-        ) : (
-          <UnfoldMoreIcon fontSize="small" sx={{ opacity: 0.35 }} />
-        )}
+        <Box component="span" sx={{ display: "grid", placeItems: "center", flexShrink: 0 }}>
+          {ariaSort === "ascending" ? (
+            <ArrowUpwardIcon sx={{ fontSize: 16 }} />
+          ) : ariaSort === "descending" ? (
+            <ArrowDownwardIcon sx={{ fontSize: 16 }} />
+          ) : (
+            <UnfoldMoreIcon sx={{ fontSize: 16, opacity: 0.35 }} />
+          )}
+        </Box>
       </Box>
     </Box>
   );

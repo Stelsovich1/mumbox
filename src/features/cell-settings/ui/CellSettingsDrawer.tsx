@@ -66,18 +66,32 @@ import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeText
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
-const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
+// Covers the sticky header as well as the rows now that both live in one scroller, so the row area
+// stays about as tall as it was before the header grew to two lines.
+const MEDIA_PICKER_VIEWPORT_HEIGHT = 420;
+/** Clipped, so a value can never render on top of the next column. */
+const PICKER_VALUE_CELL = {
+  minWidth: 0,
+  px: 0.75,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap"
+} as const;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
-// 32 + 36 + 130 + 70 + 54 + 76 + 36 + 36. Keeping the arithmetic exact is what stops the header
+// 32 + 36 + 120 + 64 + 52 + 84 + 52 + 36. Keeping the arithmetic exact is what stops the header
 // grid and the body grids drifting apart, which the column-alignment e2e pins. The date track is
 // fixed rather than content-derived for the same reason, and sized for the SHORT date the picker
-// renders — the full "05.01.2024 09:07" needs 132px and spilled into the colour column.
+// renders plus its padding.
+//
+// The colour track holds a 26px swatch: at 36px minus the cell padding there was only 20px of
+// content box, so the swatch overflowed onto the delete button. Every value cell now clips, so a
+// too-long value can never reach its neighbour again.
 //
 // Eight columns still cannot fit a 460px panel (412px of table viewport), so a modest horizontal
 // scroll remains by design; the panel is resizable for when the table is the focus.
 const MEDIA_PICKER_COLUMNS =
-  "32px 36px minmax(130px, 2fr) minmax(70px, 1fr) 54px 76px 36px 36px";
-const MEDIA_PICKER_MIN_WIDTH = 470;
+  "32px 36px minmax(110px, 2fr) minmax(76px, 1fr) 64px 92px 52px 36px";
+const MEDIA_PICKER_MIN_WIDTH = 498;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -254,6 +268,9 @@ export function CellSettingsDrawer({
     cell.fadeInMs !== 0 ||
     cell.fadeOutEnabled ||
     cell.fadeOutMs !== 0;
+  // `pickerScrollTop` now comes from the scroller that also holds the sticky header, so it is
+  // ahead of the row offsets by the header height (~45px, under one row). The six-row overscan
+  // below absorbs that entirely, which is why no header measurement is needed.
   const pickerStart = Math.max(0, Math.floor(pickerScrollTop / MEDIA_PICKER_ROW_HEIGHT) - 6);
   const pickerEnd = Math.min(
     sortedMedia.length,
@@ -593,7 +610,23 @@ export function CellSettingsDrawer({
                 </Button>
               </Box>
             ) : null}
-            <Box role="table" aria-label="Выбор медиа" sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
+            <Box
+              role="table"
+              aria-label="Выбор медиа"
+              ref={pickerBodyRef}
+              onScroll={(event) => {
+                setPickerScrollTop(event.currentTarget.scrollTop);
+              }}
+              sx={{
+                minWidth: 0,
+                maxWidth: "100%",
+                // Both axes on one element: two nested scrollers gave the panel two horizontal
+                // scrollbars, and made the rows' content box narrower than the header's by the
+                // width of the vertical scrollbar, so the last column was clipped.
+                overflow: "auto",
+                maxHeight: MEDIA_PICKER_VIEWPORT_HEIGHT
+              }}
+            >
               <Box sx={{ width: `max(100%, ${String(MEDIA_PICKER_MIN_WIDTH)}px)` }}>
               <Box
                 role="row"
@@ -603,7 +636,11 @@ export function CellSettingsDrawer({
                   alignItems: "center",
                   borderBottom: 1,
                   borderColor: "divider",
-                  backgroundColor: "rgba(5, 7, 13, 0.92)"
+                  backgroundColor: "rgba(5, 7, 13, 0.92)",
+                  // The header scrolls with the rows horizontally and stays put vertically.
+                  position: "sticky",
+                  top: 0,
+                  zIndex: 1
                 }}
               >
                 <Box role="columnheader" />
@@ -622,7 +659,7 @@ export function CellSettingsDrawer({
                     { key: "fileName", title: "Название файла" },
                     { key: "alias", title: "Псевдоним" },
                     { key: "durationMs", title: "Время" },
-                    { key: "createdAt", title: "Дата добавления" },
+                    { key: "createdAt", title: "Добавлено" },
                     { key: "color", title: "Цвет" }
                   ] as const
                 ).map((column) => (
@@ -639,20 +676,7 @@ export function CellSettingsDrawer({
                 ))}
                   <Box role="columnheader" />
               </Box>
-              <Box
-                role="rowgroup"
-                ref={pickerBodyRef}
-                onScroll={(event) => {
-                  setPickerScrollTop(event.currentTarget.scrollTop);
-                }}
-                sx={{
-                  display: "block",
-                  maxHeight: MEDIA_PICKER_VIEWPORT_HEIGHT,
-                  overflowY: "auto",
-                  position: "relative",
-                  height: sortedMedia.length > 80 ? MEDIA_PICKER_VIEWPORT_HEIGHT : "auto"
-                }}
-              >
+              <Box role="rowgroup" sx={{ display: "block", position: "relative" }}>
                 <Box
                   component="div"
                   sx={{
@@ -818,17 +842,15 @@ export function CellSettingsDrawer({
                     >
                       {item.alias || "..."}
                     </Typography>
-                    <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
-                      {formatDuration(item.durationMs)}
-                    </Typography>
-                    <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
+                    <Typography sx={PICKER_VALUE_CELL}>{formatDuration(item.durationMs)}</Typography>
+                    <Typography sx={PICKER_VALUE_CELL}>
                       {formatCreatedAtShort(item.createdAt)}
                     </Typography>
-                    <Box sx={{ px: 1, display: "grid", placeItems: "center" }}>
+                    <Box sx={{ display: "grid", placeItems: "center", minWidth: 0 }}>
                       <Box
                         aria-label={`Цвет ${item.fileName}`}
                         sx={{
-                          width: 28,
+                          width: 26,
                           height: 18,
                           borderRadius: 0.75,
                           backgroundColor: item.color,
