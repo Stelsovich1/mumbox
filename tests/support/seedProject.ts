@@ -54,6 +54,11 @@ export type SeedPlan = {
    * cells of the panel. Runs in Node, so it is never serialized into the page.
    */
   cellPatch?: (filledIndex: number, panelIndex: number) => Record<string, unknown>;
+  /**
+   * ISO timestamp per media index. Defaults to the epoch for every asset, which is fine until a
+   * test needs to tell sort order from luck.
+   */
+  createdAt?: (index: number) => string;
 };
 
 export type SeedResult = {
@@ -174,7 +179,7 @@ export function buildSeed(plan: SeedPlan): SeedResult & { state: unknown } {
     panels,
     activePanelId: panelIds[0] ?? "",
     cellsByPanel,
-    media: media.map((asset) => ({
+    media: media.map((asset, index) => ({
       id: asset.id,
       fileName: asset.fileName,
       alias: asset.alias,
@@ -182,7 +187,7 @@ export function buildSeed(plan: SeedPlan): SeedResult & { state: unknown } {
       mimeType: asset.mimeType,
       size: asset.sizeBytes,
       durationMs: asset.durationMs,
-      createdAt: new Date(0).toISOString()
+      createdAt: plan.createdAt?.(index) ?? new Date(0).toISOString()
     })),
     masterVolume: plan.masterVolume ?? 80,
     masterMuted: plan.masterMuted ?? false,
