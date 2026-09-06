@@ -1,6 +1,7 @@
 import type { SerializableAppState } from "../../../app/model/appState";
 import { computeContentHash } from "../../../shared/lib/contentHash";
-import { ImportedProject } from "../../file-config";
+// Type-only: features must not import each other at runtime, and this one only needs the shape.
+import type { ImportedProject } from "../../file-config";
 import { DedupCandidate, planMediaDedup } from "./mediaDedup";
 
 export type MergePreparation = {

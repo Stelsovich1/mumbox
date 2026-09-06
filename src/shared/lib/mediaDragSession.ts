@@ -46,11 +46,22 @@ function publish(event: MediaDragEvent) {
   }
 }
 
+function handleWindowDragEnd() {
+  endNativeMediaDrag();
+}
+
 export function beginNativeMediaDrag(mediaIds: readonly string[]) {
   nativeDragMediaIds = [...mediaIds];
+  // The source row can unmount mid-drag: the picker is virtualised above 80 rows, and a row that
+  // scrolls out of the window may never fire its own `dragend`. A window-level listener guarantees
+  // the registry is cleared, otherwise every later `dragover` on a cell reads as a media drag.
+  window.addEventListener("dragend", handleWindowDragEnd);
+  window.addEventListener("drop", handleWindowDragEnd);
 }
 
 export function endNativeMediaDrag() {
+  window.removeEventListener("dragend", handleWindowDragEnd);
+  window.removeEventListener("drop", handleWindowDragEnd);
   if (!nativeDragMediaIds) {
     return;
   }
@@ -60,10 +71,6 @@ export function endNativeMediaDrag() {
 
 export function getNativeMediaDragIds() {
   return nativeDragMediaIds;
-}
-
-export function isPointerMediaDragActive() {
-  return pointerSession !== null;
 }
 
 function teardownPointerSession() {

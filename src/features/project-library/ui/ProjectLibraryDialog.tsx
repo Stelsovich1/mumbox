@@ -109,10 +109,21 @@ export function ProjectLibraryDialog({
         data-project-row={row.id}
         data-project-status={status}
         aria-disabled={deleteOnly ? "true" : undefined}
+        tabIndex={deleteOnly ? undefined : 0}
         onClick={(event) => {
           if (deleteOnly || isInteractiveRowTarget(event.target, event.currentTarget)) {
             return;
           }
+          onActivate(row);
+        }}
+        onKeyDown={(event) => {
+          if (deleteOnly || (event.key !== "Enter" && event.key !== " ")) {
+            return;
+          }
+          if (isInteractiveRowTarget(event.target, event.currentTarget)) {
+            return;
+          }
+          event.preventDefault();
           onActivate(row);
         }}
         sx={{
@@ -284,14 +295,16 @@ export function ProjectLibraryDialog({
             )}
           </Box>
 
-          {linked.map((row) => (
-            <Box key={row.id}>
-              {renderRow(row)}
-              {renderStatusAction(row) ? (
-                <Box sx={{ px: 2, pb: 1 }}>{renderStatusAction(row)}</Box>
-              ) : null}
-            </Box>
-          ))}
+          {linked.map((row) => {
+            const statusAction = renderStatusAction(row);
+
+            return (
+              <Box key={row.id}>
+                {renderRow(row)}
+                {statusAction ? <Box sx={{ px: 2, pb: 1 }}>{statusAction}</Box> : null}
+              </Box>
+            );
+          })}
 
           {linked.length === 0 && unlinked.length === 0 ? (
             <Box role="row" sx={{ minHeight: 58, display: "flex", alignItems: "center", px: 1 }}>

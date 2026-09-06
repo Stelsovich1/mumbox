@@ -1,5 +1,6 @@
 import { ProjectSession } from "../../../app/model/projectSession";
 import { ProjectLibraryRow, ProjectRowStatus } from "../../../entities/project/model/types";
+import { canRemoveFromDisk } from "../../../shared/lib/fileSystemAccess";
 import { formatCountRu } from "../../../shared/lib/pluralizeRu";
 
 export type FileProbeError = "missing" | "denied" | "unknown";
@@ -88,7 +89,7 @@ export function sortProjectRows(rows: readonly ProjectLibraryRow[]) {
 }
 
 export function getDeleteCapability(rows: readonly ProjectLibraryRow[]): DeleteCapability {
-  const removable = rows.filter((row) => typeof row.handle?.remove === "function").length;
+  const removable = rows.filter((row) => canRemoveFromDisk(row.handle)).length;
   if (removable === 0) {
     return "listOnly";
   }
@@ -125,7 +126,7 @@ export function getDeleteConfirmText(
     return `Удалить ${count} из списка? Файлы на диске останутся.`;
   }
 
-  const removable = rows.filter((row) => typeof row.handle?.remove === "function").length;
+  const removable = rows.filter((row) => canRemoveFromDisk(row.handle)).length;
 
   return `Удалить ${count}? С диска будет удалено: ${String(removable)}. Остальные исчезнут только из списка.`;
 }
