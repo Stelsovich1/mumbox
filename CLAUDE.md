@@ -250,7 +250,23 @@ from the current project.
 - **UI language is Russian** and e2e tests select by Russian accessible names (`getByRole("button", { name: "Режим редактирования" })`). Renaming a label or `aria-label` breaks tests; grep `tests/e2e` before changing user-facing strings.
 - ESLint runs `strictTypeChecked` + `stylisticTypeChecked`. Consequences seen throughout the code: `type` instead of `interface` (enforced), `String(n)` inside template literals, and `noUncheckedIndexedAccess` making every array/record index `| undefined`.
 - Mobile landscape (`@media (orientation: landscape) and (max-height: 430px)`) is a first-class layout, not an afterthought. `MobileLandscapeTextField` renders a portal overlay positioned from `visualViewport` because the on-screen keyboard covers inline inputs there. Height comes from the `--app-height` CSS variable (`100dvh` where supported), never `100vh`.
-- Vite `base` is `/mumbox/` for GitHub Pages; PWA `registerType: "prompt"`, so the update banner is wired through `useRegisterSW` in `AppShell`.
+- Vite `base` is `/mumbox/` for GitHub Pages; PWA `registerType: "prompt"`, so the update banner is
+  wired through `useRegisterSW` in `AppShell`.
+- **The update reload is ours, not the plugin's** (`src/shared/lib/appUpdate.ts`).
+  `updateServiceWorker(true)` ignores its argument: it only posts SKIP_WAITING, and the reload sits
+  in a `controlling` listener that fires only when `event.isUpdate` is true — a flag workbox-window
+  latches once, from `Boolean(navigator.serviceWorker.controller)` at registration time. A
+  standalone iOS launch routinely starts uncontrolled, so the flag is false for the whole session
+  and the tap did nothing visible until the user relaunched the app. `wb.messageSkipWaiting()` is
+  the second silent failure: it no-ops when `registration.waiting` is null, which is what a
+  `registration.update()` still installing leaves behind. So `applyServiceWorkerUpdate` messages the
+  waiting worker directly and reloads on `controllerchange` **or** on a 2 s timer, whichever lands
+  first — the timer is armed before the first `await`, because `update()` can hang on a dead
+  network. The generated SW sets no `clientsClaim`, so an uncontrolled page is never claimed and the
+  timer is the only thing that ends that case. The `visibilitychange` update check is throttled to a
+  minute for the same reason: unthrottled it keeps a worker in `installing`, where there is no
+  `waiting` to message. `__mumboxDiag.serviceWorker()` reports `controlled` / `waiting` /
+  `updatePending`, which is the only way to see this on a real device.
 - The diagnostics overlay is the one deliberate exception to the Russian-UI rule about accessible names: it carries Russian text but no `role` and no `aria-label`, so it cannot collide with the suite's `getByRole` queries. Select it by `data-testid`.
 - `__debt/` holds design documents for features that are not implemented yet (currently MP3 export from the audio editor). Read the relevant file before starting such a feature.
 - Dragging a media row from the cell picker onto a grid cell uses the custom MIME
