@@ -219,6 +219,9 @@ export function CellSettingsDrawer({
     [filteredMedia, sort]
   );
   const filteredIds = useMemo(() => filteredMedia.map((item) => item.id), [filteredMedia]);
+  // Selection is order-insensitive, but a multi-row drag distributes in display order, so it
+  // must read the sorted list rather than the merely filtered one.
+  const sortedIds = useMemo(() => sortedMedia.map((item) => item.id), [sortedMedia]);
   const selectAllState = getSelectAllState(selectedIds, filteredIds);
   const pendingDeleteTargets = useMemo(
     () => media.filter((item) => pendingDeleteIds.includes(item.id)),
@@ -666,7 +669,7 @@ export function CellSettingsDrawer({
                       const dragged = resolveDraggedMediaIds({
                         draggedMediaId: item.id,
                         selectedMediaIds: selectedIds,
-                        displayOrder: filteredIds
+                        displayOrder: sortedIds
                       });
                       beginNativeMediaDrag(dragged);
                       event.dataTransfer.effectAllowed = "copy";
@@ -803,7 +806,7 @@ export function CellSettingsDrawer({
                               mediaIds: resolveDraggedMediaIds({
                                 draggedMediaId: item.id,
                                 selectedMediaIds: selectedIds,
-                                displayOrder: filteredIds
+                                displayOrder: sortedIds
                               }),
                               pointerId: event.pointerId,
                               clientX: event.clientX,

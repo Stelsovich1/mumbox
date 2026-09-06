@@ -8,6 +8,9 @@ import { deleteProjectRows, listProjectRows, saveProjectRow } from "./projectsSt
 
 export type ProjectRowDraft = {
   fileName: string;
+  /** Kept as-is when re-linking: nothing was saved, so the save timestamp must not move. */
+  savedAt?: string;
+  lastOpenedAt?: string | null;
   projectName: string;
   description: string;
   sizeBytes: number | null;
@@ -49,8 +52,8 @@ export function useProjectLibrary(open: boolean) {
         projectName: draft.projectName,
         description: draft.description,
         sizeBytes: draft.sizeBytes,
-        savedAt: new Date().toISOString(),
-        lastOpenedAt: null,
+        savedAt: draft.savedAt ?? new Date().toISOString(),
+        lastOpenedAt: draft.lastOpenedAt ?? null,
         panelCount: draft.panelCount,
         mediaCount: draft.mediaCount,
         handle: draft.handle

@@ -22,7 +22,6 @@ test.describe("isDirtyingAction", () => {
     expect(isDirtyingAction("panel/select")).toBe(false);
     expect(isDirtyingAction("editMode/toggle")).toBe(false);
     expect(isDirtyingAction("media/setContentHash")).toBe(false);
-    expect(isDirtyingAction("project/meta")).toBe(false);
     expect(isDirtyingAction("project/saved")).toBe(false);
     expect(isDirtyingAction("state/import")).toBe(false);
     expect(isDirtyingAction("state/reset")).toBe(false);

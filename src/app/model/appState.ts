@@ -127,7 +127,6 @@ export type AppAction =
   | { type: "stopOthers/toggle" }
   | { type: "mono/set"; value: boolean }
   | { type: "media/setContentHash"; hashes: { mediaId: string; contentHash: string }[] }
-  | { type: "project/meta"; name?: string; description?: string }
   | {
       type: "project/saved";
       projectId?: string | null;
@@ -543,15 +542,6 @@ function reducer(state: AppState, action: AppAction): AppState {
             : media;
         })
       };
-    }
-    case "project/meta": {
-      const name = action.name ?? state.projectSession.name;
-      const description = action.description ?? state.projectSession.description;
-      if (name === state.projectSession.name && description === state.projectSession.description) {
-        return state;
-      }
-
-      return { ...state, projectSession: { ...state.projectSession, name, description } };
     }
     case "project/saved":
       return {

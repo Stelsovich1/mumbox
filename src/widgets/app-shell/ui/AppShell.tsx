@@ -697,6 +697,8 @@ export function AppShell() {
             projectName: row.projectName,
             description: row.description,
             sizeBytes: file.size,
+            savedAt: row.savedAt,
+            lastOpenedAt: row.lastOpenedAt,
             panelCount: row.panelCount,
             mediaCount: row.mediaCount,
             handle: undefined
@@ -705,6 +707,9 @@ export function AppShell() {
         )
         .then(() => {
           importProjectFile(file, row);
+        })
+        .catch(() => {
+          setSaveMessage("Не удалось обновить проект в списке");
         });
       return;
     }
@@ -721,13 +726,17 @@ export function AppShell() {
   };
 
   const projectLibrary = useProjectLibrary(projectLibraryOpen);
+  // Merging several projects dispatches between awaits; a render closure would still hold the
+  // pre-merge state, and every merge but the last would be silently discarded.
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const rememberSavedProject = async (
     values: { name: string; description: string; fileName: string },
     handle?: FileHandleLike,
     sizeBytes?: number
   ) => {
-    await projectLibrary.upsertRow(
+    return projectLibrary.upsertRow(
       {
         fileName: values.fileName,
         projectName: values.name,
@@ -739,6 +748,43 @@ export function AppShell() {
       },
       state.projectSession.projectId ?? undefined
     );
+  };
+
+  /**
+   * Points an existing row at a different file. Uses the picker where the browser has one, so a
+   * Chromium row keeps its handle instead of being demoted to the unlinked section forever.
+   */
+  const relinkProjectRow = async (row: ProjectLibraryRow) => {
+    const handles = await pickProjectFilesToOpen(false);
+    const handle = handles?.[0];
+    if (!handle) {
+      if (supportsFilePickers()) {
+        return;
+      }
+      setRelinkRowId(row.id);
+      projectInputRef.current?.click();
+      return;
+    }
+
+    try {
+      const file = await handle.getFile();
+      await projectLibrary.upsertRow(
+        {
+          fileName: file.name,
+          projectName: row.projectName,
+          description: row.description,
+          sizeBytes: file.size,
+          savedAt: row.savedAt,
+          lastOpenedAt: row.lastOpenedAt,
+          panelCount: row.panelCount,
+          mediaCount: row.mediaCount,
+          handle
+        },
+        row.id
+      );
+    } catch {
+      setSaveMessage("Не удалось прочитать файл проекта");
+    }
   };
 
   const addProjectsToLibrary = async () => {
@@ -804,7 +850,7 @@ export function AppShell() {
         return;
       }
 
-      const currentState = serializeState(state);
+      const currentState = serializeState(stateRef.current);
       const preparation = await prepareMerge(currentState, project);
       // Nothing is deleted by a merge, so the storage cost is purely additive — but only for what
       // survives deduplication.
@@ -814,7 +860,7 @@ export function AppShell() {
         return;
       }
 
-      const { state: remappedIncoming, addedMedia } = await writeMergedProjectMedia(
+      const { state: remappedIncoming, addedMedia, idByImportedId } = await writeMergedProjectMedia(
         preparation.incoming,
         project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
         preparation.mediaIdMap,
@@ -822,10 +868,14 @@ export function AppShell() {
         updateOperationProgress
       );
 
+      // `writeMergedProjectMedia` has already rewritten every id in `remappedIncoming` to its final
+      // value. Remapping again through the incoming-keyed map would find no key and empty every
+      // merged cell — visible only when the incoming audio is new, which a self-merge never is.
+      const finalMediaIds = new Map([...idByImportedId.values()].map((id) => [id, id]));
       const merged = mergeProjectState({
         current: currentState,
         incoming: remappedIncoming,
-        mediaIdMap: preparation.mediaIdMap,
+        mediaIdMap: finalMediaIds,
         addedMedia,
         createPanelId: () => `panel-${crypto.randomUUID()}`
       });
@@ -847,24 +897,35 @@ export function AppShell() {
 
   const mergeProjectRows = async (rows: ProjectLibraryRow[]) => {
     setProjectLibraryOpen(false);
-    for (const row of rows) {
+    const linked = rows.filter((row) => row.handle);
+    const unlinked = rows.length - linked.length;
+
+    if (linked.length === 0) {
+      // Nothing to read from: the user points at one file through the normal input instead.
+      setMergeRowPending(true);
+      projectInputRef.current?.click();
+      return;
+    }
+
+    for (const row of linked) {
       const handle = row.handle;
       if (!handle) {
-        // Nothing to read from: the user points at the file through the normal input instead.
-        setMergeRowPending(true);
-        projectInputRef.current?.click();
-        return;
+        continue;
       }
       const permission = await requestHandlePermission(handle, "read");
       if (permission === "denied") {
-        setSaveMessage("Нет доступа к файлу проекта");
-        return;
+        setSaveMessage(`Нет доступа к файлу проекта: ${row.fileName}`);
+        continue;
       }
       try {
         await mergeProjectFile(await handle.getFile());
       } catch {
         setSaveMessage(`Не удалось открыть проект: ${row.fileName}`);
       }
+    }
+
+    if (unlinked > 0) {
+      setSaveMessage(`Пропущено проектов без привязки к файлу: ${String(unlinked)}`);
     }
   };
 
@@ -911,6 +972,7 @@ export function AppShell() {
       ? await pickProjectFileToSave(toProjectFileName(values.fileName))
       : null;
     if (supportsFilePickers() && !handle) {
+      setPendingActivationRow(null);
       return;
     }
 
@@ -934,17 +996,20 @@ export function AppShell() {
         }
       });
       const result = await saveProjectBlob(blob, values.fileName, handle ?? undefined);
-      dispatch({
-        type: "project/saved",
-        fileName: result.fileName,
-        name: values.name,
-        description: values.description
-      });
-      await rememberSavedProject(
+      const row = await rememberSavedProject(
         { ...values, fileName: result.fileName },
         handle ?? undefined,
         blob.size
       );
+      // Without the row id every later save mints another row, and the "already open" check can
+      // never match the project the user is looking at.
+      dispatch({
+        type: "project/saved",
+        projectId: row.id,
+        fileName: result.fileName,
+        name: values.name,
+        description: values.description
+      });
       const nextRow = pendingActivationRow;
       setPendingActivationRow(null);
       if (nextRow) {
@@ -956,6 +1021,7 @@ export function AppShell() {
           : `Файл проекта передан браузеру: ${result.fileName}`
       );
     } catch (error: unknown) {
+      setPendingActivationRow(null);
       if (error instanceof DOMException && error.name === "AbortError") {
         return;
       }
@@ -1527,8 +1593,7 @@ export function AppShell() {
           void deleteProjectRowsFromLibrary(rows);
         }}
         onRelink={(row) => {
-          setRelinkRowId(row.id);
-          projectInputRef.current?.click();
+          void relinkProjectRow(row);
         }}
         onMerge={(rows) => {
           void mergeProjectRows(rows);

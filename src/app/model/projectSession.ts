@@ -42,7 +42,6 @@ export const NON_DIRTYING_ACTIONS: ReadonlySet<AppAction["type"]> = new Set([
   "panel/select",
   "editMode/toggle",
   "media/setContentHash",
-  "project/meta",
   "project/saved",
   "state/import",
   "state/reset"

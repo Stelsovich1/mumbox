@@ -1,6 +1,12 @@
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from "@mui/material";
 
-import { ActivationPlan } from "../model/projectRowState";
+import {
+  ACTIVATION_BUTTON_CANCEL,
+  ACTIVATION_BUTTON_DISCARD,
+  ACTIVATION_BUTTON_OPEN,
+  ACTIVATION_BUTTON_SAVE_AND_OPEN,
+  ActivationPlan
+} from "../model/projectRowState";
 
 type ProjectActivationDialogProps = {
   open: boolean;
@@ -48,19 +54,19 @@ export function ProjectActivationDialog({
         </Typography>
       </DialogContent>
       <DialogActions sx={{ flexWrap: "wrap" }}>
-        <Button onClick={onCancel}>Отмена</Button>
+        <Button onClick={onCancel}>{ACTIVATION_BUTTON_CANCEL}</Button>
         {unsaved ? (
           <>
             <Button color="error" onClick={onDiscardAndOpen}>
-              Без сохранения
+              {ACTIVATION_BUTTON_DISCARD}
             </Button>
             <Button variant="contained" onClick={onSaveAndOpen}>
-              Сохранить и открыть
+              {ACTIVATION_BUTTON_SAVE_AND_OPEN}
             </Button>
           </>
         ) : (
           <Button variant="contained" onClick={onOpenProject}>
-            Открыть
+            {ACTIVATION_BUTTON_OPEN}
           </Button>
         )}
       </DialogActions>

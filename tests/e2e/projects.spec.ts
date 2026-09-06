@@ -311,3 +311,80 @@ test("merges the projects selected in the list", async ({ page }) => {
   await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
   await expect(page.getByRole("tab", { name: "Panel 1_2" })).toBeVisible();
 });
+
+test("merging a project whose audio is new keeps its cells filled", async ({ page }) => {
+  // The self-merge case hides an id-remapping bug: there, incoming ids already equal the current
+  // ones. This merges a project whose audio the current library has never seen.
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  await page.getByTestId("audio-file-input").setInputFiles(SHARED_AUDIO);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать shared.wav" }).click();
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+
+  const download = await saveProjectAs(page, "Донор", "donor-audio");
+  const projectPath = join(tmpdir(), `merge-newmedia-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  // Wipe everything, then build a project holding completely different audio.
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByText("Стереть все данные").click();
+  await page.getByRole("button", { name: "Да, стереть" }).click();
+  await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
+
+  await page.getByTestId("audio-file-input").setInputFiles({
+    name: "other.wav",
+    mimeType: "audio/wav",
+    buffer: Buffer.from("RIFF....WAVEfmt other")
+  });
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Объединить с проектом" }).click();
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+  await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
+
+  // The incoming audio is genuinely new, so it is written under a fresh id — and the merged
+  // panel's cell must point at that id, not be emptied.
+  await page.getByRole("tab", { name: "Panel 1_2" }).click();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 shared.wav"
+  );
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Медиатека" }).click();
+  await expect(page.getByRole("checkbox", { name: "Выбрать запись other.wav" })).toHaveCount(1);
+  await expect(page.getByRole("checkbox", { name: "Выбрать запись shared.wav" })).toHaveCount(1);
+});
+
+test("a second merge builds on the result of the first", async ({ page }) => {
+  // Two merges from two separate gestures accumulate. Note what this does NOT cover: merging
+  // several rows inside one `mergeProjectRows` loop, where no render happens between iterations.
+  // That path needs handle-bearing rows, and a fake handle cannot survive structured clone, so it
+  // is unreachable from the harness — the stale-closure fix there rests on the `stateRef` idiom.
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const download = await saveProjectAs(page, "Дважды", "twice");
+  const projectPath = join(tmpdir(), `merge-twice-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  for (const expectedTab of ["Panel 1_2", "Panel 1_3"]) {
+    await page.getByRole("button", { name: "Проект" }).click();
+    await page.getByRole("menuitem", { name: "Объединить с проектом" }).click();
+    await page.getByTestId("project-file-input").setInputFiles(projectPath);
+    await expect(page.getByRole("tab", { name: expectedTab })).toBeVisible();
+  }
+
+  await expect(page.getByRole("tab", { name: "Panel 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1_2" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1_3" })).toBeVisible();
+});
