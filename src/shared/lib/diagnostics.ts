@@ -50,6 +50,23 @@ export type DiagStorage = {
   quota: number | null;
 };
 
+/**
+ * The service worker readout exists for one reason: `controlled: false` is the state in which the
+ * PWA plugin's own reload never fires (see `appUpdate.ts`), and a real iOS device is the only place
+ * it can be observed.
+ */
+export type DiagServiceWorker = {
+  supported: boolean;
+  /** `navigator.serviceWorker.controller !== null`. */
+  controlled: boolean;
+  registered: boolean;
+  installing: ServiceWorkerState | null;
+  waiting: ServiceWorkerState | null;
+  active: ServiceWorkerState | null;
+  /** A worker is installed and waiting — «Обновить» has something to apply. */
+  updatePending: boolean;
+};
+
 export type DiagDevice = {
   userAgent: string;
   deviceMemoryGb: number | null;
@@ -95,6 +112,7 @@ export type MumboxDiag = {
   clearCaches: () => void;
   reset: () => void;
   termination: () => DiagTermination;
+  serviceWorker: () => DiagServiceWorker;
 };
 
 declare global {
@@ -157,6 +175,7 @@ let cacheKeysSource: () => string[] = () => [];
 let budgetSink: (bytes: number | null) => void = () => undefined;
 let monoSink: (mono: boolean) => void = () => undefined;
 let clearCachesSink: () => void = () => undefined;
+let serviceWorkerSource: () => ServiceWorkerRegistration | null = () => null;
 
 function readQueryFlag(name: string): string | null {
   if (typeof window === "undefined") {
@@ -205,6 +224,25 @@ export function setDiagnosticsSinks(sinks: {
   budgetSink = sinks.setBudgetBytes ?? budgetSink;
   monoSink = sinks.setMono ?? monoSink;
   clearCachesSink = sinks.clearCaches ?? clearCachesSink;
+}
+
+/** Wired from `AppShell`, which is the only holder of the registration. */
+export function setServiceWorkerSource(source: () => ServiceWorkerRegistration | null): void {
+  serviceWorkerSource = source;
+}
+
+function readServiceWorker(): DiagServiceWorker {
+  const supported = typeof navigator !== "undefined" && "serviceWorker" in navigator;
+  const registration = supported ? serviceWorkerSource() : null;
+  return {
+    supported,
+    controlled: supported && navigator.serviceWorker.controller !== null,
+    registered: registration !== null,
+    installing: registration?.installing?.state ?? null,
+    waiting: registration?.waiting?.state ?? null,
+    active: registration?.active?.state ?? null,
+    updatePending: Boolean(registration?.waiting)
+  };
 }
 
 export function setActivePanelId(panelId: string | null): void {
@@ -458,7 +496,8 @@ export function installDiagnostics(): void {
       state.lastPanelSwitchPaintMs = null;
       state.timeToFirstSoundMs = [];
     },
-    termination: () => ({ ...state.termination })
+    termination: () => ({ ...state.termination }),
+    serviceWorker: readServiceWorker
   };
 
   window.__mumboxDiag = api;

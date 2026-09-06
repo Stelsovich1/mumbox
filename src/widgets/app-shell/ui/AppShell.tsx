@@ -81,8 +81,10 @@ import {
 import {
   recordPanelSwitchPaint,
   setActivePanelId,
-  setDiagnosticsSinks
+  setDiagnosticsSinks,
+  setServiceWorkerSource
 } from "../../../shared/lib/diagnostics";
+import { applyServiceWorkerUpdate, shouldCheckForUpdate } from "../../../shared/lib/appUpdate";
 import { pickProjectFilesToOpen, pickProjectFileToSave } from "../../../shared/lib/fileSystemAccess";
 import {
   FileHandleLike,
@@ -249,6 +251,8 @@ export function AppShell() {
   const [installPromptDismissed, setInstallPromptDismissed] = useState(false);
   const [standaloneMode, setStandaloneMode] = useState(isStandaloneDisplayMode);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateInProgress, setUpdateInProgress] = useState(false);
+  const lastUpdateCheckAtRef = useRef<number | null>(null);
   const [settingsPanelWidth, setSettingsPanelWidth] = useState(SETTINGS_PANEL_MIN_WIDTH);
   const swRegistrationRef = useRef<ServiceWorkerRegistration | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
@@ -446,7 +450,21 @@ export function AppShell() {
   const requestAppUpdate = useCallback(() => {
     closeFileMenu();
     stopAll();
-    void updateServiceWorker(true);
+    // The reload is ours, not the plugin's — see `applyServiceWorkerUpdate`. The button also has
+    // to say something immediately: the silent version of this flow is what made users tap it
+    // over and over.
+    setUpdateInProgress(true);
+    void applyServiceWorkerUpdate({
+      registration: swRegistrationRef.current,
+      container: "serviceWorker" in navigator ? navigator.serviceWorker : null,
+      sendSkipWaiting: () => updateServiceWorker(true),
+      reload: () => {
+        window.location.reload();
+      },
+      setTimer: (callback, ms) => {
+        window.setTimeout(callback, ms);
+      }
+    });
   }, [stopAll, updateServiceWorker]);
 
   useEffect(() => {
@@ -461,10 +479,22 @@ export function AppShell() {
   }, [updateAvailable]);
 
   useEffect(() => {
+    setServiceWorkerSource(() => swRegistrationRef.current);
+  }, []);
+
+  useEffect(() => {
     const checkForServiceWorkerUpdate = () => {
-      if (document.visibilityState === "visible") {
-        void swRegistrationRef.current?.update();
+      if (document.visibilityState !== "visible") {
+        return;
       }
+      // Throttled: on a phone this fires on every app switch and lock, and a worker kept
+      // perpetually in `installing` has no `waiting` for «Обновить» to message.
+      const now = Date.now();
+      if (!shouldCheckForUpdate(lastUpdateCheckAtRef.current, now)) {
+        return;
+      }
+      lastUpdateCheckAtRef.current = now;
+      void swRegistrationRef.current?.update().catch(() => undefined);
     };
 
     window.addEventListener("pageshow", checkForServiceWorkerUpdate);
@@ -1357,7 +1387,7 @@ export function AppShell() {
           {updateAvailable ? (
             <>
               <Divider />
-              <MenuItem onClick={requestAppUpdate}>
+              <MenuItem onClick={requestAppUpdate} disabled={updateInProgress}>
                 <SystemUpdateAltIcon fontSize="small" />
                 <Typography sx={{ ml: 1 }}>Обновить приложение</Typography>
               </MenuItem>
@@ -1670,7 +1700,9 @@ export function AppShell() {
       <Dialog
         open={updateAvailable && updateDialogOpen}
         onClose={() => {
-          setUpdateDialogOpen(false);
+          if (!updateInProgress) {
+            setUpdateDialogOpen(false);
+          }
         }}
         aria-labelledby="app-update-dialog-title"
       >
@@ -1682,13 +1714,19 @@ export function AppShell() {
         </DialogContent>
         <DialogActions>
           <Button
+            disabled={updateInProgress}
             onClick={() => {
               setUpdateDialogOpen(false);
             }}
           >
             Позже
           </Button>
-          <Button variant="contained" onClick={requestAppUpdate}>
+          <Button
+            variant="contained"
+            onClick={requestAppUpdate}
+            disabled={updateInProgress}
+            startIcon={updateInProgress ? <CircularProgress size={16} color="inherit" /> : null}
+          >
             Обновить
           </Button>
         </DialogActions>
