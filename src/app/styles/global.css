@@ -79,6 +79,20 @@ body {
   -webkit-user-drag: element;
 }
 
+/* WebKit needs this for a draggable non-anchor element, same reason as the cell rule above. */
+[data-media-row][draggable="true"] {
+  -webkit-user-drag: element;
+}
+
+/* Must beat `[data-noselect] button:not([draggable="true"])`, which is (0,2,1) and would force
+   touch-action: manipulation on the handle, silently killing the touch drag with no error. Both
+   selectors are listed so the rule matches that specificity whatever the handle is rendered as. */
+[data-noselect] [data-media-drag-handle],
+[data-noselect] button[data-media-drag-handle] {
+  touch-action: none;
+  -webkit-user-drag: none;
+}
+
 @keyframes mumbox-cell-warm {
   0%,
   100% {

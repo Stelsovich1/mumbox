@@ -359,6 +359,68 @@ async function touchDragCell(page: Page, fromCellId: string, toCellId: string) {
   );
 }
 
+type PointerPoint = { x: number; y: number };
+
+function dispatchMediaPointer(
+  locator: ReturnType<Page["locator"]>,
+  type: "pointerdown" | "pointermove" | "pointerup",
+  point: PointerPoint
+) {
+  return locator.evaluate(
+    (element, payload) => {
+      element.dispatchEvent(
+        new PointerEvent(payload.type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 9,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: payload.point.x,
+          clientY: payload.point.y,
+          button: 0,
+          buttons: payload.type === "pointerup" ? 0 : 1
+        })
+      );
+    },
+    { type, point }
+  );
+}
+
+async function centerOf(locator: ReturnType<Page["locator"]>) {
+  const box = await locator.boundingBox();
+  if (!box) {
+    throw new Error("Element box is not available");
+  }
+
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+/**
+ * Drives the picker's pointer drag session. Events go to the source element because the session
+ * calls `setPointerCapture`; they are dispatched separately so a test can assert mid-drag. Unlike
+ * `touchDragCell` there is no hold to clear — the drag handle has no competing tap action.
+ */
+async function touchDragMediaRow(page: Page, fileName: string) {
+  const handle = page.getByRole("button", { name: `Перетащить ${fileName}` });
+  const start = await centerOf(handle);
+
+  return {
+    handle,
+    start: async () => {
+      await dispatchMediaPointer(handle, "pointerdown", start);
+    },
+    moveTo: async (cellId: string) => {
+      const point = await centerOf(page.locator(`[data-cell-id="${cellId}"]`));
+      await dispatchMediaPointer(handle, "pointermove", point);
+
+      return point;
+    },
+    endAt: async (point: PointerPoint) => {
+      await dispatchMediaPointer(handle, "pointerup", point);
+    }
+  };
+}
+
 test("renders the MUMBOX shell", async ({ page }) => {
   await page.goto("/");
 
@@ -1575,7 +1637,200 @@ test("sorts the virtualized media picker and slices the sorted order", async ({ 
     ];
   });
   expect(templates[0]).toBe(templates[1]);
-  expect(templates[0]?.split(" ")).toHaveLength(7);
+  // checkbox, file name, alias, duration, date, colour, drag handle, delete.
+  expect(templates[0]?.split(" ")).toHaveLength(8);
+});
+
+async function openPickerWithMedia(page: Page, files: { name: string; mimeType: string; buffer: Buffer }[]) {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByTestId("audio-file-input").setInputFiles(files);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+}
+
+test("assigns media by dragging a picker row onto a free cell", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
+  await openPickerWithMedia(page, [audioFile]);
+
+  await page
+    .getByRole("button", { name: "Выбрать launch.wav" })
+    .dragTo(page.locator('[data-cell-id="cell-2"]'));
+
+  await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 3 launch.wav"
+  );
+  // The selection must not follow the drop, or the picker would close. This also catches a drag
+  // that degraded into a plain click on the target cell.
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-selected", "true");
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+});
+
+test("opens the settings of the selected cell when the drop lands on it", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
+  await openPickerWithMedia(page, [audioFile]);
+
+  await page
+    .getByRole("button", { name: "Выбрать launch.wav" })
+    .dragTo(page.locator('[data-cell-id="cell-0"]'));
+
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeHidden();
+  await expect(page.getByLabel("Псевдоним ячейки")).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 launch.wav"
+  );
+});
+
+test("spreads every checked row across the free cells", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
+  await openPickerWithMedia(page, [audioFile, secondAudioFile, longAudioFile]);
+
+  await page.getByRole("checkbox", { name: "Выбрать все медиа" }).check();
+  await page
+    .getByRole("button", { name: "Выбрать alarm.mp3" })
+    .dragTo(page.locator('[data-cell-id="cell-3"]'));
+
+  // The dragged row lands on the cell the pointer aimed at; the rest follow in display order.
+  await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 4 alarm.mp3"
+  );
+  await expect(page.locator('[data-cell-id="cell-4"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 5 launch.wav"
+  );
+  await expect(page.locator('[data-cell-id="cell-5"]')).toHaveAttribute(
+    "aria-label",
+    `Ячейка 6 ${longAudioFile.name}`
+  );
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-selected", "true");
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 4 alarm.mp3"
+  );
+  await expect(page.locator('[data-cell-id="cell-5"]')).toHaveAttribute(
+    "aria-label",
+    `Ячейка 6 ${longAudioFile.name}`
+  );
+});
+
+test("slides past an occupied cell instead of overwriting it", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
+  await openPickerWithMedia(page, [audioFile, secondAudioFile]);
+
+  await page.getByRole("button", { name: "Выбрать launch.wav" }).click();
+  await page.getByRole("radio", { name: "Loop" }).check();
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+
+  await page.getByRole("button", { name: "Пустая ячейка 2", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Выбрать alarm.mp3" })
+    .dragTo(page.locator('[data-cell-id="cell-0"]'));
+
+  // cell-0 is occupied and configured: it must keep its media and its playback mode.
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 launch.wav"
+  );
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "data-playback-mode",
+    "loop"
+  );
+  await expect(page.locator('[data-cell-id="cell-1"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 2 alarm.mp3"
+  );
+});
+
+test("reports the media that did not fit on the grid", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("audio-file-input").setInputFiles([audioFile, secondAudioFile, longAudioFile]);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+
+  await page.getByRole("button", { name: "Пустая ячейка 36", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+  await page.getByRole("checkbox", { name: "Выбрать все медиа" }).check();
+
+  // Only the very last cell is free from the target onwards.
+  await page
+    .getByRole("button", { name: "Выбрать launch.wav" })
+    .dragTo(page.locator('[data-cell-id="cell-65"]'));
+
+  await expect(page.getByText("Назначено ячеек: 1, не поместилось: 2")).toBeVisible();
+});
+
+test("assigns media by dragging the picker handle on touch", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "pointer drag is the touch path");
+  await openPickerWithMedia(page, [audioFile]);
+
+  const drag = await touchDragMediaRow(page, "launch.wav");
+  await drag.start();
+  const point = await drag.moveTo("cell-2");
+  await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute("data-drop-target", "true");
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-drop-target", "false");
+  await drag.endAt(point);
+
+  await expect(page.locator('[data-cell-id="cell-2"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 3 launch.wav"
+  );
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+});
+
+test("does not start a drag from the picker row body on touch", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "pointer drag is the touch path");
+  await openPickerWithMedia(page, [audioFile]);
+
+  const row = page.getByRole("button", { name: "Выбрать launch.wav" });
+  const cell = page.locator('[data-cell-id="cell-2"]');
+  const start = await centerOf(row);
+  const end = await centerOf(cell);
+
+  await dispatchMediaPointer(row, "pointerdown", start);
+  await dispatchMediaPointer(row, "pointermove", end);
+  await expect(cell).toHaveAttribute("data-drop-target", "false");
+  await dispatchMediaPointer(row, "pointerup", end);
+
+  // The row body belongs to the scroll container, so nothing may be assigned.
+  await expect(cell).toHaveAttribute("aria-label", "Пустая ячейка 3");
+});
+
+test("scopes touch-action to the drag handle only", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "touch-action only matters on touch");
+  await openPickerWithMedia(page, [audioFile]);
+
+  const handle = page.getByRole("button", { name: "Перетащить launch.wav" });
+  const row = page.getByRole("button", { name: "Выбрать launch.wav" });
+
+  // The whole point of the handle: the row keeps both scroll axes.
+  await expect(handle).toHaveCSS("touch-action", "none");
+  await expect(row).not.toHaveCSS("touch-action", "none");
+  // No native drag on a coarse pointer, so iOS cannot start one behind our session.
+  await expect(row).toHaveAttribute("draggable", "false");
 });
 
 test("resizes cell settings panel and exposes full media file names as titles", async ({ page }, testInfo) => {

@@ -64,6 +64,10 @@ import {
   setDiagnosticsSinks
 } from "../../../shared/lib/diagnostics";
 import { clearMediaCaches, purgeMediaCaches } from "../../../shared/lib/mediaCacheRegistry";
+import {
+  buildDistributionMessage,
+  planMediaDistribution
+} from "../../../shared/lib/mediaDistribution";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
 import { RightToolbar } from "../../right-toolbar";
@@ -636,6 +640,36 @@ export function AppShell() {
     projectInputRef.current?.click();
   };
 
+  const assignDroppedMedia = useCallback(
+    (mediaIds: string[], targetCellId: string) => {
+      if (!activePanel || !state.editMode) {
+        return;
+      }
+      const cells = state.cellsByPanel[activePanel.id] ?? {};
+      const plan = planMediaDistribution({
+        cellIds: activePanel.cellIds,
+        occupiedCellIds: new Set(activePanel.cellIds.filter((id) => cells[id]?.mediaId)),
+        targetCellId,
+        mediaIds
+      });
+
+      if (plan.assignments.length > 0) {
+        dispatch({
+          type: "cell/assignMany",
+          panelId: activePanel.id,
+          assignments: plan.assignments
+        });
+      }
+      // Deliberately no setSelectedCellId: leaving the selection alone is what keeps the picker
+      // open for the next drop.
+      const message = buildDistributionMessage(plan);
+      if (message) {
+        setSaveMessage(message);
+      }
+    },
+    [activePanel, dispatch, state.cellsByPanel, state.editMode]
+  );
+
   const handleAudioDrop = useCallback(
     async (files: File[]) => {
       const { unsupportedFiles, duplicateFiles, validFiles } = filterValidAudioFiles(files, state.media);
@@ -1042,6 +1076,7 @@ export function AppShell() {
           onAudioDrop={(files) => {
             void handleAudioDrop(files);
           }}
+          onMediaDrop={assignDroppedMedia}
         />
         <RightToolbar
           masterVolume={state.masterVolume}

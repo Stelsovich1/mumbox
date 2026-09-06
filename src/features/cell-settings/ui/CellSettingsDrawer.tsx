@@ -3,6 +3,7 @@ import ClearIcon from "@mui/icons-material/Clear";
 import CloseIcon from "@mui/icons-material/Close";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteIcon from "@mui/icons-material/Delete";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyboardIcon from "@mui/icons-material/Keyboard";
 import SearchIcon from "@mui/icons-material/Search";
@@ -46,6 +47,16 @@ import {
 } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
 import { formatCreatedAt } from "../../../shared/lib/formatDate";
+import {
+  beginNativeMediaDrag,
+  beginPointerMediaDrag,
+  cancelMediaDrag,
+  endNativeMediaDrag
+} from "../../../shared/lib/mediaDragSession";
+import { encodeMediaDragPayload, MEDIA_DRAG_MIME } from "../../../shared/lib/mediaDragTransfer";
+import {
+  resolveDraggedMediaIds
+} from "../../../shared/lib/mediaDistribution";
 import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
 import { cycleSortState, SortState, sortRows } from "../../../shared/lib/tableSort";
@@ -57,11 +68,12 @@ import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
-// 40 + 260 + 96 + 74 + 116 + 60 + 42. Keeping the arithmetic exact is what stops the header grid
-// and the body grids drifting apart, which the column-alignment e2e pins. The date track is fixed
-// rather than content-derived for the same reason.
-const MEDIA_PICKER_COLUMNS = "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 116px 60px 42px";
-const MEDIA_PICKER_MIN_WIDTH = 688;
+// 40 + 260 + 96 + 74 + 116 + 60 + 36 + 42. Keeping the arithmetic exact is what stops the header
+// grid and the body grids drifting apart, which the column-alignment e2e pins. The date track is
+// fixed rather than content-derived for the same reason.
+const MEDIA_PICKER_COLUMNS =
+  "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 116px 60px 36px 42px";
+const MEDIA_PICKER_MIN_WIDTH = 724;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -108,6 +120,9 @@ export function CellSettingsDrawer({
   const { selectedIds, toggle, setMany, clear, prune } = useRowSelection();
   const aliasDraftSeedRef = useRef("");
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
+  // One drag mechanism per input type. On a coarse pointer the row is not `draggable` at all, so
+  // iOS Safari cannot start a native long-press drag while our pointer session is running.
+  const coarsePointer = useMediaQuery("(hover: none) and (pointer: coarse)");
   const cellId = cell?.id ?? null;
   const cellMediaId = cell?.mediaId ?? null;
   const selectedMedia = media.find((item) => item.id === cell?.mediaId) ?? null;
@@ -140,6 +155,9 @@ export function CellSettingsDrawer({
   useEffect(() => {
     prune(media.map((item) => item.id));
   }, [media, prune]);
+
+  // Closing the drawer mid-drag must not strand a pointer session on the window.
+  useEffect(() => cancelMediaDrag, []);
 
   useEffect(() => {
     if (!open) {
@@ -612,6 +630,7 @@ export function CellSettingsDrawer({
                   />
                 ))}
                   <Box role="columnheader" />
+                  <Box role="columnheader" />
               </Box>
               <Box
                 role="rowgroup"
@@ -639,7 +658,23 @@ export function CellSettingsDrawer({
                     key={item.id}
                     tabIndex={0}
                     role="button"
+                    data-media-row
+                    data-media-id={item.id}
+                    draggable={!coarsePointer}
                     aria-label={`Выбрать ${item.fileName}`}
+                    onDragStart={(event) => {
+                      const dragged = resolveDraggedMediaIds({
+                        draggedMediaId: item.id,
+                        selectedMediaIds: selectedIds,
+                        displayOrder: filteredIds
+                      });
+                      beginNativeMediaDrag(dragged);
+                      event.dataTransfer.effectAllowed = "copy";
+                      event.dataTransfer.setData(MEDIA_DRAG_MIME, encodeMediaDragPayload(dragged));
+                    }}
+                    onDragEnd={() => {
+                      endNativeMediaDrag();
+                    }}
                     onClick={(event) => {
                       // The checkbox and the delete button live inside the row; neither may assign.
                       if (isInteractiveRowTarget(event.target, event.currentTarget)) {
@@ -746,6 +781,52 @@ export function CellSettingsDrawer({
                           border: "1px solid rgba(247, 251, 255, 0.5)"
                         }}
                       />
+                    </Box>
+                    <Box sx={{ display: "grid", placeItems: "center" }}>
+                      <Tooltip title="Перетащить на ячейку">
+                        <Box
+                          role="button"
+                          tabIndex={-1}
+                          data-media-drag-handle
+                          aria-label={`Перетащить ${item.fileName}`}
+                          onClick={(event) => {
+                            // Without this the synthesised click after a touch drag bubbles to the
+                            // row and assigns the media to the selected cell.
+                            event.stopPropagation();
+                          }}
+                          onPointerDown={(event) => {
+                            if (event.pointerType === "mouse") {
+                              return;
+                            }
+                            event.preventDefault();
+                            beginPointerMediaDrag({
+                              mediaIds: resolveDraggedMediaIds({
+                                draggedMediaId: item.id,
+                                selectedMediaIds: selectedIds,
+                                displayOrder: filteredIds
+                              }),
+                              pointerId: event.pointerId,
+                              clientX: event.clientX,
+                              clientY: event.clientY,
+                              sourceElement: event.currentTarget
+                            });
+                          }}
+                          sx={{
+                            display: "grid",
+                            placeItems: "center",
+                            width: 30,
+                            height: 30,
+                            borderRadius: 1,
+                            color: "text.secondary",
+                            cursor: "grab",
+                            // Scoped to the handle: `touch-action: none` on the row itself would
+                            // kill both the vertical list scroll and the horizontal table scroll.
+                            touchAction: "none"
+                          }}
+                        >
+                          <DragIndicatorIcon fontSize="small" />
+                        </Box>
+                      </Tooltip>
                     </Box>
                     <Box sx={{ display: "grid", placeItems: "center", justifySelf: "stretch" }}>
                       <Tooltip title="Удалить из медиатеки">
