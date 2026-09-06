@@ -4,6 +4,8 @@ import { mkdir, readFile, truncate, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { installFilePickerMock } from "../support/fileSystemAccessMock";
+
 const audioFile = {
   name: "launch.wav",
   mimeType: "audio/wav",
@@ -518,10 +520,13 @@ test("does not keep cell selection highlighted outside edit mode", async ({ page
   await expect(cell).toHaveAttribute("data-selected", "false");
 });
 
-test("exports, resets, and imports a project with audio", async ({
+test("saves, resets, and imports a project with audio", async ({
   page
 }, testInfo) => {
   await installAudioMock(page);
+  // Headless Chromium really does expose showSaveFilePicker, so without this the save opens a
+  // native dialog and waitForEvent("download") hangs instead of failing fast.
+  await installFilePickerMock(page, { mode: "unsupported" });
   await page.goto("/");
 
   const projectInput = page.getByTestId("project-file-input");
@@ -541,18 +546,24 @@ test("exports, resets, and imports a project with audio", async ({
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
 
   await openFileMenu(page);
-  await page.getByText("Экспорт проекта").click();
-  await expect(page.getByRole("dialog", { name: "Проект готов к сохранению" })).toBeVisible();
+  await page.getByText("Сохранить проект").click();
+  await expect(page.getByRole("dialog", { name: "Сохранить проект" })).toBeVisible();
+  await page.getByLabel("Имя проекта").fill("Переносной набор");
+  await page.getByLabel("Описание проекта").fill("Для выезда");
+  await page.getByLabel("Имя файла проекта").fill("выезд");
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Выбрать место" }).click();
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
   const download = await downloadPromise;
-  await expect(page.getByText("Браузер открыл сохранение проекта: mumbox-project.mumbox")).toHaveCount(0);
-  expect(download.suggestedFilename()).toBe("mumbox-project.mumbox");
+  expect(download.suggestedFilename()).toBe("выезд.mumbox");
   const projectPath = join(tmpdir(), `mumbox-project-${Date.now().toString()}.mumbox`);
   await download.saveAs(projectPath);
   const projectText = await readFile(projectPath, "utf8");
   expect(projectText).toContain('"panels"');
   expect(projectText).toContain('"mediaBlobs"');
+  // Name and description travel inside the file, which is what lets a re-picked file restore them.
+  expect(projectText).toContain("Переносной набор");
+  expect(projectText).toContain("Для выезда");
+  expect(projectText).toContain('"version":2');
 
   await openFileMenu(page);
   await page.getByText("Стереть все данные").click();
@@ -1288,6 +1299,56 @@ test("warns for large project files and rejects unsupported project audio", asyn
   await page.getByTestId("project-file-input").setInputFiles(unsupportedProjectPath);
   await expect(page.getByText("Проект содержит неподдерживаемый формат: unsupported.flac")).toBeVisible();
   await expect(page.getByRole("button", { name: "Ячейка 1 Unsupported" })).toHaveCount(0);
+});
+
+test("imports a v2 project file written without meta", async ({ page }) => {
+  // A file from a build that predates project name and description must keep opening. The PWA
+  // updates on prompt, so an older build stays in use for as long as the user ignores the banner.
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const legacyProject = {
+    kind: "mumbox-project",
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    state: {
+      panels: [{ id: "panel-legacy", name: "Panel 1", gridSize: 8, cellIds: ["cell-0"] }],
+      activePanelId: "panel-legacy",
+      cellsByPanel: {
+        "panel-legacy": { "cell-0": makeStoredCell("cell-0", "media-legacy") }
+      },
+      media: [
+        {
+          id: "media-legacy",
+          fileName: "legacy.wav",
+          alias: "Старый пэд",
+          color: "#ec5aa7",
+          mimeType: "audio/wav",
+          size: 16,
+          durationMs: null,
+          createdAt: new Date().toISOString()
+        }
+      ],
+      masterVolume: 80,
+      masterMuted: false,
+      stopOthers: false
+    },
+    mediaBlobs: [
+      { id: "media-legacy", fileName: "legacy.wav", mimeType: "audio/wav", size: 16 }
+    ]
+  };
+  const legacyPath = join(tmpdir(), `legacy-mumbox-${Date.now().toString()}.mumbox`);
+  await writeFile(
+    legacyPath,
+    makeStoredZip([
+      { name: "project.json", data: Buffer.from(JSON.stringify(legacyProject)) },
+      { name: "media/media-legacy", data: audioFile.buffer }
+    ])
+  );
+
+  await page.getByTestId("project-file-input").setInputFiles(legacyPath);
+  await expect(page.getByText(`Проект импортирован: ${basename(legacyPath)}`)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 1 Старый пэд" })).toBeVisible();
 });
 
 test("keeps import table aligned and renders a large audio folder", async ({ page }) => {
