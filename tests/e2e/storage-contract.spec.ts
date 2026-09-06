@@ -9,6 +9,12 @@ import {
   readSeededKeys,
   seedProject
 } from "../support/seedProject";
+import {
+  PROJECTS_DB_NAME,
+  PROJECTS_STORE_NAME,
+  readProjectRowIds,
+  seedProjectRows
+} from "../support/seedProjects";
 
 /**
  * Drift guards for the two contracts `tests/support/seedProject.ts` duplicates instead of
@@ -98,4 +104,59 @@ test("seeded media blobs are readable by the app", async ({ page }) => {
   // survives `sanitizeImportedState`.
   await expect(page.getByRole("button", { name: "Ячейка 1 Seed 0" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Ячейка 2 Seed 1" })).toBeVisible();
+});
+
+test("the projects list lives in its own database, keyed by row id", async ({ page }) => {
+  await seedProjectRows(page, [{ id: "project-contract", fileName: "contract.mumbox" }]);
+
+  const database = await page.evaluate(async (name: string) => {
+    const databases = await indexedDB.databases();
+
+    return databases.find((entry) => entry.name === name)?.name ?? null;
+  }, PROJECTS_DB_NAME);
+  expect(database).toBe(PROJECTS_DB_NAME);
+
+  const storeNames = await page.evaluate(
+    (payload: { db: string }) =>
+      new Promise<string[]>((resolve, reject) => {
+        const request = indexedDB.open(payload.db);
+        request.onsuccess = () => {
+          const names = Array.from(request.result.objectStoreNames);
+          request.result.close();
+          resolve(names);
+        };
+        request.onerror = () => {
+          reject(request.error ?? new Error("open failed"));
+        };
+      }),
+    { db: PROJECTS_DB_NAME }
+  );
+  expect(storeNames).toContain(PROJECTS_STORE_NAME);
+  expect(await readProjectRowIds(page)).toEqual(["project-contract"]);
+});
+
+test("a full reset empties both the media store and the projects store", async ({ page }) => {
+  // idb-keyval's clear() only reaches the default store, so clearing the projects database is an
+  // explicit extra call. This pins that it is actually made.
+  await seedProjectRows(page, [{ id: "project-contract", fileName: "contract.mumbox" }]);
+  const seed = await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: SIZES.small,
+    filledCellsPerPanel: 1
+  });
+  await page.goto("/");
+
+  expect(await readSeededKeys(page)).toContain(`${MEDIA_BLOB_PREFIX}${seed.media[0]?.id ?? ""}`);
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByText("Стереть все данные").click();
+  await page.getByRole("button", { name: "Да, стереть" }).click();
+  await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
+
+  await expect
+    .poll(async () => (await readSeededKeys(page)).filter((key) => key.startsWith(MEDIA_BLOB_PREFIX)))
+    .toEqual([]);
+  await expect.poll(async () => readProjectRowIds(page)).toEqual([]);
 });

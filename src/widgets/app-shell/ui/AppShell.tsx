@@ -2,6 +2,7 @@ import FileOpenIcon from "@mui/icons-material/FileOpen";
 import DeleteIcon from "@mui/icons-material/Delete";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import LibraryMusicIcon from "@mui/icons-material/LibraryMusic";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -56,18 +57,33 @@ import {
   toProjectFileName
 } from "../../../features/file-config";
 import { MediaLibraryDialog } from "../../../features/media-library";
+import { ProjectLibraryRow } from "../../../entities/project/model/types";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
-import { ProjectSaveDialog } from "../../../features/project-library";
+import {
+  classifyFileError,
+  clearProjectsIndex,
+  getActivationPlan,
+  getProjectRowLabel,
+  ProjectActivationDialog,
+  ProjectLibraryDialog,
+  ProjectSaveDialog,
+  useProjectLibrary
+} from "../../../features/project-library";
 import {
   recordPanelSwitchPaint,
   setActivePanelId,
   setDiagnosticsSinks
 } from "../../../shared/lib/diagnostics";
 import {
+  pickProjectFilesToOpen,
   pickProjectFileToSave,
   supportsFilePickers
+} from "../../../shared/lib/fileSystemAccess";
+import {
+  FileHandleLike,
+  requestHandlePermission
 } from "../../../shared/lib/fileSystemAccess";
 import { clearMediaCaches, purgeMediaCaches } from "../../../shared/lib/mediaCacheRegistry";
 import {
@@ -214,6 +230,11 @@ export function AppShell() {
   const [configImportWarningOpen, setConfigImportWarningOpen] = useState(false);
   const [largeProjectFile, setLargeProjectFile] = useState<File | null>(null);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
+  const [activationRow, setActivationRow] = useState<ProjectLibraryRow | null>(null);
+  const [relinkRowId, setRelinkRowId] = useState<string | null>(null);
+  /** Set when the user chose «Сохранить и открыть»: the row to open once the save finishes. */
+  const [pendingActivationRow, setPendingActivationRow] = useState<ProjectLibraryRow | null>(null);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [pendingDeletePanelId, setPendingDeletePanelId] = useState<string | null>(null);
   const [pendingClearCellId, setPendingClearCellId] = useState<string | null>(null);
@@ -573,7 +594,14 @@ export function AppShell() {
     event.target.value = "";
   };
 
-  const importProjectFile = (file: File) => {
+  /**
+   * Replaces the current layout with a project file.
+   *
+   * The old blobs go **before** the new ones are written: the previous order left both projects
+   * resident at once, which is what a mobile tab gets killed for. `readProjectFile` already
+   * materialised and validated the whole zip by then, so nothing is destroyed on a bad file.
+   */
+  const importProjectFile = (file: File, sessionRow?: ProjectLibraryRow) => {
     setImportLoading(true);
     updateOperationProgress({ completed: 0, total: 1, label: "Проверка хранилища" });
     void hasLikelyStorageForBytes(file.size)
@@ -603,15 +631,26 @@ export function AppShell() {
         }
         stopAll();
         const oldMediaIds = state.media.map((item) => item.id);
+        // Import regenerates every media id, so nothing in the caches can be reused.
+        clearMediaCaches();
+        await deleteStoredMedia(oldMediaIds);
         const importedState = await writeImportedProjectMedia(
           project.state,
           project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
           updateOperationProgress
         );
-        dispatch({ type: "state/import", state: importedState });
-        // Import regenerates every media id, so nothing in the caches can be reused.
-        clearMediaCaches();
-        await deleteStoredMedia(oldMediaIds);
+        dispatch({
+          type: "state/import",
+          state: importedState,
+          session: {
+            projectId: sessionRow?.id ?? null,
+            name: sessionRow?.projectName ?? project.meta.name ?? "",
+            description: sessionRow?.description ?? project.meta.description ?? "",
+            fileName: file.name,
+            saved: true,
+            dirty: false
+          }
+        });
         setSelectedCellId(null);
         setSaveMessage(`Проект импортирован: ${file.name}`);
       })
@@ -627,11 +666,35 @@ export function AppShell() {
   const handleProjectFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
+    const rowId = relinkRowId;
+    setRelinkRowId(null);
     if (!file) {
       return;
     }
     if (file.size >= LARGE_PROJECT_IMPORT_BYTES) {
       setLargeProjectFile(file);
+      return;
+    }
+    // Re-linking a row: the file the user just pointed at replaces the row's stale reference.
+    const row = rowId ? projectLibrary.rows.find((candidate) => candidate.id === rowId) : undefined;
+    if (row) {
+      setProjectLibraryOpen(false);
+      void projectLibrary
+        .upsertRow(
+          {
+            fileName: file.name,
+            projectName: row.projectName,
+            description: row.description,
+            sizeBytes: file.size,
+            panelCount: row.panelCount,
+            mediaCount: row.mediaCount,
+            handle: undefined
+          },
+          row.id
+        )
+        .then(() => {
+          importProjectFile(file, row);
+        });
       return;
     }
     importProjectFile(file);
@@ -644,6 +707,98 @@ export function AppShell() {
     }
 
     projectInputRef.current?.click();
+  };
+
+  const projectLibrary = useProjectLibrary(projectLibraryOpen);
+
+  const rememberSavedProject = async (
+    values: { name: string; description: string; fileName: string },
+    handle?: FileHandleLike,
+    sizeBytes?: number
+  ) => {
+    await projectLibrary.upsertRow(
+      {
+        fileName: values.fileName,
+        projectName: values.name,
+        description: values.description,
+        sizeBytes: sizeBytes ?? null,
+        panelCount: state.panels.length,
+        mediaCount: state.media.length,
+        handle
+      },
+      state.projectSession.projectId ?? undefined
+    );
+  };
+
+  const addProjectsToLibrary = async () => {
+    const handles = await pickProjectFilesToOpen(true);
+    if (!handles) {
+      // No pickers here: the file input is the only way in, and a plain import is what it does.
+      projectInputRef.current?.click();
+      return;
+    }
+
+    for (const handle of handles) {
+      try {
+        const file = await handle.getFile();
+        const project = await readProjectFile(file);
+        await projectLibrary.upsertRow({
+          fileName: file.name,
+          projectName: project.meta.name ?? "",
+          description: project.meta.description ?? "",
+          sizeBytes: file.size,
+          panelCount: project.state.panels.length,
+          mediaCount: project.state.media.length,
+          handle
+        });
+      } catch {
+        setSaveMessage(`Не удалось прочитать проект: ${handle.name}`);
+      }
+    }
+  };
+
+  const deleteProjectRowsFromLibrary = async (rows: ProjectLibraryRow[]) => {
+    const { removedFromDisk, failedOnDisk } = await projectLibrary.removeRows(rows);
+    if (failedOnDisk > 0) {
+      setSaveMessage(`Не удалось удалить файлов с диска: ${String(failedOnDisk)}`);
+      return;
+    }
+    setSaveMessage(
+      removedFromDisk > 0
+        ? `Удалено проектов: ${String(rows.length)}, файлов с диска: ${String(removedFromDisk)}`
+        : `Удалено проектов из списка: ${String(rows.length)}`
+    );
+  };
+
+  const openProjectFromRow = async (row: ProjectLibraryRow) => {
+    setActivationRow(null);
+    const handle = row.handle;
+    if (!handle) {
+      // No handle to open with: the user points at the file again through the normal input.
+      setRelinkRowId(row.id);
+      projectInputRef.current?.click();
+      return;
+    }
+
+    const permission = await requestHandlePermission(handle, "read");
+    if (permission === "denied") {
+      setSaveMessage("Нет доступа к файлу проекта");
+      return;
+    }
+
+    try {
+      const file = await handle.getFile();
+      setProjectLibraryOpen(false);
+      importProjectFile(file, row);
+      await projectLibrary.markOpened(row);
+    } catch (error: unknown) {
+      setSaveMessage(
+        classifyFileError(error) === "missing"
+          ? "Файл проекта не найден"
+          : "Не удалось открыть проект"
+      );
+      await projectLibrary.refresh();
+    }
   };
 
   const handleSaveProject = async (values: {
@@ -687,6 +842,16 @@ export function AppShell() {
         name: values.name,
         description: values.description
       });
+      await rememberSavedProject(
+        { ...values, fileName: result.fileName },
+        handle ?? undefined,
+        blob.size
+      );
+      const nextRow = pendingActivationRow;
+      setPendingActivationRow(null);
+      if (nextRow) {
+        await openProjectFromRow(nextRow);
+      }
       setSaveMessage(
         result.completed
           ? `Проект сохранён: ${result.fileName}`
@@ -925,6 +1090,15 @@ export function AppShell() {
           >
             <SaveAltIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>Сохранить проект</Typography>
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setProjectLibraryOpen(true);
+              closeFileMenu();
+            }}
+          >
+            <FolderOpenIcon fontSize="small" />
+            <Typography sx={{ ml: 1 }}>Проекты</Typography>
           </MenuItem>
           <MenuItem
             onClick={() => {
@@ -1223,6 +1397,58 @@ export function AppShell() {
         }}
         onDeleteMedia={deleteMediaFromLibrary}
       />
+      <ProjectLibraryDialog
+        open={projectLibraryOpen}
+        rows={projectLibrary.rows}
+        probes={projectLibrary.probes}
+        onClose={() => {
+          setProjectLibraryOpen(false);
+        }}
+        onAddProjects={() => {
+          void addProjectsToLibrary();
+        }}
+        onActivate={(row) => {
+          const plan = getActivationPlan(state.projectSession, row);
+          if (plan.kind === "alreadyOpen") {
+            setSaveMessage("Этот проект уже открыт");
+            return;
+          }
+          setActivationRow(row);
+        }}
+        onDelete={(rows) => {
+          void deleteProjectRowsFromLibrary(rows);
+        }}
+        onRelink={(row) => {
+          setRelinkRowId(row.id);
+          projectInputRef.current?.click();
+        }}
+        onMerge={(rows) => {
+          setSaveMessage(`Объединение пока недоступно: выбрано ${String(rows.length)}`);
+        }}
+      />
+      <ProjectActivationDialog
+        open={activationRow !== null}
+        plan={activationRow ? getActivationPlan(state.projectSession, activationRow) : null}
+        projectLabel={activationRow ? getProjectRowLabel(activationRow) : ""}
+        onCancel={() => {
+          setActivationRow(null);
+        }}
+        onOpenProject={() => {
+          if (activationRow) {
+            void openProjectFromRow(activationRow);
+          }
+        }}
+        onSaveAndOpen={() => {
+          setPendingActivationRow(activationRow);
+          setActivationRow(null);
+          setSaveDialogOpen(true);
+        }}
+        onDiscardAndOpen={() => {
+          if (activationRow) {
+            void openProjectFromRow(activationRow);
+          }
+        }}
+      />
       <ProjectSaveDialog
         open={saveDialogOpen}
         defaultName={state.projectSession.name}
@@ -1404,7 +1630,8 @@ export function AppShell() {
         <DialogContent>
           <Typography>
             Будут удалены все панели, настройки ячеек и аудиофайлы из локального хранилища MUMBOX
-            на этом устройстве.
+            на этом устройстве. Список проектов также будет очищен — файлы .mumbox на диске
+            останутся.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -1421,6 +1648,9 @@ export function AppShell() {
             onClick={() => {
               setImportLoading(true);
               void clearStoredAppData()
+                // A separate IndexedDB store, so idb-keyval's `clear()` does not reach it. Clearing
+                // it here is deliberate: "erase everything" must mean everything.
+                .then(clearProjectsIndex)
                 .then(() => {
                   stopAll();
                   setSelectedCellId(null);
