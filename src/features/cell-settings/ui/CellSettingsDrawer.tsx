@@ -30,18 +30,33 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
+import { countCellsUsingMedia } from "../../../entities/cell/model/cellUsage";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
+import {
+  buildAffectedCellsNote,
+  buildMediaDeletionHeadline
+} from "../../../entities/media/model/mediaDeletion";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { Panel } from "../../../entities/panel/model/types";
 import { AudioEditorDialog } from "../../../features/audio-editor";
+import {
+  SELECTED_ROW_BACKGROUND,
+  SELECTED_ROW_HOVER_BACKGROUND
+} from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
+import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
+import { getSelectAllState } from "../../../shared/lib/rowSelection";
+import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
+import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
-const MEDIA_PICKER_COLUMNS = "minmax(260px, 2fr) minmax(96px, 1fr) 74px 60px 42px";
-const MEDIA_PICKER_MIN_WIDTH = 532;
+// 40 + 260 + 96 + 74 + 60 + 42. Keeping the arithmetic exact is what stops the header grid and
+// the body grids drifting apart, which the column-alignment e2e pins.
+const MEDIA_PICKER_COLUMNS = "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 60px 42px";
+const MEDIA_PICKER_MIN_WIDTH = 572;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -54,7 +69,7 @@ type CellSettingsDrawerProps = {
   onClose: () => void;
   onClearCell: (cellId: string) => void;
   panelCells: GridCell[];
-  onDeleteMedia: (mediaId: string) => void;
+  onDeleteMedia: (mediaIds: string[]) => void;
 };
 
 export function CellSettingsDrawer({
@@ -77,12 +92,14 @@ export function CellSettingsDrawer({
   const [hotkeyDialogOpen, setHotkeyDialogOpen] = useState(false);
   const [capturedHotkey, setCapturedHotkey] = useState("");
   const [hotkeyError, setHotkeyError] = useState("");
-  const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
   const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
   const [aliasDraft, setAliasDraft] = useState("");
   const hotkeyCaptureRef = useRef<HTMLDivElement | null>(null);
+  const pickerBodyRef = useRef<HTMLDivElement | null>(null);
+  const { selectedIds, toggle, setMany, clear, prune } = useRowSelection();
   const aliasDraftSeedRef = useRef("");
   const hideHotkeySettings = useMediaQuery("(hover: none), (max-width: 700px)");
   const cellId = cell?.id ?? null;
@@ -113,6 +130,17 @@ export function CellSettingsDrawer({
   const canCopyCell = Boolean(cellMediaId) && copyPanelOptions.length > 0;
   const selectedCopyOption =
     copyPanelOptions.find((option) => option.panel.id === copyTargetPanelId) ?? copyPanelOptions[0] ?? null;
+
+  useEffect(() => {
+    prune(media.map((item) => item.id));
+  }, [media, prune]);
+
+  useEffect(() => {
+    if (!open) {
+      clear();
+      setPendingDeleteIds([]);
+    }
+  }, [clear, open]);
 
   useEffect(() => {
     if (!open || !cellId) {
@@ -162,12 +190,22 @@ export function CellSettingsDrawer({
     setAliasDraft(cell?.aliasOverride.trim() ? cell.aliasOverride : defaultAliasName);
   }, [cell?.aliasOverride, cellId, cellMediaId, defaultAliasName, open, selectedMedia]);
 
+  const filteredIds = useMemo(() => filteredMedia.map((item) => item.id), [filteredMedia]);
+  const selectAllState = getSelectAllState(selectedIds, filteredIds);
+  const pendingDeleteTargets = useMemo(
+    () => media.filter((item) => pendingDeleteIds.includes(item.id)),
+    [media, pendingDeleteIds]
+  );
+  const pendingDeleteHeadline = buildMediaDeletionHeadline(pendingDeleteTargets);
+  const pendingAffectedCellsNote = buildAffectedCellsNote(
+    countCellsUsingMedia(cellsByPanel, pendingDeleteIds)
+  );
+
   if (!open || !cell) {
     return null;
   }
 
   const shownColor = cell.colorOverride ?? selectedMedia?.color ?? "#ec5aa7";
-  const pendingDeleteMedia = media.find((item) => item.id === pendingDeleteMediaId) ?? null;
   const canClearCell =
     Boolean(cell.mediaId) ||
     cell.aliasOverride.length > 0 ||
@@ -188,6 +226,13 @@ export function CellSettingsDrawer({
   );
   const visibleMedia = filteredMedia.length > 80 ? filteredMedia.slice(pickerStart, pickerEnd) : filteredMedia;
   const emptyPickerText = colorFilter ? "по фильтру нет аудио" : "Нет аудио";
+
+  const resetPickerScroll = () => {
+    setPickerScrollTop(0);
+    if (pickerBodyRef.current) {
+      pickerBodyRef.current.scrollTop = 0;
+    }
+  };
 
   const captureHotkey = (event: KeyboardEvent) => {
     event.preventDefault();
@@ -452,6 +497,7 @@ export function CellSettingsDrawer({
               size="small"
               onValueChange={(value) => {
                 setQuery(value);
+                resetPickerScroll();
               }}
               slotProps={{
                 htmlInput: {
@@ -476,7 +522,7 @@ export function CellSettingsDrawer({
                     value={colorFilter}
                     onChange={(color) => {
                       setColorFilter((current) => (current === color ? "" : color));
-                      setPickerScrollTop(0);
+                      resetPickerScroll();
                     }}
                     label="Фильтр по цвету медиа"
                   />
@@ -486,12 +532,32 @@ export function CellSettingsDrawer({
                   disabled={!colorFilter}
                   onClick={() => {
                     setColorFilter("");
+                    resetPickerScroll();
                   }}
                 >
                   Сбросить
                 </Button>
               </Box>
             </Box>
+            {selectedIds.size > 0 ? (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                <Typography variant="body2">Выбрано: {String(selectedIds.size)}</Typography>
+                <Button
+                  size="small"
+                  color="error"
+                  variant="outlined"
+                  startIcon={<DeleteIcon />}
+                  onClick={() => {
+                    setPendingDeleteIds([...selectedIds]);
+                  }}
+                >
+                  Удалить выбранное
+                </Button>
+                <Button size="small" onClick={clear}>
+                  Снять выделение
+                </Button>
+              </Box>
+            ) : null}
             <Box role="table" aria-label="Выбор медиа" sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
               <Box sx={{ width: `max(100%, ${String(MEDIA_PICKER_MIN_WIDTH)}px)` }}>
               <Box
@@ -505,6 +571,16 @@ export function CellSettingsDrawer({
                   backgroundColor: "rgba(5, 7, 13, 0.92)"
                 }}
               >
+                <Box role="columnheader" sx={{ display: "grid", placeItems: "center" }}>
+                  <SelectAllCheckbox
+                    size="small"
+                    label="Выбрать все медиа"
+                    state={selectAllState}
+                    onChange={(checked) => {
+                      setMany(filteredIds, checked);
+                    }}
+                  />
+                </Box>
                 <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
                   Название файла
                 </Typography>
@@ -521,6 +597,7 @@ export function CellSettingsDrawer({
               </Box>
               <Box
                 role="rowgroup"
+                ref={pickerBodyRef}
                 onScroll={(event) => {
                   setPickerScrollTop(event.currentTarget.scrollTop);
                 }}
@@ -545,7 +622,11 @@ export function CellSettingsDrawer({
                     tabIndex={0}
                     role="button"
                     aria-label={`Выбрать ${item.fileName}`}
-                    onClick={() => {
+                    onClick={(event) => {
+                      // The checkbox and the delete button live inside the row; neither may assign.
+                      if (isInteractiveRowTarget(event.target, event.currentTarget)) {
+                        return;
+                      }
                       dispatch({
                         type: "cell/assign",
                         panelId,
@@ -562,6 +643,15 @@ export function CellSettingsDrawer({
                       borderBottom: 1,
                       borderColor: "rgba(169, 183, 207, 0.12)",
                       cursor: "pointer",
+                      backgroundColor: selectedIds.has(item.id)
+                        ? SELECTED_ROW_BACKGROUND
+                        : "transparent",
+                      transition: "background-color 160ms ease",
+                      "&:hover": {
+                        backgroundColor: selectedIds.has(item.id)
+                          ? SELECTED_ROW_BACKGROUND
+                          : SELECTED_ROW_HOVER_BACKGROUND
+                      },
                       ...(filteredMedia.length > 80
                         ? {
                             position: "absolute",
@@ -587,6 +677,16 @@ export function CellSettingsDrawer({
                       }
                     }}
                   >
+                    <Box sx={{ display: "grid", placeItems: "center" }}>
+                      <RowSelectCheckbox
+                        size="small"
+                        label={`Отметить ${item.fileName}`}
+                        checked={selectedIds.has(item.id)}
+                        onChange={() => {
+                          toggle(item.id);
+                        }}
+                      />
+                    </Box>
                     <Typography
                       title={item.fileName}
                       sx={{
@@ -634,7 +734,7 @@ export function CellSettingsDrawer({
                           aria-label={`Удалить из медиатеки ${item.fileName}`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            setPendingDeleteMediaId(item.id);
+                            setPendingDeleteIds([item.id]);
                           }}
                         >
                           <DeleteIcon />
@@ -859,7 +959,7 @@ export function CellSettingsDrawer({
         </DialogActions>
       </Dialog>
       <Snackbar
-        open={Boolean(pendingDeleteMedia)}
+        open={pendingDeleteIds.length > 0}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}
         sx={{
           top: "50% !important",
@@ -871,19 +971,22 @@ export function CellSettingsDrawer({
           maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
         }}
         message={
-          pendingDeleteMedia
-            ? `Вы действительно хотите удалить "${pendingDeleteMedia.fileName}" из медиатеки?`
-            : ""
+          <Box sx={{ display: "grid", gap: 0.5 }}>
+            <Typography>{pendingDeleteHeadline}</Typography>
+            {pendingAffectedCellsNote ? (
+              <Typography color="warning.main">{pendingAffectedCellsNote}</Typography>
+            ) : null}
+          </Box>
         }
         action={
           <>
             <Button
               color="inherit"
               onClick={() => {
-                if (pendingDeleteMediaId) {
-                  onDeleteMedia(pendingDeleteMediaId);
-                }
-                setPendingDeleteMediaId(null);
+                onDeleteMedia(pendingDeleteIds);
+                clear();
+                setPendingDeleteIds([]);
+                resetPickerScroll();
               }}
             >
               Удалить
@@ -891,7 +994,7 @@ export function CellSettingsDrawer({
             <Button
               color="inherit"
               onClick={() => {
-                setPendingDeleteMediaId(null);
+                setPendingDeleteIds([]);
               }}
             >
               Отмена

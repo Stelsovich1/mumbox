@@ -11,28 +11,45 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
+import { countCellsUsingMedia } from "../../../entities/cell/model/cellUsage";
+import { GridCell } from "../../../entities/cell/model/types";
+import {
+  buildAffectedCellsNote,
+  buildMediaDeletionHeadline
+} from "../../../entities/media/model/mediaDeletion";
 import { MediaAsset } from "../../../entities/media/model/types";
-import { CELL_COLORS } from "../../../shared/config/colorPalette";
+import {
+  CELL_COLORS,
+  SELECTED_ROW_BACKGROUND,
+  SELECTED_ROW_HOVER_BACKGROUND
+} from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
+import { getSelectAllState } from "../../../shared/lib/rowSelection";
+import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
+import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 
 type MediaLibraryDialogProps = {
   open: boolean;
   media: MediaAsset[];
+  cellsByPanel: Record<string, Record<string, GridCell>>;
   dispatch: React.Dispatch<AppAction>;
   onClose: () => void;
-  onDeleteMedia: (mediaId: string) => void;
+  onDeleteMedia: (mediaIds: string[]) => void;
 };
 
-const MEDIA_LIBRARY_COLUMNS = "minmax(220px, 1.25fr) minmax(180px, 1fr) 72px minmax(220px, max-content) 52px";
+const MEDIA_LIBRARY_COLUMNS =
+  "44px minmax(200px, 1.25fr) minmax(160px, 1fr) 72px minmax(200px, max-content) 52px";
+const MEDIA_LIBRARY_MIN_WIDTH = 800;
 
 export function MediaLibraryDialog({
   open,
   media,
+  cellsByPanel,
   dispatch,
   onClose,
   onDeleteMedia
@@ -42,8 +59,9 @@ export function MediaLibraryDialog({
   const [editingAliasId, setEditingAliasId] = useState<string | null>(null);
   const [draftAlias, setDraftAlias] = useState("");
   const [colorEditorId, setColorEditorId] = useState<string | null>(null);
-  const [pendingDeleteMediaId, setPendingDeleteMediaId] = useState<string | null>(null);
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const lastAliasTapRef = useRef<{ id: string; time: number } | null>(null);
+  const { selectedIds, toggle, setMany, clear, prune } = useRowSelection();
 
   const filteredMedia = useMemo(
     () =>
@@ -53,7 +71,29 @@ export function MediaLibraryDialog({
       }),
     [colorFilter, media, query]
   );
-  const pendingDeleteMedia = media.find((item) => item.id === pendingDeleteMediaId) ?? null;
+  const filteredIds = useMemo(() => filteredMedia.map((item) => item.id), [filteredMedia]);
+  const selectAllState = getSelectAllState(selectedIds, filteredIds);
+  const pendingDeleteTargets = useMemo(
+    () => media.filter((item) => pendingDeleteIds.includes(item.id)),
+    [media, pendingDeleteIds]
+  );
+  const pendingDeleteHeadline = buildMediaDeletionHeadline(pendingDeleteTargets);
+  const pendingAffectedCellsNote = buildAffectedCellsNote(
+    countCellsUsingMedia(cellsByPanel, pendingDeleteIds)
+  );
+
+  // A deleted or re-imported asset must not linger in the selection and keep the bulk bar counting
+  // rows that no longer exist.
+  useEffect(() => {
+    prune(media.map((item) => item.id));
+  }, [media, prune]);
+
+  useEffect(() => {
+    if (!open) {
+      clear();
+      setPendingDeleteIds([]);
+    }
+  }, [clear, open]);
 
   const beginAliasEdit = (item: MediaAsset) => {
     setEditingAliasId(item.id);
@@ -136,7 +176,35 @@ export function MediaLibraryDialog({
             </Box>
           </Box>
 
-          <Box role="table" aria-label="Медиатека" sx={{ minWidth: 760 }}>
+          {selectedIds.size > 0 ? (
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1.5,
+                flexWrap: "wrap",
+                mb: 1.5
+              }}
+            >
+              <Typography>Выбрано: {String(selectedIds.size)}</Typography>
+              <Button
+                size="small"
+                color="error"
+                variant="outlined"
+                startIcon={<DeleteIcon />}
+                onClick={() => {
+                  setPendingDeleteIds([...selectedIds]);
+                }}
+              >
+                Удалить выбранное
+              </Button>
+              <Button size="small" onClick={clear}>
+                Снять выделение
+              </Button>
+            </Box>
+          ) : null}
+
+          <Box role="table" aria-label="Медиатека" sx={{ minWidth: MEDIA_LIBRARY_MIN_WIDTH }}>
             <Box
               role="row"
               sx={{
@@ -149,6 +217,15 @@ export function MediaLibraryDialog({
                 backgroundColor: "rgba(5, 7, 13, 0.92)"
               }}
             >
+              <Box role="columnheader" sx={{ display: "grid", placeItems: "center" }}>
+                <SelectAllCheckbox
+                  label="Выбрать все в медиатеке"
+                  state={selectAllState}
+                  onChange={(checked) => {
+                    setMany(filteredIds, checked);
+                  }}
+                />
+              </Box>
               {["Файл", "Псевдоним", "Время", "Цвет", ""].map((title) => (
                 <Typography key={title} role="columnheader" sx={{ px: 1, fontWeight: 700 }}>
                   {title}
@@ -166,6 +243,13 @@ export function MediaLibraryDialog({
                   minHeight: 58,
                   borderBottom: 1,
                   borderColor: "rgba(169, 183, 207, 0.12)",
+                  backgroundColor: selectedIds.has(item.id) ? SELECTED_ROW_BACKGROUND : "transparent",
+                  transition: "background-color 160ms ease",
+                  "&:hover": {
+                    backgroundColor: selectedIds.has(item.id)
+                      ? SELECTED_ROW_BACKGROUND
+                      : SELECTED_ROW_HOVER_BACKGROUND
+                  },
                   "& .media-delete-button": {
                     opacity: 0,
                     pointerEvents: "none",
@@ -183,6 +267,15 @@ export function MediaLibraryDialog({
                   }
                 }}
               >
+                <Box role="cell" sx={{ display: "grid", placeItems: "center" }}>
+                  <RowSelectCheckbox
+                    label={`Выбрать запись ${item.fileName}`}
+                    checked={selectedIds.has(item.id)}
+                    onChange={() => {
+                      toggle(item.id);
+                    }}
+                  />
+                </Box>
                 <Typography
                   title={item.fileName}
                   sx={{ minWidth: 0, px: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
@@ -278,7 +371,7 @@ export function MediaLibraryDialog({
                       className="media-delete-button"
                       aria-label={`Удалить из медиатеки ${item.fileName}`}
                       onClick={() => {
-                        setPendingDeleteMediaId(item.id);
+                        setPendingDeleteIds([item.id]);
                       }}
                     >
                       <DeleteIcon />
@@ -307,44 +400,50 @@ export function MediaLibraryDialog({
         <DialogActions>
           <Button onClick={onClose}>Закрыть</Button>
         </DialogActions>
+        <Snackbar
+          open={pendingDeleteIds.length > 0}
+          anchorOrigin={{ vertical: "top", horizontal: "center" }}
+          sx={{
+            top: "50% !important",
+            left: "50% !important",
+            right: "auto !important",
+            bottom: "auto !important",
+            transform: "translate(-50%, -50%) !important",
+            width: { xs: "calc(100vw - 24px)", sm: "auto" },
+            maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
+          }}
+          message={
+            <Box sx={{ display: "grid", gap: 0.5 }}>
+              <Typography>{pendingDeleteHeadline}</Typography>
+              {pendingAffectedCellsNote ? (
+                <Typography color="warning.main">{pendingAffectedCellsNote}</Typography>
+              ) : null}
+            </Box>
+          }
+          action={
+            <>
+              <Button
+                color="inherit"
+                onClick={() => {
+                  onDeleteMedia(pendingDeleteIds);
+                  clear();
+                  setPendingDeleteIds([]);
+                }}
+              >
+                Удалить
+              </Button>
+              <Button
+                color="inherit"
+                onClick={() => {
+                  setPendingDeleteIds([]);
+                }}
+              >
+                Отмена
+              </Button>
+            </>
+          }
+        />
       </Dialog>
-      <Snackbar
-        open={Boolean(pendingDeleteMedia)}
-        anchorOrigin={{ vertical: "top", horizontal: "center" }}
-        sx={{
-          top: "50% !important",
-          left: "50% !important",
-          right: "auto !important",
-          bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important",
-          width: { xs: "calc(100vw - 24px)", sm: "auto" },
-          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
-        }}
-        message={pendingDeleteMedia ? `Удалить "${pendingDeleteMedia.fileName}" из медиатеки?` : ""}
-        action={
-          <>
-            <Button
-              color="inherit"
-              onClick={() => {
-                if (pendingDeleteMediaId) {
-                  onDeleteMedia(pendingDeleteMediaId);
-                }
-                setPendingDeleteMediaId(null);
-              }}
-            >
-              Удалить
-            </Button>
-            <Button
-              color="inherit"
-              onClick={() => {
-                setPendingDeleteMediaId(null);
-              }}
-            >
-              Отмена
-            </Button>
-          </>
-        }
-      />
     </>
   );
 }

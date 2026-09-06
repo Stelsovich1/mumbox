@@ -513,13 +513,17 @@ export function AppShell() {
   );
 
   const deleteMediaFromLibrary = useCallback(
-    (mediaId: string) => {
+    (mediaIds: string[]) => {
+      if (mediaIds.length === 0) {
+        return;
+      }
+      // One pass for the whole batch: one stop, one dispatch, one purge, one storage delete.
       stopAll();
-      dispatch({ type: "media/deleteMany", mediaIds: [mediaId] });
+      dispatch({ type: "media/deleteMany", mediaIds });
       // The IndexedDB blob and the decoded PCM are two separate stores; deleting one without the
       // other left the decoded copy resident for the rest of the session.
-      purgeMediaCaches([mediaId]);
-      void deleteStoredMedia([mediaId]).catch(() => {
+      purgeMediaCaches(mediaIds);
+      void deleteStoredMedia(mediaIds).catch(() => {
         setSaveMessage("Не удалось удалить аудио из хранилища браузера");
       });
     },
@@ -1126,6 +1130,7 @@ export function AppShell() {
       <MediaLibraryDialog
         open={mediaLibraryOpen}
         media={state.media}
+        cellsByPanel={state.cellsByPanel}
         dispatch={dispatch}
         onClose={() => {
           setMediaLibraryOpen(false);

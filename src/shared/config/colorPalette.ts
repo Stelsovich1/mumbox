@@ -12,3 +12,7 @@ export const CELL_COLORS = [
   "#e879f9",
   "#84cc16"
 ] as const;
+
+/** Shared by every selectable table row, so the three media tables read as one surface. */
+export const SELECTED_ROW_BACKGROUND = "rgba(236, 90, 167, 0.09)";
+export const SELECTED_ROW_HOVER_BACKGROUND = "rgba(236, 90, 167, 0.07)";

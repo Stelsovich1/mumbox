@@ -1475,6 +1475,60 @@ test("deletes media from the edit picker with confirmation", async ({ page }) =>
   await expect(page.getByText("alarm.mp3")).toHaveCount(0);
 });
 
+test("selects media in the picker without assigning it to the cell", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByTestId("audio-file-input").setInputFiles([audioFile, secondAudioFile]);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+
+  await page.getByRole("checkbox", { name: "Отметить launch.wav" }).check();
+
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+  await expect(page.getByText("Выбрано: 1")).toBeVisible();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+
+  // The row body still assigns, which is what the checkbox must not disturb.
+  await page.getByRole("button", { name: "Выбрать launch.wav" }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeHidden();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 launch.wav"
+  );
+});
+
+test("deletes several selected media from the picker without closing it", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByTestId("audio-file-input").setInputFiles([audioFile, secondAudioFile, longAudioFile]);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+
+  await page.getByRole("checkbox", { name: "Отметить launch.wav" }).check();
+  await page.getByRole("checkbox", { name: "Отметить alarm.mp3" }).check();
+  await page.getByRole("button", { name: "Удалить выбранное" }).click();
+  await expect(page.getByText("Удалить 2 записи из медиатеки")).toBeVisible();
+  await page.getByRole("button", { name: "Удалить", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "Выбрать launch.wav" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Выбрать alarm.mp3" })).toHaveCount(0);
+  await expect(page.getByRole("table", { name: "Выбор медиа" })).toBeVisible();
+  await expect(page.getByText(/Выбрано:/)).toHaveCount(0);
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+});
+
 test("resizes cell settings panel and exposes full media file names as titles", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "desktop hover and panel width are desktop-specific");
   await installAudioMock(page);
