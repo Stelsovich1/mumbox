@@ -163,7 +163,56 @@ not see AudioBuffer PCM, and the latter needs cross-origin isolation that GitHub
 
 ### Project file format (`.mumbox`)
 
-`src/features/file-config/index.ts` implements a **hand-rolled ZIP writer and reader** (stored entries only, no deflate, own CRC32) — there is deliberately no zip dependency. A project is `project.json` (manifest `{kind: "mumbox-project", version: 2, state, mediaBlobs}`) plus `media/<mediaId>` binaries. Import regenerates all media ids (`writeImportedProjectMedia`) and replaces the current layout and library. iOS Safari matches only MIME types for file inputs, hence the separate `PROJECT_FILE_ACCEPT_TYPES_MOBILE`.
+`src/features/file-config/index.ts` implements a **hand-rolled ZIP writer and reader** (stored entries only, no deflate, own CRC32) — there is deliberately no zip dependency. A project is `project.json` (manifest `{kind: "mumbox-project", version: 2, meta?, state, mediaBlobs}`) plus `media/<mediaId>` binaries. Import regenerates all media ids (`writeImportedProjectMedia`) and replaces the current layout and library. iOS Safari matches only MIME types for file inputs, hence the separate `PROJECT_FILE_ACCEPT_TYPES_MOBILE`.
+
+**`version` stays 2 and must not be bumped.** `isProjectFile` compares it exactly, and the app is a
+PWA with `registerType: "prompt"`, so a user can stay on an old build for weeks — a bump makes that
+build refuse files the current one writes. New manifest fields go in as optional, which is what
+`meta` (`{name?, description?, savedAt?}`) is. `normalizeProjectMeta` tolerates a missing or
+malformed `meta` rather than failing the import.
+
+Project name and description live **inside the file**, not only in the projects list. That is what
+lets a re-picked file restore its own identity on Safari and iOS, where a file handle cannot be
+stored at all.
+
+### Projects list and project identity
+
+`src/features/project-library` is a list of **bookmarks**, never a store: a row holds metadata plus,
+where the browser can keep one, a `FileSystemFileHandle`. Project audio is never duplicated into
+browser storage — that was the whole reason not to keep project snapshots.
+
+- The list lives in its **own** IndexedDB database, `mumbox-projects`/`projects`. idb-keyval's
+  `clear()` in `clearStoredAppData` only reaches the default store, so «Стереть все данные» clears
+  the list through an explicit second call. `storage-contract.spec.ts` pins both.
+- **A path cannot be shown.** No browser exposes one, File System Access included. Size, date, panel
+  count and media count are what distinguish two same-named files.
+- Row status is four-valued (`projectRowState.ts`): `ready`, `needsPermission` (the grant lapsed —
+  the row stays usable and is *not* an error), `missing` (delete or re-link only) and `noHandle`
+  (Safari/iOS/Firefox — its own section, no warning icon). `classifyFileError` must keep
+  `NotFoundError` apart from `NotAllowedError`; conflating them marks a healthy project broken
+  forever.
+- Deleting a file from disk is Chromium 110+ only, detected per handle via `typeof handle.remove`.
+  `getDeleteConfirmText` therefore has one wording per capability, and a unit test asserts the
+  list-only text never claims a disk deletion. `readwrite` is requested lazily, at the click.
+- `ProjectSession` (`src/app/model/projectSession.ts`) is project identity: name, description, file
+  name, saved and dirty. It is deliberately **not** in `SerializableAppState` — the `.mumbox`
+  payload and `mumbox:state:v1` stay byte-identical for an untouched project — and persists in the
+  sidecar key `mumbox:project-session:v1`. Dirty tracking wraps the reducer
+  (`withDirtyTracking`) instead of touching any `case`; volume, mute, `stopOthers` and mono all
+  count as edits because they are serialized into the file.
+- Import deletes the outgoing blobs **before** writing the incoming ones, so the storage peak is
+  `max(old, new)` rather than their sum. `readProjectFile` has already validated the whole zip by
+  then, so a corrupt file destroys nothing.
+
+### Merging projects
+
+`src/features/project-merge` appends one project's panels to another. Two rules carry the feature:
+audio is deduplicated by SHA-256 of the bytes (`contentHash`, an optional `MediaAsset` field, with
+`isDuplicateMediaFile`'s name+size rule as the fallback for projects saved before it existed), and
+**every incoming panel id is regenerated** — `sanitizeImportedState` keeps incoming ids, and a
+collision would silently overwrite a panel's cells. Names are resolved with the same
+`makeUniquePanelName` panel copy uses, against the accumulating list. Global settings always come
+from the current project.
 
 ## Conventions that bite
 
@@ -173,4 +222,20 @@ not see AudioBuffer PCM, and the latter needs cross-origin isolation that GitHub
 - Vite `base` is `/mumbox/` for GitHub Pages; PWA `registerType: "prompt"`, so the update banner is wired through `useRegisterSW` in `AppShell`.
 - The diagnostics overlay is the one deliberate exception to the Russian-UI rule about accessible names: it carries Russian text but no `role` and no `aria-label`, so it cannot collide with the suite's `getByRole` queries. Select it by `data-testid`.
 - `__debt/` holds design documents for features that are not implemented yet (currently MP3 export from the audio editor). Read the relevant file before starting such a feature.
+- Dragging a media row from the cell picker onto a grid cell uses the custom MIME
+  `application/x-mumbox-media` (`mediaDragTransfer.ts`), never `text/plain` — the cell drop handler
+  reads `text/plain` as a source cell id. `dragover` decides "is this a media drag?" from the
+  module-level registry in `mediaDragSession.ts`, because some browsers mask `dataTransfer.types`
+  mid-drag and without a readable type nothing calls `preventDefault` and no `drop` ever fires.
+- The picker stays open across drops **because the drop does not move `selectedCellId`**. The effect
+  at `CellSettingsDrawer.tsx` closes the picker when the *selected* cell gains media, so dropping on
+  another cell cannot close it and dropping on the selected cell opens that cell's settings. Do not
+  "fix" this by adding state.
+- On a coarse pointer the picker row is not `draggable`; the drag starts from a dedicated handle
+  carrying `touch-action: none`. On the row it would kill both the vertical list scroll and the
+  horizontal table scroll. `global.css` writes that rule at the same specificity as
+  `[data-noselect] button:not([draggable="true"])` — otherwise that rule wins and the touch drag
+  breaks silently, on real hardware only.
+- New cells assigned in one gesture go through `cell/assignMany`, not a loop of `cell/assign`: one
+  action, one validated state change, no half-applied layout.
 - Commit messages follow Conventional Commits with a Russian subject: `feat(panel): добавить копирование панелей`.
