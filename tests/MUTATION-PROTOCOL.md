@@ -18,7 +18,25 @@ In scope (logic that is unit- or probe-testable):
 | `src/shared/lib/mediaCacheRegistry.ts` | all |
 | `src/shared/lib/diagnostics.ts` | `recordDecode`, `recordTimeToFirstSound`, `getBudgetOverrideFromQuery` |
 | `src/features/playback/model/useAudioEngine.ts` | `getEffectiveVolume`, `getHtmlAudioVolume`, `getClampedPlaybackRange`, `getTrimmedDurationMs`, `getEnvelopeSignature`, `arePlayingCellsEqual`, `setRouteVolume`, `stopRoute`, `startBufferRoute`, the `playCell` token guards, the rAF `tick`, the warm-up and panel-eviction effects |
-| `src/app/model/appState.ts` | `getPanelCellIds`, `normalizePanelCellIds`, `remapLegacyCells`, the `media/deleteMany` case, `remapImportedState` |
+| `src/app/model/appState.ts` | the `media/deleteMany` case, the `cell/assignMany` case, `remapImportedState`, `writeMergedProjectMedia` |
+| `src/entities/panel/model/panelCells.ts` | `getPanelCellIds`, `normalizePanelCellIds`, `remapLegacyCells`, `ensurePanelCells` |
+| `src/entities/panel/model/panelName.ts` | all |
+| `src/entities/media/model/normalizeMedia.ts` | all |
+| `src/entities/media/model/mediaSort.ts` | all |
+| `src/entities/media/model/mediaDeletion.ts` | all |
+| `src/entities/cell/model/cellUsage.ts` | all |
+| `src/shared/lib/rowSelection.ts` | all |
+| `src/shared/lib/tableSort.ts` | all |
+| `src/shared/lib/formatDate.ts` | all |
+| `src/shared/lib/pluralizeRu.ts` | all |
+| `src/shared/lib/mediaDistribution.ts` | all |
+| `src/shared/lib/mediaDragTransfer.ts` | all |
+| `src/shared/lib/contentHash.ts` | `toHex` |
+| `src/app/model/projectSession.ts` | all |
+| `src/features/file-config/model/projectMeta.ts` | all |
+| `src/features/project-library/model/projectRowState.ts` | all |
+| `src/features/project-merge/model/mediaDedup.ts` | all |
+| `src/features/project-merge/model/mergeProjects.ts` | all |
 
 Out of scope: every `.tsx`, the hand-rolled ZIP writer in `src/features/file-config`, anything
 reachable only through a Russian UI string, and the whole `tests/perf` tier (too slow and too noisy
