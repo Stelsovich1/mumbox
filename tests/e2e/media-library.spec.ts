@@ -246,8 +246,11 @@ const DATED_MEDIA: SeedMedia[] = [
 test("shows the date a record was added and a dash when the save predates it", async ({ page }) => {
   await openLibrary(page, buildState(DATED_MEDIA, [[]]));
 
-  await expect(page.getByText("05.01.2024 09:07")).toBeVisible();
-  await expect(page.getByText("02.03.2023 22:45")).toBeVisible();
+  // Date over time on two lines: one line forces a column wider than its own header.
+  await expect(page.getByText("05.01.2024", { exact: true })).toBeVisible();
+  await expect(page.getByText("09:07", { exact: true })).toBeVisible();
+  await expect(page.getByText("02.03.2023", { exact: true })).toBeVisible();
+  await expect(page.getByText("22:45", { exact: true })).toBeVisible();
   await expect(page.getByRole("table", { name: "Медиатека" }).getByText("—")).toHaveCount(1);
 });
 

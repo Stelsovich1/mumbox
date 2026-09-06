@@ -31,12 +31,13 @@ import {
   SELECTED_ROW_HOVER_BACKGROUND
 } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
-import { formatCreatedAt } from "../../../shared/lib/formatDate";
+
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
 import { cycleSortState, SortState, sortRows } from "../../../shared/lib/tableSort";
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
+import { CreatedAtCell } from "../../../shared/ui/CreatedAtCell";
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
@@ -52,9 +53,12 @@ type MediaLibraryDialogProps = {
 // The date track is a fixed width on purpose: the header and every row are separate grids, so a
 // content-derived track resolves differently for the header than for "05.01.2024 09:07" and
 // the columns stop lining up. The colour track stays wide enough for its inline swatch popover.
+// Same rule as the picker: each sortable track fits its own label plus the sort icon (label + 4px
+// gap + 16px icon + 12px padding at 13px JetBrains Mono), and the two text columns grow to a cap.
+// The colour track stays wide enough for the inline swatch popover it hosts.
 const MEDIA_LIBRARY_COLUMNS =
-  "44px minmax(200px, 1.25fr) minmax(160px, 1fr) 72px 124px minmax(200px, max-content) 52px";
-const MEDIA_LIBRARY_MIN_WIDTH = 860;
+  "44px minmax(160px, 360px) minmax(118px, 260px) 82px 118px minmax(200px, max-content) 52px";
+const MEDIA_LIBRARY_MIN_WIDTH = 774;
 
 export function MediaLibraryDialog({
   open,
@@ -360,9 +364,7 @@ export function MediaLibraryDialog({
                   )}
                 </Box>
                 <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>{formatDuration(item.durationMs)}</Typography>
-                <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
-                  {formatCreatedAt(item.createdAt)}
-                </Typography>
+                <CreatedAtCell value={item.createdAt} />
                 <Box sx={{ px: 1, minWidth: 0 }}>
                   <IconButton
                     aria-label={`Изменить цвет ${item.fileName}`}

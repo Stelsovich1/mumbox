@@ -95,7 +95,8 @@ test("shows seeded rows and their metadata instead of a path", async ({ page }) 
   // No path column exists, because no browser exposes one.
   await expect(page.getByRole("columnheader", { name: "Путь" })).toHaveCount(0);
   await expect(page.getByRole("columnheader", { name: "Размер" })).toBeVisible();
-  await expect(page.getByText("05.01.2024 09:07")).toBeVisible();
+  await expect(page.getByText("05.01.2024", { exact: true })).toBeVisible();
+  await expect(page.getByText("09:07", { exact: true })).toBeVisible();
 });
 
 test("groups rows the browser cannot link and offers no warning for them", async ({ page }) => {
