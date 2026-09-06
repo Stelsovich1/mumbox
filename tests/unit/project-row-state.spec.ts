@@ -93,6 +93,12 @@ test.describe("getProjectRowStatus", () => {
     expect(getProjectRowStatus(makeRow(), probe({ permission: "denied" }))).toBe("needsPermission");
   });
 
+  test("a linked row that has not been probed yet reads as ready", () => {
+    // The dialog paints before the probes resolve, so an unprobed row must not flash as broken.
+    expect(getProjectRowStatus(makeRow(), undefined)).toBe("ready");
+    expect(isRowDeleteOnly(getProjectRowStatus(makeRow(), undefined))).toBe(false);
+  });
+
   test("a row without a handle is noHandle, never missing", () => {
     const status = getProjectRowStatus(makeRow({ handle: undefined }), undefined);
 

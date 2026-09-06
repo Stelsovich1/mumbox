@@ -1,6 +1,7 @@
 import { clear, del, get, set } from "idb-keyval";
 import { useEffect, useMemo, useReducer } from "react";
 
+import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model/assignCells";
 import { makeCell } from "../../entities/cell/model/makeCell";
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
 import { MediaAsset } from "../../entities/media/model/types";
@@ -140,15 +141,6 @@ export type AppAction =
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
-}
-
-/** Shared by `cell/assign` and `cell/assignMany` so the two cannot drift. */
-function assignCellMedia(cell: GridCell, mediaId: string, playbackMode?: PlaybackMode): GridCell {
-  return {
-    ...cell,
-    mediaId,
-    playbackMode: playbackMode ?? cell.playbackMode
-  };
 }
 
 function makePanel(name: string): Panel {
@@ -404,18 +396,11 @@ function reducer(state: AppState, action: AppAction): AppState {
         return state;
       }
 
-      const panelCellIds = new Set(panel.cellIds);
-      const cells = { ...state.cellsByPanel[action.panelId] };
-      let changed = false;
-
-      for (const assignment of action.assignments) {
-        if (!panelCellIds.has(assignment.cellId)) {
-          continue;
-        }
-        const cell = cells[assignment.cellId] ?? makeCell(assignment.cellId);
-        cells[assignment.cellId] = assignCellMedia(cell, assignment.mediaId, assignment.playbackMode);
-        changed = true;
-      }
+      const { cells, changed } = applyCellAssignments(
+        state.cellsByPanel[action.panelId] ?? {},
+        panel.cellIds,
+        action.assignments
+      );
 
       // Returning the same object identity skips the localStorage write and leaves the warm-up
       // signature untouched.
