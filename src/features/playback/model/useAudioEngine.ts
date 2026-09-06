@@ -64,6 +64,17 @@ type WarmupTarget = {
 const RELEASE_SECONDS = 0.018;
 const PROGRESS_EPSILON = 0.001;
 /**
+ * How often a progress change may reach React.
+ *
+ * The rAF loop keeps running at frame rate — it also syncs volume and restarts media-element
+ * loops, and neither may be throttled — but pushing progress into state every frame re-rendered
+ * the whole shell 60 times a second: `PROGRESS_EPSILON` only suppresses the push for cues longer
+ * than about 17 s, and a soundboard is mostly short ones. A busy main thread is felt as trigger
+ * latency on the NEXT tap, so the progress marker settles for 20 Hz. A change in WHICH cells are
+ * playing still pushes immediately — that one is a direct response to a press.
+ */
+const PROGRESS_PUSH_INTERVAL_MS = 50;
+/**
  * How long a panel has to stay on screen before its warm-up starts.
  *
  * Short enough to be invisible when a panel is chosen deliberately, long enough that flicking
@@ -259,6 +270,7 @@ export function useAudioEngine(
    */
   const purgeGenerationRef = useRef(0);
   const frameRef = useRef<number | null>(null);
+  const lastProgressPushRef = useRef(0);
   const playingCellsRef = useRef<PlayingCell[]>([]);
   const [playingCells, setPlayingCells] = useState<PlayingCell[]>([]);
   /**
@@ -591,7 +603,17 @@ export function useAudioEngine(
         ];
       });
 
-      syncPlayingCells(nextPlayingCells);
+      const previous = playingCellsRef.current;
+      const membershipChanged =
+        previous.length !== nextPlayingCells.length ||
+        nextPlayingCells.some((cell, index) => previous[index]?.cellKey !== cell.cellKey);
+      const now = performance.now();
+      if (membershipChanged || now - lastProgressPushRef.current >= PROGRESS_PUSH_INTERVAL_MS) {
+        lastProgressPushRef.current = now;
+        // A skipped push leaves a stale `progress` in the ref, which costs nothing: the next tick
+        // maps over the ref for identity only and recomputes progress from the route either way.
+        syncPlayingCells(nextPlayingCells);
+      }
       endedCellKeys.forEach((cellKey) => {
         stopCellKey(cellKey);
       });
@@ -610,11 +632,14 @@ export function useAudioEngine(
    * panel filling the cache — would otherwise drop a buffer that is still playing and force a
    * re-decode on the next trigger.
    */
+  // Keyed on which cells play, not on `playingCells` itself: that array is rebuilt on every
+  // progress push, and pinning the same keys again 20 times a second is pure waste.
+  const playingCellKeySignature = playingCells.map((cell) => cell.cellKey).join("|");
   useEffect(() => {
     playbackBufferCache.setPinned(
       Array.from(routeByCellRef.current.values()).map((route) => route.cacheKey)
     );
-  }, [playingCells]);
+  }, [playingCellKeySignature]);
 
   const addPlayingCell = useCallback(
     (cell: PlayingCell) => {
@@ -797,11 +822,33 @@ export function useAudioEngine(
       }
       const token = bumpCellToken(cellKey);
 
+      // Fast path, and the reason everything above it is synchronous: an `async` body runs to its
+      // first `await` inside the caller's task, so a warm cell on a running context reaches
+      // `source.start()` in the very task that handled the press — no microtask hop, and still
+      // inside the user gesture, which is what iOS wants. The slow path below is unchanged and
+      // covers a suspended context, a cold cache and the media-element browsers.
+      const warmContext = contextRef.current;
+      const warmCacheKey = getCacheKey(cell, cell.mediaId);
+      if (
+        warmContext &&
+        getAudioContextState(warmContext) === "running" &&
+        typeof warmContext.createBufferSource === "function"
+      ) {
+        const warmEntry = playbackBufferCache.get(warmCacheKey);
+        if (
+          warmEntry &&
+          startBufferRoute(cell, mediaAsset, warmEntry, token, cellKey, warmCacheKey)
+        ) {
+          recordTimeToFirstSound(performance.now() - triggeredAt);
+          return;
+        }
+      }
+
       const context = await getPlayableContext();
 
       const canUseBufferSource = typeof context.createBufferSource === "function";
       if (canUseBufferSource) {
-        const cacheKey = getCacheKey(cell, cell.mediaId);
+        const cacheKey = warmCacheKey;
         const entry = await loadPlaybackEntry(cell, cell.mediaId, cacheKey);
         if (!entry || playTokenByCellRef.current.get(cellKey) !== token) {
           return;
