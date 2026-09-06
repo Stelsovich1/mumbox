@@ -28,20 +28,25 @@ export function formatCreatedAt(value: string | undefined | null) {
 }
 
 /**
- * `dd.MM.yy`, for the cell settings panel: a resizable side column cannot afford the 16 characters
- * the full format needs, and a date without a time is enough to tell two imports apart there.
+ * The same value split across two lines, which is how every table renders it: `dd.MM.yyyy HH:mm` on
+ * one line forces a column wider than its own header, and a taller row is the cheaper trade.
+ *
+ * Returns `null` when there is nothing to show, so the caller renders the dash itself.
  */
-export function formatCreatedAtShort(value: string | undefined | null) {
+export function formatCreatedAtParts(value: string | undefined | null) {
   if (!value) {
-    return MISSING_DATE_LABEL;
+    return null;
   }
 
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return MISSING_DATE_LABEL;
+    return null;
   }
 
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${pad(date.getFullYear() % 100)}`;
+  return {
+    date: `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${String(date.getFullYear()).padStart(4, "0")}`,
+    time: `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  };
 }
 
 export { MISSING_DATE_LABEL };

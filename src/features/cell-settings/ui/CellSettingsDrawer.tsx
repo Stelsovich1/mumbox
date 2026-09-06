@@ -46,7 +46,7 @@ import {
   SELECTED_ROW_HOVER_BACKGROUND
 } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
-import { formatCreatedAtShort } from "../../../shared/lib/formatDate";
+
 import {
   beginNativeMediaDrag,
   beginPointerMediaDrag,
@@ -63,6 +63,7 @@ import { cycleSortState, SortState, sortRows } from "../../../shared/lib/tableSo
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
+import { CreatedAtCell } from "../../../shared/ui/CreatedAtCell";
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
@@ -89,9 +90,16 @@ const MEDIA_PICKER_ROW_HEIGHT = 52;
 //
 // Eight columns still cannot fit a 460px panel (412px of table viewport), so a modest horizontal
 // scroll remains by design; the panel is resizable for when the table is the focus.
+// Every sortable track is at least as wide as its own label plus the sort icon, measured at 13px
+// JetBrains Mono: label + 4px gap + 16px icon + 12px padding. Nothing is ever clipped, and the two
+// text columns grow with the panel up to a cap rather than swallowing it.
+//   Файл 36+32 · Псевдоним 80+32 · Время 44+32 · Добавлено 80+32 · Цвет 36+32
+// Plus 6px of slack each: at exactly the computed width sub-pixel rounding still clipped the last
+// glyph. The table needs 616px against 412px of visible panel, so it scrolls horizontally by
+// design; the panel is resizable for when the table is the focus.
 const MEDIA_PICKER_COLUMNS =
-  "32px 36px minmax(110px, 2fr) minmax(76px, 1fr) 64px 92px 52px 36px";
-const MEDIA_PICKER_MIN_WIDTH = 498;
+  "32px 36px minmax(120px, 320px) minmax(118px, 200px) 82px 118px 74px 36px";
+const MEDIA_PICKER_MIN_WIDTH = 616;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -656,7 +664,7 @@ export function CellSettingsDrawer({
                 </Box>
                 {(
                   [
-                    { key: "fileName", title: "Название файла" },
+                    { key: "fileName", title: "Файл" },
                     { key: "alias", title: "Псевдоним" },
                     { key: "durationMs", title: "Время" },
                     { key: "createdAt", title: "Добавлено" },
@@ -843,9 +851,7 @@ export function CellSettingsDrawer({
                       {item.alias || "..."}
                     </Typography>
                     <Typography sx={PICKER_VALUE_CELL}>{formatDuration(item.durationMs)}</Typography>
-                    <Typography sx={PICKER_VALUE_CELL}>
-                      {formatCreatedAtShort(item.createdAt)}
-                    </Typography>
+                    <CreatedAtCell value={item.createdAt} />
                     <Box sx={{ display: "grid", placeItems: "center", minWidth: 0 }}>
                       <Box
                         aria-label={`Цвет ${item.fileName}`}

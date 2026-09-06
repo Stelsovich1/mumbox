@@ -21,10 +21,11 @@ import {
   SELECTED_ROW_BACKGROUND,
   SELECTED_ROW_HOVER_BACKGROUND
 } from "../../../shared/config/colorPalette";
-import { formatCreatedAt } from "../../../shared/lib/formatDate";
+
 import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
+import { CreatedAtCell } from "../../../shared/ui/CreatedAtCell";
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
 import {
   getDeleteCapability,
@@ -48,9 +49,11 @@ type ProjectLibraryDialogProps = {
   onMerge: (rows: ProjectLibraryRow[]) => void;
 };
 
+// Every track is at least as wide as its own header plus the sort affordance, so no label is ever
+// clipped; the flexible ones may grow with the dialog.
 const PROJECT_COLUMNS =
-  "44px minmax(160px, 1.2fr) minmax(160px, 1.2fr) minmax(180px, 1.4fr) 96px 124px 72px 72px 52px";
-const PROJECT_MIN_WIDTH = 1020;
+  "44px minmax(160px, 1.2fr) minmax(160px, 1.2fr) minmax(200px, 1.6fr) 96px 108px 76px 72px 52px";
+const PROJECT_MIN_WIDTH = 960;
 
 function formatSize(sizeBytes: number | null) {
   if (sizeBytes === null) {
@@ -134,6 +137,7 @@ export function ProjectLibraryDialog({
           borderBottom: 1,
           borderColor: "rgba(169, 183, 207, 0.12)",
           cursor: deleteOnly ? "default" : "pointer",
+          py: 0.5,
           opacity: deleteOnly ? 0.5 : 1,
           backgroundColor: selected ? SELECTED_ROW_BACKGROUND : "transparent",
           transition: "background-color 160ms ease",
@@ -176,12 +180,24 @@ export function ProjectLibraryDialog({
         </Typography>
         <Typography
           title={row.description}
-          sx={{ minWidth: 0, px: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          sx={{
+            minWidth: 0,
+            px: 1,
+            py: 0.5,
+            // Prose, not an identifier: it wraps and the row grows, capped so one verbose project
+            // cannot push every other row off the screen.
+            overflow: "hidden",
+            display: "-webkit-box",
+            WebkitLineClamp: 3,
+            WebkitBoxOrient: "vertical",
+            lineHeight: 1.25,
+            wordBreak: "break-word"
+          }}
         >
           {row.description || "—"}
         </Typography>
         <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>{formatSize(row.sizeBytes)}</Typography>
-        <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>{formatCreatedAt(row.savedAt)}</Typography>
+        <CreatedAtCell value={row.savedAt} />
         <Typography sx={{ px: 1 }}>{formatCount(row.panelCount)}</Typography>
         <Typography sx={{ px: 1 }}>{formatCount(row.mediaCount)}</Typography>
         <Box sx={{ display: "grid", placeItems: "center" }}>
@@ -234,14 +250,30 @@ export function ProjectLibraryDialog({
           sx: {
             width: { xs: "calc(100vw - 24px)", sm: "calc(100vw - 64px)" },
             maxWidth: { xs: "calc(100vw - 24px)", sm: 1180 },
-            maxHeight: { xs: "calc(100dvh - 24px)", sm: "calc(100dvh - 64px)" },
+            // `vh` first, `dvh` where it exists: on mobile the two differ by the browser chrome.
+            minHeight: "50vh",
+            maxHeight: { xs: "calc(100vh - 24px)", sm: "calc(100vh - 64px)" },
+            "@supports (height: 1dvh)": {
+              minHeight: "50dvh",
+              maxHeight: { xs: "calc(100dvh - 24px)", sm: "calc(100dvh - 64px)" }
+            },
             m: { xs: 1.5, sm: 4 }
           }
         }
       }}
     >
       <DialogTitle>Проекты</DialogTitle>
-      <DialogContent sx={{ overflowX: "auto", p: { xs: 1, sm: 3 } }}>
+      <DialogContent
+        sx={{
+          p: { xs: 1, sm: 3 },
+          // The content column owns the height and the table inside it scrolls, so the dialog keeps
+          // its size instead of collapsing around an empty list.
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          overflow: "hidden"
+        }}
+      >
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.5, alignItems: "center", mb: 2 }}>
           <Button variant="outlined" size="small" onClick={onAddProjects}>
             Добавить проекты в список
@@ -260,7 +292,12 @@ export function ProjectLibraryDialog({
           </Box>
         ) : null}
 
-        <Box role="table" aria-label="Проекты" sx={{ minWidth: PROJECT_MIN_WIDTH }}>
+        <Box
+          role="table"
+          aria-label="Проекты"
+          sx={{ flex: 1, minHeight: 0, overflow: "auto" }}
+        >
+          <Box sx={{ width: `max(100%, ${String(PROJECT_MIN_WIDTH)}px)` }}>
           <Box
             role="row"
             sx={{
@@ -270,7 +307,10 @@ export function ProjectLibraryDialog({
               minHeight: 42,
               borderBottom: 1,
               borderColor: "divider",
-              backgroundColor: "rgba(5, 7, 13, 0.92)"
+              backgroundColor: "rgba(5, 7, 13, 0.92)",
+              position: "sticky",
+              top: 0,
+              zIndex: 1
             }}
           >
             <Box role="columnheader" sx={{ display: "grid", placeItems: "center" }}>
@@ -338,6 +378,7 @@ export function ProjectLibraryDialog({
               ))}
             </Box>
           ) : null}
+          </Box>
         </Box>
       </DialogContent>
       <DialogActions sx={{ flexWrap: "wrap" }}>

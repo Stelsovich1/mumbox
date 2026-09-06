@@ -35,11 +35,10 @@ export function SortableColumnHeader<TKey extends string>({
         }}
         sx={{
           display: "flex",
+          // The sort icon sits to the right of the label, on the same line and vertically centred.
+          // Columns carry a minimum width that fits label plus icon, so neither has to give way.
           alignItems: "center",
-          // Wraps the sort icon onto a second line rather than stealing width from the label: in a
-          // 52px column an inline icon leaves the text two characters.
-          flexWrap: "wrap",
-          gap: 0.25,
+          gap: 0.5,
           width: "100%",
           minWidth: 0,
           px: 0.75,
@@ -66,10 +65,9 @@ export function SortableColumnHeader<TKey extends string>({
           sx={{
             minWidth: 0,
             overflow: "hidden",
-            lineHeight: 1.15,
-            // `break-word`, not `anywhere`: a word breaks only when it genuinely does not fit, so a
-            // column wide enough keeps its label on one line instead of being chopped everywhere.
-            overflowWrap: "break-word"
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            lineHeight: 1.15
           }}
         >
           {title}

@@ -1672,8 +1672,8 @@ test("sorts the virtualized media picker and slices the sorted order", async ({ 
 
   const picker = page.getByRole("table", { name: "Выбор медиа" });
   await expect(picker).toBeVisible();
-  await page.getByRole("button", { name: "Название файла" }).click();
-  await expect(picker.getByRole("columnheader", { name: "Название файла" })).toHaveAttribute(
+  await page.getByRole("button", { name: "Файл" }).click();
+  await expect(picker.getByRole("columnheader", { name: "Файл" })).toHaveAttribute(
     "aria-sort",
     "ascending"
   );
@@ -1887,8 +1887,24 @@ test("keeps the media picker to one scroller with aligned, non-overlapping colum
             : false,
         overlaps,
         headerClipped: Array.from(header.querySelectorAll("button > span")).some(
-          (span) => span.scrollWidth > span.clientWidth
-        )
+          (span) => span.scrollWidth > span.clientWidth + 0.5
+        ),
+        // The sort icon belongs beside the label on one line, vertically centred — not wrapped
+        // underneath it, and not stealing the label's width.
+        headerButtons: Array.from(header.querySelectorAll<HTMLElement>("button")).map((button) => {
+          const buttonBox = button.getBoundingClientRect();
+          const icon = button.querySelector("svg");
+          const iconBox = icon?.getBoundingClientRect();
+
+          return {
+            height: Math.round(buttonBox.height),
+            iconOffset: iconBox
+              ? Math.abs(
+                  iconBox.top + iconBox.height / 2 - (buttonBox.top + buttonBox.height / 2)
+                )
+              : null
+          };
+        })
       };
     });
 
@@ -1898,6 +1914,11 @@ test("keeps the media picker to one scroller with aligned, non-overlapping colum
   expect(layout.overlaps).toBe(false);
   // A one-word header has no break opportunity, so a track too narrow for it clips the label away.
   expect(layout.headerClipped).toBe(false);
+  expect(layout.headerButtons.length).toBeGreaterThan(0);
+  for (const button of layout.headerButtons) {
+    expect(button.height).toBeLessThanOrEqual(40);
+    expect(button.iconOffset ?? 99).toBeLessThanOrEqual(1);
+  }
 });
 
 test("assigns media by dragging the picker handle with a mouse", async ({ page }, testInfo) => {
