@@ -1529,6 +1529,55 @@ test("deletes several selected media from the picker without closing it", async 
   );
 });
 
+test("sorts the virtualized media picker and slices the sorted order", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  // Above 80 rows the picker renders a virtual window, so the slice must read the sorted list.
+  // Imported in reverse so insertion order and sorted order genuinely differ: with the window
+  // slicing the unsorted array this test sees pick-0 at the bottom instead of pick-119.
+  const manyFiles = Array.from({ length: 120 }, (_, index) => ({
+    name: `pick-${String(119 - index)}.wav`,
+    mimeType: "audio/wav",
+    buffer: Buffer.from("RIFF....WAVEfmt ")
+  }));
+  await page.getByTestId("audio-file-input").setInputFiles(manyFiles);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+
+  const picker = page.getByRole("table", { name: "Выбор медиа" });
+  await expect(picker).toBeVisible();
+  const rowGroup = picker.getByRole("rowgroup");
+
+  await page.getByRole("button", { name: "Название файла" }).click();
+  await expect(picker.getByRole("columnheader", { name: "Название файла" })).toHaveAttribute(
+    "aria-sort",
+    "ascending"
+  );
+  expect(await rowGroup.evaluate((element) => element.scrollTop)).toBe(0);
+  await expect(page.getByRole("button", { name: "Выбрать pick-0.wav" })).toBeVisible();
+
+  // Natural ordering puts pick-119 last; it only renders if the window slices the sorted array.
+  await rowGroup.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(page.getByRole("button", { name: "Выбрать pick-119.wav" })).toBeVisible();
+
+  const templates = await picker.evaluate((table) => {
+    const header = table.querySelector('[role="row"]');
+    const row = table.querySelector('[role="button"]');
+
+    return [
+      header ? getComputedStyle(header).gridTemplateColumns : "",
+      row ? getComputedStyle(row).gridTemplateColumns : ""
+    ];
+  });
+  expect(templates[0]).toBe(templates[1]);
+  expect(templates[0]?.split(" ")).toHaveLength(7);
+});
+
 test("resizes cell settings panel and exposes full media file names as titles", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "desktop hover and panel width are desktop-specific");
   await installAudioMock(page);
