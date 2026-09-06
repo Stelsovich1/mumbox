@@ -3,6 +3,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import LibraryMusicIcon from "@mui/icons-material/LibraryMusic";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import MergeTypeIcon from "@mui/icons-material/MergeType";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import SystemUpdateAltIcon from "@mui/icons-material/SystemUpdateAlt";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -42,7 +43,8 @@ import {
   MediaStorageProgress,
   serializeState,
   useAppStore,
-  writeImportedProjectMedia
+  writeImportedProjectMedia,
+  writeMergedProjectMedia
 } from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
@@ -61,6 +63,7 @@ import { ProjectLibraryRow } from "../../../entities/project/model/types";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
+import { mergeProjectState, prepareMerge } from "../../../features/project-merge";
 import {
   classifyFileError,
   clearProjectsIndex,
@@ -233,6 +236,8 @@ export function AppShell() {
   const [projectLibraryOpen, setProjectLibraryOpen] = useState(false);
   const [activationRow, setActivationRow] = useState<ProjectLibraryRow | null>(null);
   const [relinkRowId, setRelinkRowId] = useState<string | null>(null);
+  /** Set when the next picked project file must be merged instead of replacing the layout. */
+  const [mergeRowPending, setMergeRowPending] = useState(false);
   /** Set when the user chose «Сохранить и открыть»: the row to open once the save finishes. */
   const [pendingActivationRow, setPendingActivationRow] = useState<ProjectLibraryRow | null>(null);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
@@ -667,8 +672,14 @@ export function AppShell() {
     const file = event.target.files?.[0];
     event.target.value = "";
     const rowId = relinkRowId;
+    const merging = mergeRowPending;
     setRelinkRowId(null);
+    setMergeRowPending(false);
     if (!file) {
+      return;
+    }
+    if (merging) {
+      void mergeProjectFile(file);
       return;
     }
     if (file.size >= LARGE_PROJECT_IMPORT_BYTES) {
@@ -768,6 +779,93 @@ export function AppShell() {
         ? `Удалено проектов: ${String(rows.length)}, файлов с диска: ${String(removedFromDisk)}`
         : `Удалено проектов из списка: ${String(rows.length)}`
     );
+  };
+
+  /** Adds a project's panels to the current one instead of replacing it. */
+  const mergeProjectFile = async (file: File) => {
+    setImportLoading(true);
+    updateOperationProgress({ completed: 0, total: 1, label: "Чтение проекта" });
+
+    try {
+      const project = await readProjectFile(file, updateOperationProgress);
+      const { unsupportedFiles: unsupportedMedia } = filterValidAudioFiles(
+        project.mediaBlobs.map(
+          (blob) => new File([blob.blob], blob.fileName, { type: blob.mimeType })
+        ),
+        []
+      );
+      if (unsupportedMedia.length > 0) {
+        setSaveMessage(
+          `Проект содержит неподдерживаемый формат: ${unsupportedMedia
+            .slice(0, 3)
+            .map((item) => item.name)
+            .join(", ")}`
+        );
+        return;
+      }
+
+      const currentState = serializeState(state);
+      const preparation = await prepareMerge(currentState, project);
+      // Nothing is deleted by a merge, so the storage cost is purely additive — but only for what
+      // survives deduplication.
+      const storage = await hasLikelyStorageForBytes(preparation.survivorBytes);
+      if (!storage.enough) {
+        setSaveMessage("В браузерном хранилище может не хватить места для объединения");
+        return;
+      }
+
+      const { state: remappedIncoming, addedMedia } = await writeMergedProjectMedia(
+        preparation.incoming,
+        project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
+        preparation.mediaIdMap,
+        preparation.keptIncomingIds,
+        updateOperationProgress
+      );
+
+      const merged = mergeProjectState({
+        current: currentState,
+        incoming: remappedIncoming,
+        mediaIdMap: preparation.mediaIdMap,
+        addedMedia,
+        createPanelId: () => `panel-${crypto.randomUUID()}`
+      });
+
+      dispatch({ type: "state/merge", state: merged.state });
+      setSelectedCellId(null);
+      setSaveMessage(
+        preparation.reusedCount > 0
+          ? `Добавлено панелей: ${String(merged.addedPanelIds.length)}, дубликатов аудио пропущено: ${String(preparation.reusedCount)}`
+          : `Добавлено панелей: ${String(merged.addedPanelIds.length)}`
+      );
+    } catch {
+      setSaveMessage("Не удалось объединить проекты");
+    } finally {
+      setImportLoading(false);
+      updateOperationProgress(null);
+    }
+  };
+
+  const mergeProjectRows = async (rows: ProjectLibraryRow[]) => {
+    setProjectLibraryOpen(false);
+    for (const row of rows) {
+      const handle = row.handle;
+      if (!handle) {
+        // Nothing to read from: the user points at the file through the normal input instead.
+        setMergeRowPending(true);
+        projectInputRef.current?.click();
+        return;
+      }
+      const permission = await requestHandlePermission(handle, "read");
+      if (permission === "denied") {
+        setSaveMessage("Нет доступа к файлу проекта");
+        return;
+      }
+      try {
+        await mergeProjectFile(await handle.getFile());
+      } catch {
+        setSaveMessage(`Не удалось открыть проект: ${row.fileName}`);
+      }
+    }
   };
 
   const openProjectFromRow = async (row: ProjectLibraryRow) => {
@@ -1120,6 +1218,16 @@ export function AppShell() {
           </MenuItem>
           <MenuItem
             onClick={() => {
+              setMergeRowPending(true);
+              projectInputRef.current?.click();
+              closeFileMenu();
+            }}
+          >
+            <MergeTypeIcon fontSize="small" />
+            <Typography sx={{ ml: 1 }}>Объединить с проектом</Typography>
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
               audioInputRef.current?.click();
               closeFileMenu();
             }}
@@ -1423,7 +1531,7 @@ export function AppShell() {
           projectInputRef.current?.click();
         }}
         onMerge={(rows) => {
-          setSaveMessage(`Объединение пока недоступно: выбрано ${String(rows.length)}`);
+          void mergeProjectRows(rows);
         }}
       />
       <ProjectActivationDialog

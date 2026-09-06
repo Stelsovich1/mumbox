@@ -31,9 +31,13 @@ export function isPlayableAudio(fileName: string, mimeType: string) {
   return candidates.length === 0 || candidates.some((candidate) => audio.canPlayType(candidate) !== "");
 }
 
+/**
+ * The only dedup rule the importer has ever had: same name, and same size when one is recorded.
+ * Widened from `File` to its structural shape so project merge can use it without fabricating one.
+ */
 export function isDuplicateMediaFile(
-  file: File,
-  media: { fileName: string; size?: number; mimeType: string }[]
+  file: { name: string; size: number; type: string },
+  media: readonly { fileName: string; size?: number; mimeType: string }[]
 ) {
   return media.some((item) => {
     if (item.fileName !== file.name) {
