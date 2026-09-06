@@ -18,6 +18,13 @@ import type { SeededProjectRow } from "../support/seedProjects";
 
 test.use({ timezoneId: "UTC" });
 
+/**
+ * Desktop only. The menu entry that opens this dialog is hidden on a coarse pointer: a phone
+ * browser keeps no file handles, so every row would land in the handle-less section and reopening
+ * would mean picking the file again. `app-shell.spec.ts` pins the absence of the entry there.
+ */
+test.skip(({ isMobile }) => isMobile, "the projects list is not offered on a coarse pointer");
+
 const SHARED_AUDIO = {
   name: "shared.wav",
   mimeType: "audio/wav",

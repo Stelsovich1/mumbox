@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { installBufferAudioMock } from "../support/audioMock";
+import { installBufferAudioMock, readProbe } from "../support/audioMock";
+import type { MockDecodeProbe } from "../support/audioMock";
 import { makeWavBuffer } from "../support/audioFixtures";
 import {
   diagCacheKeys,
@@ -27,6 +28,29 @@ import type { SeedPlan } from "../support/seedProject";
 const SPEC = { seconds: 2, channels: 1, freqHz: 220 } as const;
 /** 2 s mono at 44.1 kHz: 88 200 frames x 1 channel x 4 bytes. */
 const DECODED_BYTES = 2 * 44_100 * 4;
+/**
+ * The widest warm-up pool any device uses: `cores - 2` capped at four on a fine pointer, two on a
+ * coarse one. Runs are serialized, so this is also the ceiling on decodes in flight at any moment
+ * no matter how many panel switches are queued behind them.
+ */
+const MAX_POOL = 4;
+
+/** Peak number of decodes in flight at once, swept from the mock's start/settle timestamps. */
+function peakConcurrentDecodes(decodes: MockDecodeProbe[]): number {
+  const events = decodes.flatMap((decode) => [
+    { at: decode.startedAt, delta: 1 },
+    { at: decode.settledAt ?? Number.POSITIVE_INFINITY, delta: -1 }
+  ]);
+  events.sort((first, second) => first.at - second.at || first.delta - second.delta);
+
+  let inFlight = 0;
+  let peak = 0;
+  for (const event of events) {
+    inFlight += event.delta;
+    peak = Math.max(peak, inFlight);
+  }
+  return peak;
+}
 
 async function setup(page: Page, plan: Partial<SeedPlan> = {}) {
   const seed = await seedProject(page, {
@@ -96,9 +120,9 @@ test("empties the cache on a full reset", async ({ page }) => {
   expect(await diagCacheKeys(page)).toHaveLength(0);
 });
 
-test("keeps every visited panel resident while the library fits", async ({ page }) => {
-  // The behaviour a user actually notices: a warmed pad stays instant. Evicting a panel while
-  // there is still room buys nothing and turns the next trigger into a decode.
+test("keeps only the panel on screen resident", async ({ page }) => {
+  // The bound the crash-on-a-phone needed: resident PCM is one panel's worth, whatever route
+  // through the project the user took to get there.
   await installBufferAudioMock(page);
   await setup(page, { panels: 3, distinctMedia: 3, filledCellsPerPanel: 1 });
   await waitForWarm(page, 1);
@@ -108,50 +132,35 @@ test("keeps every visited panel resident while the library fits", async ({ page 
 
   await page.getByRole("tab", { name: "Panel 2" }).click();
   await waitForWarm(page, 1);
-  await expect.poll(async () => (await diagCacheKeys(page)).length, { timeout: 10_000 }).toBe(2);
-
-  await page.getByRole("tab", { name: "Panel 3" }).click();
-  await waitForWarm(page, 1);
-  await expect.poll(async () => (await diagCacheKeys(page)).length, { timeout: 10_000 }).toBe(3);
-
-  expect(await diagCacheKeys(page)).toContain(panelA);
-  // Only the active panel counts as the active-panel footprint, whatever else is resident.
-  expect(await diagPcmBytesForActivePanel(page)).toBe(DECODED_BYTES);
-  expect(await diagPcmBytes(page)).toBe(3 * DECODED_BYTES);
-});
-
-test("evicts another panel, not the active one, once the budget is tight", async ({ page }) => {
-  // A budget with room for two entries. The third panel must still warm — it is the one the user
-  // is looking at — and the buffer that goes is the one belonging to a panel they left.
-  await installBufferAudioMock(page);
-  await seedProject(page, {
-    panels: 3,
-    gridSize: 6,
-    distinctMedia: 3,
-    spec: SPEC,
-    filledCellsPerPanel: 1
-  });
-  await page.goto("/?pcmBudgetMb=0.75");
-
-  await waitForWarm(page, 1);
-  const panelA = (await diagCacheKeys(page))[0] ?? "";
-
-  await page.getByRole("tab", { name: "Panel 2" }).click();
-  await waitForWarm(page, 1);
-  await expect.poll(async () => (await diagCacheKeys(page)).length, { timeout: 10_000 }).toBe(2);
-
   await page.getByRole("tab", { name: "Panel 3" }).click();
   await waitForWarm(page, 1);
 
   const keys = await diagCacheKeys(page);
-  expect(keys).toHaveLength(2);
-  // Panel A was the least recently used non-active panel.
+  expect(keys).toHaveLength(1);
   expect(keys).not.toContain(panelA);
+  expect(await diagPcmBytes(page)).toBe(DECODED_BYTES);
   expect(await diagPcmBytesForActivePanel(page)).toBe(DECODED_BYTES);
-  expect((await diagCacheStats(page))?.evictions).toBeGreaterThan(0);
 });
 
-test("returning to the previous panel costs no re-decode", async ({ page }) => {
+test("drops the warm state along with the evicted panel", async ({ page }) => {
+  // A cell left as "ready" after its buffer was dropped promises an instant start the engine
+  // cannot deliver, and suppresses the re-warm that would have made it true again.
+  await installBufferAudioMock(page, { decodeDelayMs: 400 });
+  await setup(page, { panels: 2, distinctMedia: 2, filledCellsPerPanel: 1 });
+  await waitForWarm(page, 1);
+
+  await page.getByRole("tab", { name: "Panel 2" }).click();
+  await waitForWarm(page, 1);
+  await page.getByRole("tab", { name: "Panel 1" }).click();
+
+  // Cold again on arrival, then warm once the re-decode lands.
+  await expect(page.locator('[data-warm-state="ready"]')).toHaveCount(0);
+  await waitForWarm(page, 1);
+});
+
+test("returning to the previous panel re-decodes it", async ({ page }) => {
+  // The price of the one-panel bound, pinned on purpose: coming back costs a decode, and in
+  // exchange the footprint stays at one panel instead of two.
   await installBufferAudioMock(page);
   await setup(page, { panels: 2, distinctMedia: 2, filledCellsPerPanel: 1 });
   await waitForWarm(page, 1);
@@ -162,9 +171,37 @@ test("returning to the previous panel costs no re-decode", async ({ page }) => {
 
   await page.getByRole("tab", { name: "Panel 1" }).click();
   await waitForWarm(page, 1);
-  await page.waitForTimeout(500);
-  expect(await diagDecodeCount(page)).toBe(2);
+  await expect.poll(async () => diagDecodeCount(page), { timeout: 10_000 }).toBe(3);
+  expect(await diagPcmBytes(page)).toBe(DECODED_BYTES);
   expect(await diagLastPanelSwitchMs(page)).not.toBeNull();
+});
+
+test("a burst of panel switches settles on one panel and one footprint", async ({ page }) => {
+  // The question the whole design turns on: can flicking through panels break it? Every switch
+  // drops the previous panel, so an undebounced, unserialized warm-up would pile a fresh pool of
+  // decodes on top of the ones still in flight and land their buffers in a cache that was already
+  // emptied. What must hold after the dust settles is exactly one panel resident.
+  await installBufferAudioMock(page, { decodeDelayMs: 400 });
+  await setup(page, { panels: 3, distinctMedia: 3, filledCellsPerPanel: 1 });
+
+  for (const name of ["Panel 2", "Panel 3", "Panel 1", "Panel 3", "Panel 2"]) {
+    await page.getByRole("tab", { name }).click();
+  }
+
+  await waitForWarm(page, 1);
+  // Long enough for anything that was in flight during the burst to have resolved.
+  await page.waitForTimeout(1500);
+
+  const keys = await diagCacheKeys(page);
+  expect(keys).toHaveLength(1);
+  expect(await diagPcmBytes(page)).toBe(DECODED_BYTES);
+  expect(await diagPcmBytesForActivePanel(page)).toBe(DECODED_BYTES);
+  await expect(page.locator('[data-warm-state="ready"]')).toHaveCount(1);
+  // The crash-safety fact: however many switches queue up, decodes never overlap beyond one
+  // pool, so the transient allocation that gets a tab killed cannot be multiplied by clicking.
+  // (The debounce on top of this is a wall-clock saving; it is not what this asserts, because
+  // under a loaded test runner two clicks can legitimately fall outside one debounce window.)
+  expect(peakConcurrentDecodes((await readProbe(page)).decodes)).toBeLessThanOrEqual(MAX_POOL);
 });
 
 test("a buffer in use by a playing route survives a panel switch", async ({ page }) => {
@@ -407,8 +444,11 @@ test("a decode that was in flight during a purge does not repopulate the cache",
   });
   await page.goto("/");
 
-  // Purge while the warm-up decode is still in flight.
-  await expect.poll(async () => diagDecodeCount(page), { timeout: 10_000 }).toBe(0);
+  // Purge while the warm-up decode is still in flight. The cell turns "warming" immediately
+  // before the decode is awaited, which is the only signal that the decode has actually started —
+  // a decode count of zero no longer implies it, because the warm-up is debounced.
+  await expect(page.locator('[data-warm-state="warming"]')).toHaveCount(1);
+  expect(await diagDecodeCount(page)).toBe(0);
   await diagClearCaches(page);
 
   await page.waitForTimeout(1500);
@@ -418,10 +458,10 @@ test("a decode that was in flight during a purge does not repopulate the cache",
   await expect(page.locator('[data-warm-state="ready"]')).toHaveCount(0);
 });
 
-test("retention survives an edit made without leaving the panel", async ({ page }) => {
-  // The eviction effect also re-runs when the cache keys change without the panel changing. If
-  // the retained panel were derived from "the panel of the previous run", that re-run would
-  // resolve it to the current panel and silently drop the panel being retained.
+test("an in-panel edit does not drop the panel's own buffers", async ({ page }) => {
+  // The eviction effect also re-runs when the cache keys change without the panel changing, and
+  // it now drops everything outside the active panel. What must survive that re-run is the panel
+  // on screen: assigning one more media must cost one decode, not a re-warm of the whole panel.
   await installBufferAudioMock(page);
   await seedProject(page, {
     panels: 2,
@@ -443,11 +483,12 @@ test("retention survives an edit made without leaving the panel", async ({ page 
   await page.getByRole("button", { name: "Выбрать seed-0002.wav" }).click();
   await page.getByRole("button", { name: "Режим редактирования" }).click();
   await expect.poll(async () => diagDecodeCount(page), { timeout: 15_000 }).toBe(3);
+  await waitForWarm(page, 2);
 
-  await page.getByRole("tab", { name: "Panel 1" }).click();
-  await waitForWarm(page, 1);
+  // Both of the active panel's cells are resident, and nothing else is.
   await page.waitForTimeout(500);
-  // Panel 1's buffer was retained across the edit, so returning costs no decode.
+  expect(await diagCacheKeys(page)).toHaveLength(2);
+  expect(await diagPcmBytes(page)).toBe(2 * DECODED_BYTES);
   expect(await diagDecodeCount(page)).toBe(3);
 });
 

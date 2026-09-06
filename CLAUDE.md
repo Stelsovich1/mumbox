@@ -71,6 +71,18 @@ Audio blobs never enter that JSON. They live in **IndexedDB** via `idb-keyval` u
 
 Cell IDs are position-stable: `cell-${row * 12 + column}` (`getPanelCellIds`), so a cell keeps its coordinates when the grid grows or shrinks between 6/8/10/12. Older saves used flat `cell-${index}`; `normalizePanelCellIds` and `remapLegacyCells` migrate those on load and on project import. Do not change this scheme without keeping both migration paths working — e2e tests cover resize round-trips.
 
+Shrinking a grid **hides** cells, it never clears them: `panel/gridSize` regenerates `cellIds` and
+merges the cell record, so a cue placed at 12x12 still exists — and still fires from its hotkey —
+while a 6x6 grid is on screen. Nothing on the grid can show that, because the cell is not rendered,
+so `entities/panel/model/hiddenCells.ts` derives it from the id lattice and the size control paints
+itself with a gradient (`data-hidden-media`) plus the smallest size that would show everything.
+
+`ensurePanelCells` builds a panel's record from `cellIds` alone, so every path that runs it —
+loading `mumbox:state:v1`, importing a `.mumbox`, merging one — would delete those hidden cues.
+`preserveHiddenCells` re-attaches them, and legacy flat-id panels are deliberately excluded: their
+ids are flat for the panel's own size, so an out-of-grid id names a lattice position only when that
+size was 12, and guessing would move a cue somewhere it never was.
+
 Several reducer actions (`panel/add`, `panel/copy`, `panel/rename`, `panel/delete`) intentionally no-op unless `state.editMode` is true.
 
 ### Audio engine
@@ -89,7 +101,7 @@ colours) are computed inside the cell, not in the parent's map, for the same rea
 - Async starts are guarded by a per-cell monotonic play token (`bumpCellToken`); check the token again after every `await` before touching a route.
 - A single `requestAnimationFrame` loop drives progress, loop restarts for the media-element path, and volume sync; it stops itself when no routes remain.
 - iOS: `getPlayableContext` closes and recreates a stuck `AudioContext`, and `pageshow`/`focus`/`visibilitychange` resume it.
-- On mount and on panel change, buffers for the active panel's cells are pre-decoded by a bounded pool (`warmedCells` drives the per-cell warm indicator). A cell holding media that is not decoded yet is a third visual state — the cell colour dimmed 30 % — because otherwise there is no way to see which pads start instantly.
+- On mount and on panel change, buffers for the active panel's cells are pre-decoded by a debounced, serialized bounded pool (`warmedCells` drives the per-cell warm indicator), and the previous panel's buffers are dropped — see **Decoded-buffer memory**. A cell holding media that is not decoded yet is a third visual state — the cell colour dimmed 30 % — because otherwise there is no way to see which pads start instantly.
 
 `audioEnvelope.ts` is shared fade/trim math. Reuse it rather than reimplementing curves — preview,
 playback, and the planned export must sound identical.
@@ -114,11 +126,9 @@ MiB resident.
 
 **There is no default budget, on any device, and that is deliberate.** A cap smaller than the
 project turns every trigger into a cold decode, and this app is a soundboard: a pad that is not
-instant is not a pad. What made memory grow without bound was never the absence of a cap but the
-absence of housekeeping — deleted media kept its PCM, revisited panels accumulated, a looping
-fallback leaked a context per iteration, and a full track was cached for a cell that plays twelve
-seconds of it. With those fixed the footprint is what the project needs, not everything it ever
-touched.
+instant is not a pad. The bound comes from housekeeping instead: deleted media releases its PCM, a
+full track is not cached for a cell that plays twelve seconds of it, a looping fallback no longer
+leaks a context per iteration — and, above all, **only the panel on screen is kept warm**.
 
 `src/features/playback/model/audioBufferCache.ts` is a byte-budget LRU (not entry count);
 `playbackBufferCache.ts` owns the singleton. A `null` budget means unlimited. The limit is opt-in,
@@ -127,13 +137,30 @@ a non-positive value clearing it. When a budget IS set, eviction is two-tier: ne
 (one a live route is using), then non-priority by LRU, then the active panel by LRU. Plain LRU
 would evict cell 1 first — the most likely next tap — because the warm-up fills in cell order.
 
-Two rules that took a wrong turn to find. Panels are never evicted on a switch, only under real
-pressure: dropping a panel while the library still fits buys nothing and costs a decode on return.
-And the warm-up measures its budget against `stats().protectedBytes` — the active panel plus live
-routes — never against everything cached, because other panels are evictable; measuring against the
-total made the panel the user is looking at refuse to warm in order to protect one they had left.
-What the panel effect does collect is genuine garbage: a key no visited panel references any more,
-which is what a trim or channel-mode change leaves behind.
+**One panel warm at a time.** The panel effect drops every key outside the active panel, keeping
+only what a live route still uses (playback survives a switch, and `stopOthers` is off by default).
+Resident PCM is therefore one panel's worth however long the session wanders, which is what a phone
+needs; the price, paid knowingly, is that returning to a panel is a cold warm-up. Keeping every
+visited panel resident was better on a desktop with headroom and is what killed the tab on a phone,
+where the library never fits.
+
+Three things that rule forces, and none of them are optional:
+
+- **The warm-up is debounced** (`WARMUP_DEBOUNCE_MS`, 150 ms). Without it, flicking through panels
+  decodes a whole panel per click and throws it away on the next one — more transient memory than
+  the accumulation the eviction replaces.
+- **Warm-up runs are serialized** through a promise chain. `decodeAudioData` cannot be cancelled,
+  so a superseded run keeps decoding; letting the next run start anyway stacks pools and multiplies
+  exactly the transient allocation that gets a tab killed. The pool width is the ceiling on decodes
+  in flight, and `playback-memory.spec.ts` sweeps the mock's timestamps to pin it.
+- **A late decode does not repopulate the cache.** `warmMedia` re-checks its run id after the
+  await and deletes the entry unless the panel now on screen wants that key or a live route holds
+  it. The warm state is dropped with it — a cell left `ready` without a buffer promises an instant
+  start the engine cannot deliver and suppresses its own re-warm.
+
+The warm-up measures its budget against `stats().protectedBytes` — the active panel plus live
+routes — never against everything cached; measuring against the total made the panel the user is
+looking at refuse to warm in order to protect one they had left.
 
 Cache keys are `${mediaId}|${trimStartMs ?? 0}|${trimEndMs ?? "e"}|${mono ? "m" : "s"}`, so the same
 media with two different trims is two entries and one decode. Sharing that decode is reference
@@ -181,6 +208,10 @@ stored at all.
 where the browser can keep one, a `FileSystemFileHandle`. Project audio is never duplicated into
 browser storage — that was the whole reason not to keep project snapshots.
 
+- **The menu entry is desktop-only.** On a coarse pointer `AppShell` hides «Проекты» entirely: a
+  phone browser keeps no file handles, so every row lands in the handle-less section where
+  reopening means picking the file again. `projects.spec.ts` therefore runs on `desktop-chromium`
+  only, and `app-shell.spec.ts` pins the absence of the entry on mobile.
 - The list lives in its **own** IndexedDB database, `mumbox-projects`/`projects`. idb-keyval's
   `clear()` in `clearStoredAppData` only reaches the default store, so «Стереть все данные» clears
   the list through an explicit second call. `storage-contract.spec.ts` pins both.

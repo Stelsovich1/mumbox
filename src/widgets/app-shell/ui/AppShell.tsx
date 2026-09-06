@@ -59,6 +59,10 @@ import {
   toProjectFileName
 } from "../../../features/file-config";
 import { MediaLibraryDialog } from "../../../features/media-library";
+import {
+  countHiddenMediaCells,
+  getMinGridSizeForMedia
+} from "../../../entities/panel/model/hiddenCells";
 import { ProjectLibraryRow } from "../../../entities/project/model/types";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
@@ -270,6 +274,18 @@ export function AppShell() {
     const cells = state.cellsByPanel[activePanel.id] ?? {};
     return activePanel.cellIds.map((cellId) => cells[cellId]).filter(isDefinedCell);
   }, [activePanel, state.cellsByPanel]);
+  // The whole cell record, not `activeCells`: shrinking the grid keeps cells it stops rendering,
+  // and those are exactly the ones worth reporting.
+  const activePanelCellRecord = activePanel ? state.cellsByPanel[activePanel.id] : undefined;
+  const hiddenMediaCount = useMemo(
+    () =>
+      activePanel ? countHiddenMediaCells(activePanelCellRecord, activePanel.gridSize) : 0,
+    [activePanel, activePanelCellRecord]
+  );
+  const minGridSize = useMemo(
+    () => getMinGridSizeForMedia(activePanelCellRecord),
+    [activePanelCellRecord]
+  );
   const { playingCells, warmedCells, playCell, toggleCell, stopCell, stopAll } = useAudioEngine(
     activePanel?.id ?? "",
     state.media,
@@ -1257,15 +1273,20 @@ export function AppShell() {
             <SaveAltIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>Сохранить проект</Typography>
           </MenuItem>
-          <MenuItem
-            onClick={() => {
-              setProjectLibraryOpen(true);
-              closeFileMenu();
-            }}
-          >
-            <FolderOpenIcon fontSize="small" />
-            <Typography sx={{ ml: 1 }}>Проекты</Typography>
-          </MenuItem>
+          {/* Desktop only. The list is a list of file handles, and a phone browser keeps none:
+              every row lands in the handle-less section, where reopening means picking the file
+              again anyway. Offering it there promised a library the platform cannot deliver. */}
+          {mobileBrowser ? null : (
+            <MenuItem
+              onClick={() => {
+                setProjectLibraryOpen(true);
+                closeFileMenu();
+              }}
+            >
+              <FolderOpenIcon fontSize="small" />
+              <Typography sx={{ ml: 1 }}>Проекты</Typography>
+            </MenuItem>
+          )}
           <MenuItem
             onClick={() => {
               setMediaLibraryOpen(true);
@@ -1486,6 +1507,8 @@ export function AppShell() {
           stopOthers={state.stopOthers}
           gridSize={activePanel.gridSize}
           panelId={activePanel.id}
+          hiddenMediaCount={hiddenMediaCount}
+          minGridSize={minGridSize}
           dispatch={dispatch}
           onStopAll={stopAll}
         />
