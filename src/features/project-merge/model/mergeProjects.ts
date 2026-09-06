@@ -1,5 +1,6 @@
 import type { SerializableAppState } from "../../../app/model/appState";
 import { MediaAsset } from "../../../entities/media/model/types";
+import { preserveHiddenCells } from "../../../entities/panel/model/hiddenCells";
 import {
   ensurePanelCells,
   normalizePanelCellIds,
@@ -59,7 +60,9 @@ export function mergeProjectState({
     // The legacy flat `cell-${index}` migration has to run on incoming panels too: a project saved
     // by an old build carries the old scheme.
     const sourceCells = remapLegacyCells(sourcePanel, incoming.cellsByPanel[sourcePanel.id]);
-    const cells = ensurePanelCells(panel, sourceCells);
+    // Cues the incoming panel's grid size hides come along too; dropping them here would delete
+    // audio the merged file still lists.
+    const cells = preserveHiddenCells(panel, ensurePanelCells(panel, sourceCells), sourceCells);
 
     for (const cell of Object.values(cells)) {
       cell.mediaId = cell.mediaId ? mediaIdMap.get(cell.mediaId) ?? null : null;

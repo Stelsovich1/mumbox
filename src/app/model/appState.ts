@@ -5,6 +5,7 @@ import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model
 import { makeCell } from "../../entities/cell/model/makeCell";
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
 import { MediaAsset } from "../../entities/media/model/types";
+import { preserveHiddenCells } from "../../entities/panel/model/hiddenCells";
 import {
   ensurePanelCells,
   getPanelCellIds,
@@ -181,8 +182,14 @@ function sanitizeImportedState(state: SerializableAppState, session?: ProjectSes
   const cellsByPanel = panels.reduce<Record<string, Record<string, GridCell>>>(
     (accumulator, panel, index) => {
       const sourcePanel = sourcePanels[index] ?? panel;
-      const sourceCells = state.cellsByPanel[sourcePanel.id];
-      accumulator[panel.id] = ensurePanelCells(panel, remapLegacyCells(sourcePanel, sourceCells));
+      const sourceCells = remapLegacyCells(sourcePanel, state.cellsByPanel[sourcePanel.id]);
+      // Cues outside the current grid are hidden, not deleted — the same promise the
+      // `panel/gridSize` reducer makes in-session, kept across a load and an import.
+      accumulator[panel.id] = preserveHiddenCells(
+        panel,
+        ensurePanelCells(panel, sourceCells),
+        sourceCells
+      );
       return accumulator;
     },
     {}

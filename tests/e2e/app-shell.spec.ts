@@ -2399,3 +2399,144 @@ test("keeps the zoomed waveform scrollable while preserving pointer editing mode
     .poll(async () => playhead.evaluate((element) => getComputedStyle(element).left))
     .not.toBe(beforeLeft);
 });
+
+test("marks the grid size control when a cue sits outside the grid", async ({ page }) => {
+  // Shrinking the grid hides cells, it does not clear them. The grid itself cannot report that —
+  // the cell is not rendered — so the size control is the only place the cue can be announced.
+  const mediaAsset = {
+    id: "media-hidden",
+    fileName: "hidden.wav",
+    alias: "Hidden Cue",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 4000,
+    createdAt: new Date().toISOString()
+  };
+
+  await seedStoredState(page, {
+    panels: [
+      {
+        id: "panel-wide",
+        name: "Wide",
+        gridSize: 12,
+        cellIds: Array.from({ length: 144 }, (_, index) => {
+          const row = Math.floor(index / 12);
+          return `cell-${String(row * 12 + (index % 12))}`;
+        })
+      }
+    ],
+    activePanelId: "panel-wide",
+    cellsByPanel: {
+      // The very last cell of a 12x12 grid: invisible at any smaller size.
+      "panel-wide": { "cell-143": makeStoredCell("cell-143", mediaAsset.id) }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  const gridButton = page.getByRole("button", { name: "Размер сетки" });
+  await expect(gridButton).not.toHaveAttribute("data-hidden-media", /.*/);
+
+  await gridButton.click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
+
+  await expect(gridButton).toHaveAttribute("data-hidden-media", "1");
+  await gridButton.click();
+  await expect(page.getByTestId("grid-hidden-media-hint")).toContainText("12x12");
+
+  // Back to a size that shows it, and the marking goes with it.
+  await page.getByRole("button", { name: "12x12" }).click();
+  await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
+  await expect(gridButton).not.toHaveAttribute("data-hidden-media", /.*/);
+});
+
+test("does not mark the grid size control for empty cells outside the grid", async ({ page }) => {
+  // Only cues count. An empty cell outside the grid is nothing the user is missing.
+  await seedStoredState(page, {
+    panels: [
+      {
+        id: "panel-wide",
+        name: "Wide",
+        gridSize: 8,
+        cellIds: Array.from({ length: 64 }, (_, index) => {
+          const row = Math.floor(index / 8);
+          return `cell-${String(row * 12 + (index % 8))}`;
+        })
+      }
+    ],
+    activePanelId: "panel-wide",
+    cellsByPanel: { "panel-wide": { "cell-90": makeStoredCell("cell-90", null) } },
+    media: [],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  await page.getByRole("button", { name: "Размер сетки" }).click();
+  await page.getByRole("button", { name: "6x6" }).click();
+  await expect(page.getByLabel("Рабочая сетка 6 на 6")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Размер сетки" })).not.toHaveAttribute(
+    "data-hidden-media",
+    /.*/
+  );
+});
+
+test("offers the projects list on desktop only", async ({ page }, testInfo) => {
+  // The list is a list of file handles, and a phone browser keeps none: every row would land in
+  // the handle-less section, where reopening means picking the file again anyway.
+  await page.goto("/");
+  await openFileMenu(page);
+
+  await expect(page.getByRole("menuitem", { name: "Сохранить проект" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Проекты" })).toHaveCount(
+    testInfo.project.name === "mobile-landscape" ? 0 : 1
+  );
+});
+
+test("a cue outside the grid survives a reload", async ({ page }) => {
+  // Hidden, not deleted. `ensurePanelCells` builds the record from `cellIds` alone, so without
+  // `preserveHiddenCells` every cue a shrunken grid hides is gone at the next load — the gradient
+  // would be warning about audio the app is about to destroy.
+  const mediaAsset = {
+    id: "media-hidden",
+    fileName: "hidden.wav",
+    alias: "Hidden Cue",
+    color: "#ec5aa7",
+    mimeType: "audio/wav",
+    size: 16,
+    durationMs: 4000,
+    createdAt: new Date().toISOString()
+  };
+  const cellIds = Array.from({ length: 36 }, (_, index) => {
+    const row = Math.floor(index / 6);
+    return `cell-${String(row * 12 + (index % 6))}`;
+  });
+
+  await seedStoredState(page, {
+    panels: [{ id: "panel-wide", name: "Wide", gridSize: 6, cellIds }],
+    activePanelId: "panel-wide",
+    cellsByPanel: {
+      "panel-wide": { "cell-143": makeStoredCell("cell-143", mediaAsset.id) }
+    },
+    media: [mediaAsset],
+    masterVolume: 80,
+    masterMuted: false,
+    stopOthers: false
+  });
+
+  const gridButton = page.getByRole("button", { name: "Размер сетки" });
+  await expect(gridButton).toHaveAttribute("data-hidden-media", "1");
+
+  // The app rewrites localStorage on every state change, so this reload reads back what it wrote.
+  await page.reload();
+  await expect(gridButton).toHaveAttribute("data-hidden-media", "1");
+
+  await gridButton.click();
+  await page.getByRole("button", { name: "12x12" }).click();
+  await expect(page.getByLabel("Рабочая сетка 12 на 12")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 144 Hidden Cue" })).toBeVisible();
+});

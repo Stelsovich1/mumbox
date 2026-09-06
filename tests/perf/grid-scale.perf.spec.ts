@@ -57,8 +57,15 @@ async function waitForWarmupToSettle(page: Page, expectedMedia: number) {
 async function measurePanelSwitch(page: Page, seed: SeedResult, index: number) {
   const startedAt = Date.now();
   await page.getByRole("tab", { name: `Panel ${String(index + 1)}` }).click();
+  // Tight polling on purpose. At the default cadence this number is quantized to ~100 ms steps,
+  // so it reports which polling tick happened to catch the value rather than how long the switch
+  // took — the engine records 0.1 ms and the paint 8-15 ms behind a wall clock reading 180-260.
+  // A moved poll boundary then looks exactly like a regression.
   await expect
-    .poll(async () => (await diagSnapshot(page))?.lastPanelSwitchPaintMs ?? null, { timeout: 30_000 })
+    .poll(async () => (await diagSnapshot(page))?.lastPanelSwitchPaintMs ?? null, {
+      timeout: 30_000,
+      intervals: [5, 5, 10, 10, 25, 50]
+    })
     .not.toBeNull();
   void seed;
   return Date.now() - startedAt;

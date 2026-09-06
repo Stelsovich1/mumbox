@@ -12,14 +12,15 @@ import {
   Stack,
   ToggleButton,
   ToggleButtonGroup,
-  Tooltip
+  Tooltip,
+  Typography
 } from "@mui/material";
 import { MouseEvent, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
+import { GRID_SIZES } from "../../../entities/panel/model/hiddenCells";
 import { GridSize } from "../../../entities/panel/model/types";
-
-const gridSizes: GridSize[] = [6, 8, 10, 12];
+import { formatCountRu } from "../../../shared/lib/pluralizeRu";
 
 type RightToolbarProps = {
   masterVolume: number;
@@ -28,6 +29,10 @@ type RightToolbarProps = {
   stopOthers: boolean;
   gridSize: GridSize;
   panelId: string;
+  /** Cells holding media that the current grid size does not render. */
+  hiddenMediaCount: number;
+  /** Smallest size that would show all of them, or `null` when the panel has no media at all. */
+  minGridSize: GridSize | null;
   dispatch: React.Dispatch<AppAction>;
   onStopAll: () => void;
 };
@@ -39,10 +44,14 @@ export function RightToolbar({
   stopOthers,
   gridSize,
   panelId,
+  hiddenMediaCount,
+  minGridSize,
   dispatch,
   onStopAll
 }: RightToolbarProps) {
   const [gridAnchor, setGridAnchor] = useState<HTMLElement | null>(null);
+  const hasHiddenMedia = hiddenMediaCount > 0;
+  const hiddenLabel = formatCountRu(hiddenMediaCount, ["ячейка", "ячейки", "ячеек"]);
 
   const openGridMenu = (event: MouseEvent<HTMLButtonElement>) => {
     setGridAnchor(event.currentTarget);
@@ -191,8 +200,33 @@ export function RightToolbar({
             <EditNoteIcon />
           </IconButton>
         </Tooltip>
-        <Tooltip title="Размер сетки" disableInteractive>
-          <IconButton aria-label="Размер сетки" onClick={openGridMenu}>
+        <Tooltip
+          title={
+            hasHiddenMedia ? `Размер сетки — вне сетки ${hiddenLabel} с аудио` : "Размер сетки"
+          }
+          disableInteractive
+        >
+          {/* The gradient is the only place a hidden cue can be announced: the grid cannot show
+              what it does not render, and the cell is still reachable from its hotkey. The label
+              stays "Размер сетки" — the suite selects this button by it. */}
+          <IconButton
+            aria-label="Размер сетки"
+            data-hidden-media={hasHiddenMedia ? String(hiddenMediaCount) : undefined}
+            onClick={openGridMenu}
+            sx={
+              hasHiddenMedia
+                ? {
+                    background: (theme) =>
+                      `linear-gradient(135deg, ${theme.palette.warning.main} 0%, ${theme.palette.secondary.main} 100%)`,
+                    color: "common.black",
+                    "&:hover": {
+                      background: (theme) =>
+                        `linear-gradient(135deg, ${theme.palette.warning.light} 0%, ${theme.palette.secondary.light} 100%)`
+                    }
+                  }
+                : undefined
+            }
+          >
             <AppsIcon />
           </IconButton>
         </Tooltip>
@@ -230,12 +264,20 @@ export function RightToolbar({
             }
           }}
         >
-          {gridSizes.map((size) => (
+          {GRID_SIZES.map((size) => (
             <ToggleButton key={size} value={size} aria-label={`${String(size)}x${String(size)}`}>
               {String(size)}x{String(size)}
             </ToggleButton>
           ))}
         </ToggleButtonGroup>
+        {hasHiddenMedia && minGridSize !== null ? (
+          <Typography
+            data-testid="grid-hidden-media-hint"
+            sx={{ px: 1, pb: 1, maxWidth: 160, fontSize: 12, color: "text.secondary" }}
+          >
+            {`Вне сетки ${hiddenLabel} с аудио. Всё видно при ${String(minGridSize)}x${String(minGridSize)}.`}
+          </Typography>
+        ) : null}
       </Popover>
       <Box
         sx={{

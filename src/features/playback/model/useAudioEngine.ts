@@ -64,6 +64,15 @@ type WarmupTarget = {
 const RELEASE_SECONDS = 0.018;
 const PROGRESS_EPSILON = 0.001;
 /**
+ * How long a panel has to stay on screen before its warm-up starts.
+ *
+ * Short enough to be invisible when a panel is chosen deliberately, long enough that flicking
+ * through panels decodes only the one the user stops on. Since a panel switch now drops the
+ * previous panel's PCM, an undebounced warm-up would decode a whole panel per switch and throw it
+ * away on the next one — more transient memory than the accumulation it replaces.
+ */
+const WARMUP_DEBOUNCE_MS = 150;
+/**
  * Concurrency multiplies the transient memory of in-flight decodes, and that transient is exactly
  * what gets a tab killed on a phone: three simultaneous decodes of 15 MB tracks is two thirds of a
  * gigabyte in flight. So phones get two, and desktops leave cores for the main thread and the
@@ -219,7 +228,18 @@ export function useAudioEngine(
   const warmupRunRef = useRef(0);
   const mediaRef = useRef(media);
   const monoRef = useRef(monoPlayback);
-  const keysByPanelRef = useRef(new Map<string, string[]>());
+  /**
+   * Cache keys the panel on screen needs. Read by decodes that land late: a warm-up run that was
+   * superseded must not put another panel's PCM back into a cache the panel switch just emptied,
+   * but the very same keys may belong to the panel the user has already switched back to.
+   */
+  const activeKeysRef = useRef(new Set<string>());
+  /**
+   * Serializes warm-up runs. Two pools in flight at once double the number of simultaneous
+   * decodes, and simultaneous decodes are what multiply the transient allocation that gets a tab
+   * killed on iOS — precisely the situation a burst of panel switches creates.
+   */
+  const warmupChainRef = useRef<Promise<void>>(Promise.resolve());
   /**
    * Full decodes shared between cells that trim the SAME media differently.
    *
@@ -431,13 +451,43 @@ export function useAudioEngine(
     []
   );
 
+  const dropWarmedKeys = useCallback((keys: readonly string[]) => {
+    const dropped = new Set(keys);
+    setWarmedKeys((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => !dropped.has(key))
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, []);
+
+  const isCacheKeyInUse = useCallback(
+    (cacheKey: string) =>
+      Array.from(routeByCellRef.current.values()).some((route) => route.cacheKey === cacheKey),
+    []
+  );
+
   const warmMedia = useCallback(
-    async (target: WarmupTarget) => {
+    async (target: WarmupTarget, runId: number) => {
       const { mediaId, cacheKey } = target;
       setWarmedKeys((current) =>
         current[cacheKey] ? current : { ...current, [cacheKey]: "warming" }
       );
       const entry = await loadPlaybackEntry(target.cell, mediaId, cacheKey);
+      // A decode started before a panel switch resolves after it, and `decodeAudioData` cannot be
+      // cancelled — so the buffer lands in a cache the switch has already emptied. It is kept only
+      // when the panel now on screen still wants that key (a switch back to where we came from) or
+      // a live route is using it; otherwise the one-panel bound would be broken by whatever
+      // happened to be in flight.
+      if (
+        warmupRunRef.current !== runId &&
+        !activeKeysRef.current.has(cacheKey) &&
+        !isCacheKeyInUse(cacheKey)
+      ) {
+        playbackBufferCache.delete(cacheKey);
+        dropWarmedKeys([cacheKey]);
+        return;
+      }
       setWarmedKeys((current) => {
         if (!(cacheKey in current)) {
           return current;
@@ -448,7 +498,7 @@ export function useAudioEngine(
         return current[cacheKey] === "ready" ? current : { ...current, [cacheKey]: "ready" };
       });
     },
-    [loadPlaybackEntry]
+    [dropWarmedKeys, isCacheKeyInUse, loadPlaybackEntry]
   );
 
   const stopCellKey = useCallback(
@@ -865,7 +915,7 @@ export function useAudioEngine(
     const currentKeys = Array.from(
       new Set(warmupTargetsRef.current.map((target) => target.cacheKey))
     );
-    keysByPanelRef.current.set(panelId, currentKeys);
+    activeKeysRef.current = new Set(currentKeys);
 
     // Pinning is computed from EVERY live route, not from the active panel: switching panels
     // does not stop playback and stopOthers is off by default, so a route belonging to another
@@ -876,34 +926,36 @@ export function useAudioEngine(
     playbackBufferCache.setPriority(currentKeys);
     setActivePanelKeys(currentKeys);
 
-    // Panels are never evicted here. Marking the active one as priority is enough: the cache
-    // drops other panels first, and only under real pressure. Evicting on every switch threw away
-    // panels while the whole library still fit — the behaviour that made a warmed pad instant in
-    // the first place — and it ran BEFORE the incoming panel could ask for room, so the room
-    // freed was never the room needed.
+    // One panel warm at a time. Everything outside the panel on screen is dropped on the switch,
+    // so resident PCM is bounded by that panel plus whatever a live route is still using, rather
+    // than by every panel the session has visited. Keeping other panels cached was measurably
+    // better on a desktop with headroom and is what kills the tab on a phone, where the whole
+    // library never fits; the cost paid for the bound is a cold warm-up when the user comes back.
     //
-    // What is collected here is genuine garbage: a key no visited panel references any more.
-    // Changing a trim or the channel mode moves a cell to a new key and orphans the old one, and
-    // an orphan will never be requested again.
-    const liveKeys = new Set(pinnedKeys);
-    for (const keys of keysByPanelRef.current.values()) {
-      for (const key of keys) {
-        liveKeys.add(key);
+    // Live routes survive on purpose: switching panels does not stop playback and `stopOthers` is
+    // off by default, so a route belonging to another panel can still be using its buffer.
+    const liveKeys = new Set([...pinnedKeys, ...currentKeys]);
+    const evictedKeys: string[] = [];
+    for (const key of playbackBufferCache.keys()) {
+      if (!liveKeys.has(key) && playbackBufferCache.delete(key)) {
+        evictedKeys.push(key);
       }
     }
-    for (const key of playbackBufferCache.keys()) {
-      if (!liveKeys.has(key)) {
-        playbackBufferCache.delete(key);
-      }
+    // The warm state has to go with the buffer. A key left as "ready" after its PCM was evicted
+    // makes the cell promise an instant start on the next visit and suppresses its re-warm.
+    if (evictedKeys.length > 0) {
+      dropWarmedKeys(evictedKeys);
     }
 
     const switchMs = markEnd("panelSwitch");
     if (switchMs !== null) {
       recordPanelSwitchEngine(switchMs);
     }
-  }, [panelId, warmupSignature]);
+  }, [dropWarmedKeys, panelId, warmupSignature]);
 
   useEffect(() => {
+    // Bumped synchronously, before the debounce: every run already in flight has to know it is
+    // superseded as early as possible, even though its current decode cannot be cancelled.
     const runId = warmupRunRef.current + 1;
     warmupRunRef.current = runId;
 
@@ -940,9 +992,13 @@ export function useAudioEngine(
     for (const target of uniqueTargets) {
       pendingByMedia.set(target.mediaId, (pendingByMedia.get(target.mediaId) ?? 0) + 1);
     }
-    stagingRef.current.clear();
-
-    void (async () => {
+    const startWarmup = async () => {
+      if (warmupRunRef.current !== runId) {
+        return;
+      }
+      // Safe to reset here and not before the await: runs are serialized, so no worker of an
+      // earlier run is still holding a staged decode by the time this one starts.
+      stagingRef.current.clear();
       markStart(`warmup:${String(runId)}`);
       let warmed = 0;
       let skipped = 0;
@@ -1014,7 +1070,7 @@ export function useAudioEngine(
 
           reservedBytes += estimate ?? 0;
           try {
-            await warmMedia(target);
+            await warmMedia(target, runId);
           } finally {
             // The bytes are in the cache now, where `protectedBytes` accounts for them.
             reservedBytes -= estimate ?? 0;
@@ -1036,7 +1092,20 @@ export function useAudioEngine(
       if (totalMs !== null && warmupRunRef.current === runId) {
         recordWarmup(totalMs, warmed, skipped);
       }
-    })();
+    };
+
+    // Debounced, then chained. The debounce collapses a burst of panel switches into a single
+    // warm-up of the panel the user actually stopped on; the chain guarantees that even when a
+    // burst outlives it, the pool of the superseded run has drained before the next one allocates.
+    // Without both, "drop the previous panel" makes memory worse rather than better: every switch
+    // adds another pool of concurrent decodes on top of the ones still running.
+    const timer = window.setTimeout(() => {
+      warmupChainRef.current = warmupChainRef.current.then(startWarmup, startWarmup);
+    }, WARMUP_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [decodeFullBuffer, warmupSignature, warmMedia]);
 
   /**
