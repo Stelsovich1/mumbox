@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+// The date column renders local time, so pin the zone rather than the formatter.
+test.use({ timezoneId: "UTC" });
+
 /**
  * The media library dialog had no coverage at all before multi-select landed here. These tests seed
  * state through localStorage only: the dialog reads metadata, never blobs.
@@ -231,4 +234,32 @@ test("counts and clears cells across every panel", async ({ page }) => {
     "aria-label",
     "Ячейка 2 beta.wav"
   );
+});
+
+const DATED_MEDIA: SeedMedia[] = [
+  { id: "media-a", fileName: "alpha.wav", createdAt: "2024-01-05T09:07:00.000Z" },
+  { id: "media-b", fileName: "beta.wav", createdAt: "2023-03-02T22:45:00.000Z" },
+  // Written by a build that predates the column: no createdAt at all.
+  { id: "media-c", fileName: "gamma.wav", createdAt: null }
+];
+
+test("shows the date a record was added and a dash when the save predates it", async ({ page }) => {
+  await openLibrary(page, buildState(DATED_MEDIA, [[]]));
+
+  await expect(page.getByText("05.01.2024 09:07")).toBeVisible();
+  await expect(page.getByText("02.03.2023 22:45")).toBeVisible();
+  await expect(page.getByRole("table", { name: "Медиатека" }).getByText("—")).toHaveCount(1);
+});
+
+test("keeps the media library columns aligned", async ({ page }) => {
+  await openLibrary(page, buildState(DATED_MEDIA, [[]]));
+
+  const templates = await page.getByRole("table", { name: "Медиатека" }).evaluate((table) => {
+    const rows = Array.from(table.children);
+
+    return rows.slice(0, 2).map((row) => getComputedStyle(row).gridTemplateColumns);
+  });
+
+  expect(templates[0]).toBe(templates[1]);
+  expect(templates[0]?.split(" ")).toHaveLength(7);
 });

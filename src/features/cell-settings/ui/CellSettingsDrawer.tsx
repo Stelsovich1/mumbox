@@ -44,6 +44,7 @@ import {
   SELECTED_ROW_HOVER_BACKGROUND
 } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
+import { formatCreatedAt } from "../../../shared/lib/formatDate";
 import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
@@ -53,10 +54,11 @@ import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSele
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
-// 40 + 260 + 96 + 74 + 60 + 42. Keeping the arithmetic exact is what stops the header grid and
-// the body grids drifting apart, which the column-alignment e2e pins.
-const MEDIA_PICKER_COLUMNS = "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 60px 42px";
-const MEDIA_PICKER_MIN_WIDTH = 572;
+// 40 + 260 + 96 + 74 + 116 + 60 + 42. Keeping the arithmetic exact is what stops the header grid
+// and the body grids drifting apart, which the column-alignment e2e pins. The date track is fixed
+// rather than content-derived for the same reason.
+const MEDIA_PICKER_COLUMNS = "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 116px 60px 42px";
+const MEDIA_PICKER_MIN_WIDTH = 688;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -591,6 +593,9 @@ export function CellSettingsDrawer({
                   Время
                 </Typography>
                 <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
+                  Дата добавления
+                </Typography>
+                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
                   Цвет
                 </Typography>
                   <Box role="columnheader" />
@@ -713,6 +718,9 @@ export function CellSettingsDrawer({
                     </Typography>
                     <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
                       {formatDuration(item.durationMs)}
+                    </Typography>
+                    <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
+                      {formatCreatedAt(item.createdAt)}
                     </Typography>
                     <Box sx={{ px: 1, display: "grid", placeItems: "center" }}>
                       <Box
