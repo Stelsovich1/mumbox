@@ -1,5 +1,11 @@
 import { getMediaBlob } from "../../app/model/appState";
 import { SerializableAppState } from "../../app/model/appState";
+import { computeContentHash } from "../../shared/lib/contentHash";
+import { FileHandleLike, writeBlobToHandle } from "../../shared/lib/fileSystemAccess";
+import { normalizeProjectMeta, ProjectMeta, toProjectFileName } from "./model/projectMeta";
+
+export { normalizeProjectMeta, toProjectFileName };
+export type { ProjectMeta };
 
 export const PROJECT_FILE_EXTENSION = ".mumbox";
 export const PROJECT_FILE_MIME_TYPE = "application/vnd.mumbox.project+zip";
@@ -29,18 +35,24 @@ export type ProjectMediaBlob = {
   fileName: string;
   mimeType: string;
   size: number;
+  contentHash?: string;
 };
 
 export type ProjectFile = {
   kind: "mumbox-project";
+  // Deliberately not bumped for `meta`. `isProjectFile` checks this exactly, and the app ships as a
+  // PWA with `registerType: "prompt"`, so a user on an older build must still be able to open a
+  // file a newer build wrote — and the other way round.
   version: 2;
   exportedAt: string;
+  meta?: ProjectMeta;
   state: SerializableAppState;
   mediaBlobs: ProjectMediaBlob[];
 };
 
 export type ImportedProject = {
   state: SerializableAppState;
+  meta: ProjectMeta;
   mediaBlobs: { id: string; fileName: string; mimeType: string; blob: Blob }[];
 };
 
@@ -242,6 +254,7 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
 
   return {
     state: parsed.state,
+    meta: normalizeProjectMeta(parsed.meta),
     mediaBlobs: parsed.mediaBlobs.map((media) => {
       const blob = entries.get(`${PROJECT_MEDIA_DIR}${media.id}`);
       if (!blob) {
@@ -257,23 +270,46 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
   };
 }
 
+export type MakeProjectBlobOptions = {
+  meta?: ProjectMeta;
+  onProgress?: (progress: ProjectFileProgress) => void;
+  /**
+   * Called with any content hash computed along the way. Every blob is already loaded here, so
+   * hashing costs one pass and never a second read; the caller stores the result so a media asset
+   * is hashed at most once per session.
+   */
+  onHash?: (hashes: { mediaId: string; contentHash: string }[]) => void;
+};
+
 export async function makeProjectBlob(
   state: SerializableAppState,
-  onProgress?: (progress: ProjectFileProgress) => void
+  options: MakeProjectBlobOptions = {}
 ) {
+  const { meta, onProgress, onHash } = options;
   const mediaBlobs: ProjectMediaBlob[] = [];
   const entries: { name: string; blob: Blob }[] = [];
+  const computedHashes: { mediaId: string; contentHash: string }[] = [];
 
   for (const [index, media] of state.media.entries()) {
     const blob = await getMediaBlob(media.id);
     if (!blob) {
       throw new Error(`Missing media blob: ${media.fileName}`);
     }
+    let contentHash = media.contentHash;
+    if (!contentHash) {
+      // Sequential by contract: hashing several large blobs at once multiplies the transient
+      // memory that gets a mobile tab killed.
+      contentHash = (await computeContentHash(blob)) ?? undefined;
+      if (contentHash) {
+        computedHashes.push({ mediaId: media.id, contentHash });
+      }
+    }
     mediaBlobs.push({
       id: media.id,
       fileName: media.fileName,
       mimeType: media.mimeType,
-      size: blob.size
+      size: blob.size,
+      contentHash
     });
     entries.push({
       name: `${PROJECT_MEDIA_DIR}${media.id}`,
@@ -287,11 +323,24 @@ export async function makeProjectBlob(
     });
   }
 
+  if (computedHashes.length > 0) {
+    onHash?.(computedHashes);
+  }
+
+  const hashByMediaId = new Map(mediaBlobs.map((item) => [item.id, item.contentHash]));
   const project: ProjectFile = {
     kind: "mumbox-project",
     version: 2,
     exportedAt: new Date().toISOString(),
-    state,
+    ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
+    state: {
+      ...state,
+      media: state.media.map((media) => {
+        const contentHash = media.contentHash ?? hashByMediaId.get(media.id);
+
+        return contentHash ? { ...media, contentHash } : media;
+      })
+    },
     mediaBlobs
   };
 
@@ -303,8 +352,8 @@ export async function makeProjectBlob(
   return makeZipBlob(entries, onProgress);
 }
 
-export function downloadProject(blob: Blob) {
-  const fileName = `mumbox-project${PROJECT_FILE_EXTENSION}`;
+export function downloadProject(blob: Blob, requestedFileName?: string) {
+  const fileName = toProjectFileName(requestedFileName ?? "");
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -315,13 +364,26 @@ export function downloadProject(blob: Blob) {
   return fileName;
 }
 
-export function saveProjectBlob(blob: Blob) {
-  return Promise.resolve({ fileName: downloadProject(blob), completed: false });
-}
+/**
+ * Writes through a file handle where the browser has one — that path overwrites in place and can
+ * report real completion — and falls back to a download everywhere else, where the browser owns the
+ * destination and we never learn whether the user kept it.
+ */
+export async function saveProjectBlob(
+  blob: Blob,
+  requestedFileName?: string,
+  handle?: FileHandleLike
+): Promise<SaveProjectResult> {
+  const fileName = toProjectFileName(requestedFileName ?? "");
 
-export async function saveProjectFile(state: SerializableAppState) {
-  const blob = await makeProjectBlob(state);
-  return saveProjectBlob(blob);
+  if (handle) {
+    const written = await writeBlobToHandle(handle, blob);
+    if (written) {
+      return { fileName: handle.name, completed: true };
+    }
+  }
+
+  return { fileName: downloadProject(blob, fileName), completed: false };
 }
 
 function isProjectFile(value: unknown): value is ProjectFile {

@@ -12,8 +12,13 @@ import {
 } from "../../entities/panel/model/panelCells";
 import { makeUniquePanelName } from "../../entities/panel/model/panelName";
 import { GridSize, Panel } from "../../entities/panel/model/types";
+import { ensureMedia } from "../../entities/media/model/normalizeMedia";
 import { CELL_COLORS } from "../../shared/config/colorPalette";
 import { readAudioDurationMs } from "../../shared/lib/duration";
+import { makeUnsavedSession, ProjectSession, withDirtyTracking } from "./projectSession";
+
+export type { ProjectSession };
+export { makeUnsavedSession };
 
 // Re-exported so callers keep one import site while the implementations stay in pure, unit-testable
 // modules. This file imports `react` and `idb-keyval`, which the unit tier cannot load.
@@ -21,6 +26,8 @@ export { makeCell } from "../../entities/cell/model/makeCell";
 export { getPanelCellIds } from "../../entities/panel/model/panelCells";
 
 const STORAGE_KEY = "mumbox:state:v1";
+// A sidecar key on purpose: the layout payload stays byte-identical for an untouched project.
+const PROJECT_SESSION_KEY = "mumbox:project-session:v1";
 const MEDIA_BLOB_PREFIX = "mumbox:media:";
 
 export type AppState = {
@@ -37,11 +44,13 @@ export type AppState = {
    * material collapses, so this is a user decision, never an automatic optimization.
    */
   monoPlayback: boolean;
+  /** Project identity. Never serialized into the file — see `projectSession.ts`. */
+  projectSession: ProjectSession;
 };
 
 export type SerializableAppState = Omit<
   AppState,
-  "editMode" | "masterMuted" | "monoPlayback"
+  "editMode" | "masterMuted" | "monoPlayback" | "projectSession"
 > & {
   masterMuted?: boolean;
   // Optional so projects and saves written before mono existed still import.
@@ -116,8 +125,17 @@ export type AppAction =
   | { type: "editMode/toggle" }
   | { type: "stopOthers/toggle" }
   | { type: "mono/set"; value: boolean }
+  | { type: "media/setContentHash"; hashes: { mediaId: string; contentHash: string }[] }
+  | { type: "project/meta"; name?: string; description?: string }
+  | {
+      type: "project/saved";
+      projectId?: string | null;
+      fileName: string;
+      name: string;
+      description: string;
+    }
   | { type: "state/reset" }
-  | { type: "state/import"; state: SerializableAppState };
+  | { type: "state/import"; state: SerializableAppState; session?: ProjectSession };
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -156,11 +174,12 @@ export function createInitialState(): AppState {
     masterMuted: false,
     editMode: false,
     stopOthers: false,
-    monoPlayback: false
+    monoPlayback: false,
+    projectSession: makeUnsavedSession()
   };
 }
 
-function sanitizeImportedState(state: SerializableAppState): AppState {
+function sanitizeImportedState(state: SerializableAppState, session?: ProjectSession): AppState {
   const fallback = createInitialState();
   const sourcePanels = state.panels.length > 0 ? state.panels : fallback.panels;
   const panels = sourcePanels.map((panel) => ({
@@ -183,12 +202,15 @@ function sanitizeImportedState(state: SerializableAppState): AppState {
       ? state.activePanelId
       : panels[0]?.id ?? fallback.activePanelId,
     cellsByPanel,
-    media: state.media,
+    // State written by an older build, or a hand-edited manifest, reaches here as `unknown` shaped
+    // data. `ensureMedia` never invents a `createdAt`.
+    media: ensureMedia(state.media),
     masterVolume: state.masterVolume,
     masterMuted: state.masterMuted ?? false,
     editMode: false,
     stopOthers: state.stopOthers,
-    monoPlayback: state.monoPlayback ?? false
+    monoPlayback: state.monoPlayback ?? false,
+    projectSession: session ?? makeUnsavedSession()
   };
 }
 
@@ -519,12 +541,63 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, stopOthers: !state.stopOthers };
     case "mono/set":
       return state.monoPlayback === action.value ? state : { ...state, monoPlayback: action.value };
+    case "media/setContentHash": {
+      if (action.hashes.length === 0) {
+        return state;
+      }
+      const hashByMediaId = new Map(action.hashes.map((item) => [item.mediaId, item.contentHash]));
+
+      return {
+        ...state,
+        media: state.media.map((media) => {
+          const contentHash = hashByMediaId.get(media.id);
+
+          return contentHash && contentHash !== media.contentHash
+            ? { ...media, contentHash }
+            : media;
+        })
+      };
+    }
+    case "project/meta": {
+      const name = action.name ?? state.projectSession.name;
+      const description = action.description ?? state.projectSession.description;
+      if (name === state.projectSession.name && description === state.projectSession.description) {
+        return state;
+      }
+
+      return { ...state, projectSession: { ...state.projectSession, name, description } };
+    }
+    case "project/saved":
+      return {
+        ...state,
+        projectSession: {
+          projectId: action.projectId ?? state.projectSession.projectId,
+          name: action.name,
+          description: action.description,
+          fileName: action.fileName,
+          saved: true,
+          dirty: false
+        }
+      };
     case "state/reset":
       return createInitialState();
     case "state/import":
-      return sanitizeImportedState(action.state);
+      return sanitizeImportedState(action.state, action.session);
     default:
       return state;
+  }
+}
+
+function loadStoredSession(): ProjectSession {
+  const raw = localStorage.getItem(PROJECT_SESSION_KEY);
+  if (!raw) {
+    return makeUnsavedSession();
+  }
+
+  try {
+    return { ...makeUnsavedSession(), ...(JSON.parse(raw) as Partial<ProjectSession>) };
+  } catch {
+    return makeUnsavedSession();
   }
 }
 
@@ -535,17 +608,23 @@ export function loadStoredState(): AppState {
   }
 
   try {
-    return sanitizeImportedState(JSON.parse(rawState) as SerializableAppState);
+    return sanitizeImportedState(
+      JSON.parse(rawState) as SerializableAppState,
+      loadStoredSession()
+    );
   } catch {
     return createInitialState();
   }
 }
 
+const trackedReducer = withDirtyTracking(reducer);
+
 export function useAppStore() {
-  const [state, dispatch] = useReducer(reducer, undefined, loadStoredState);
+  const [state, dispatch] = useReducer(trackedReducer, undefined, loadStoredState);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeState(state)));
+    localStorage.setItem(PROJECT_SESSION_KEY, JSON.stringify(state.projectSession));
   }, [state]);
 
   const activePanel = useMemo(
@@ -640,6 +719,7 @@ export async function deleteStoredMedia(mediaIds: string[]) {
 
 export async function clearStoredAppData() {
   localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(PROJECT_SESSION_KEY);
   await clear();
 }
 

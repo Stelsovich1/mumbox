@@ -52,17 +52,23 @@ import {
   PROJECT_FILE_ACCEPT_TYPES_MOBILE,
   ProjectFileProgress,
   readProjectFile,
-  saveProjectBlob
+  saveProjectBlob,
+  toProjectFileName
 } from "../../../features/file-config";
 import { MediaLibraryDialog } from "../../../features/media-library";
 import { PanelTabs } from "../../../features/panel-tabs";
 import { useAudioEngine } from "../../../features/playback/model/useAudioEngine";
 import { ProjectFaqDialog } from "../../../features/project-faq";
+import { ProjectSaveDialog } from "../../../features/project-library";
 import {
   recordPanelSwitchPaint,
   setActivePanelId,
   setDiagnosticsSinks
 } from "../../../shared/lib/diagnostics";
+import {
+  pickProjectFileToSave,
+  supportsFilePickers
+} from "../../../shared/lib/fileSystemAccess";
 import { clearMediaCaches, purgeMediaCaches } from "../../../shared/lib/mediaCacheRegistry";
 import {
   buildDistributionMessage,
@@ -207,7 +213,7 @@ export function AppShell() {
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
   const [configImportWarningOpen, setConfigImportWarningOpen] = useState(false);
   const [largeProjectFile, setLargeProjectFile] = useState<File | null>(null);
-  const [preparedProjectBlob, setPreparedProjectBlob] = useState<Blob | null>(null);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [pendingDeletePanelId, setPendingDeletePanelId] = useState<string | null>(null);
   const [pendingClearCellId, setPendingClearCellId] = useState<string | null>(null);
@@ -640,6 +646,63 @@ export function AppShell() {
     projectInputRef.current?.click();
   };
 
+  const handleSaveProject = async (values: {
+    name: string;
+    description: string;
+    fileName: string;
+  }) => {
+    setSaveDialogOpen(false);
+    // The picker must be opened while the click's user activation is still live, so it comes before
+    // the (asynchronous) blob assembly, not after.
+    const handle = supportsFilePickers()
+      ? await pickProjectFileToSave(toProjectFileName(values.fileName))
+      : null;
+    if (supportsFilePickers() && !handle) {
+      return;
+    }
+
+    setImportLoading(true);
+    updateOperationProgress({
+      completed: 0,
+      total: Math.max(1, state.media.length),
+      label: "Сборка проекта"
+    });
+
+    try {
+      const blob = await makeProjectBlob(serializeState(state), {
+        meta: {
+          name: values.name || undefined,
+          description: values.description || undefined,
+          savedAt: new Date().toISOString()
+        },
+        onProgress: updateOperationProgress,
+        onHash: (hashes) => {
+          dispatch({ type: "media/setContentHash", hashes });
+        }
+      });
+      const result = await saveProjectBlob(blob, values.fileName, handle ?? undefined);
+      dispatch({
+        type: "project/saved",
+        fileName: result.fileName,
+        name: values.name,
+        description: values.description
+      });
+      setSaveMessage(
+        result.completed
+          ? `Проект сохранён: ${result.fileName}`
+          : `Файл проекта передан браузеру: ${result.fileName}`
+      );
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      setSaveMessage("Не удалось сохранить проект");
+    } finally {
+      setImportLoading(false);
+      updateOperationProgress(null);
+    }
+  };
+
   const assignDroppedMedia = useCallback(
     (mediaIds: string[], targetCellId: string) => {
       if (!activePanel || !state.editMode) {
@@ -856,24 +919,12 @@ export function AppShell() {
         >
           <MenuItem
             onClick={() => {
-              setImportLoading(true);
-              updateOperationProgress({ completed: 0, total: Math.max(1, state.media.length), label: "Сборка проекта" });
-              void makeProjectBlob(serializeState(state), updateOperationProgress)
-                .then((blob) => {
-                  setPreparedProjectBlob(blob);
-                })
-                .catch(() => {
-                  setSaveMessage("Не удалось экспортировать проект");
-                })
-                .finally(() => {
-                  setImportLoading(false);
-                  updateOperationProgress(null);
-                });
+              setSaveDialogOpen(true);
               closeFileMenu();
             }}
           >
             <SaveAltIcon fontSize="small" />
-            <Typography sx={{ ml: 1 }}>Экспорт проекта</Typography>
+            <Typography sx={{ ml: 1 }}>Сохранить проект</Typography>
           </MenuItem>
           <MenuItem
             onClick={() => {
@@ -1172,6 +1223,18 @@ export function AppShell() {
         }}
         onDeleteMedia={deleteMediaFromLibrary}
       />
+      <ProjectSaveDialog
+        open={saveDialogOpen}
+        defaultName={state.projectSession.name}
+        defaultDescription={state.projectSession.description}
+        defaultFileName={state.projectSession.fileName ?? "mumbox-project.mumbox"}
+        onCancel={() => {
+          setSaveDialogOpen(false);
+        }}
+        onSave={(values) => {
+          void handleSaveProject(values);
+        }}
+      />
       <ProjectFaqDialog
         open={faqOpen}
         onClose={() => {
@@ -1237,57 +1300,6 @@ export function AppShell() {
             }}
           >
             Импортировать
-          </Button>
-        </DialogActions>
-      </Dialog>
-      <Dialog
-        open={Boolean(preparedProjectBlob)}
-        onClose={() => {
-          setPreparedProjectBlob(null);
-        }}
-        aria-labelledby="prepared-project-dialog-title"
-      >
-        <DialogTitle id="prepared-project-dialog-title">Проект готов к сохранению</DialogTitle>
-        <DialogContent>
-          <Typography>
-            Файл проекта собран. После выбора места сохранения браузер завершит сохранение .mumbox.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => {
-              setPreparedProjectBlob(null);
-            }}
-          >
-            Отмена
-          </Button>
-          <Button
-            variant="contained"
-            onClick={() => {
-              const blob = preparedProjectBlob;
-              if (!blob) {
-                return;
-              }
-              setImportLoading(true);
-              void saveProjectBlob(blob)
-                .then((result) => {
-                  setPreparedProjectBlob(null);
-                  if (result.completed) {
-                    setSaveMessage(`Проект экспортирован: ${result.fileName}`);
-                  }
-                })
-                .catch((error: unknown) => {
-                  if (error instanceof DOMException && error.name === "AbortError") {
-                    return;
-                  }
-                  setSaveMessage("Не удалось сохранить проект");
-                })
-                .finally(() => {
-                  setImportLoading(false);
-                });
-            }}
-          >
-            Выбрать место
           </Button>
         </DialogActions>
       </Dialog>
