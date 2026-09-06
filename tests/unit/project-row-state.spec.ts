@@ -8,6 +8,7 @@ import {
   getActivationPlan,
   getDeleteCapability,
   getDeleteConfirmText,
+  getMergeConfirmText,
   getProjectRowLabel,
   getProjectRowStatus,
   isRowActivatable,
@@ -233,5 +234,34 @@ test.describe("getActivationPlan", () => {
     expect(
       getActivationPlan({ ...saved, projectId: "project-1", dirty: true }, makeRow()).kind
     ).toBe("unsavedProject");
+  });
+});
+
+test.describe("getMergeConfirmText", () => {
+  test("names a single project and says what will arrive", () => {
+    expect(getMergeConfirmText([makeRow({ projectName: "Выезд" })])).toBe(
+      'Объединить текущий проект с "Выезд"? Его панели будут добавлены к текущему.'
+    );
+  });
+
+  test("falls back to the file name when the project has none", () => {
+    expect(getMergeConfirmText([makeRow({ projectName: "" })])).toBe(
+      'Объединить текущий проект с "project.mumbox"? Его панели будут добавлены к текущему.'
+    );
+  });
+
+  test("counts several projects with correct Russian agreement", () => {
+    const rows = [makeRow(), makeRow({ id: "b" })];
+
+    expect(getMergeConfirmText(rows)).toBe(
+      "Объединить текущий проект с 2 проектами? Их панели будут добавлены к текущему."
+    );
+    expect(getMergeConfirmText([...rows, makeRow({ id: "c" }), makeRow({ id: "d" }), makeRow({ id: "e" })])).toBe(
+      "Объединить текущий проект с 5 проектами? Их панели будут добавлены к текущему."
+    );
+  });
+
+  test("says nothing with no rows", () => {
+    expect(getMergeConfirmText([])).toBe("");
   });
 });

@@ -30,6 +30,7 @@ import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSele
 import {
   getDeleteCapability,
   getDeleteConfirmText,
+  getMergeConfirmText,
   getProjectRowLabel,
   isRowDeleteOnly,
   ProjectRowProbe,
@@ -66,6 +67,17 @@ function formatSize(sizeBytes: number | null) {
     : `${String(Math.max(1, Math.round(sizeBytes / 1024)))} KB`;
 }
 
+/** The suite's centred confirmation placement, shared by both prompts in this dialog. */
+const CENTERED_CONFIRM_SX = {
+  top: "50% !important",
+  left: "50% !important",
+  right: "auto !important",
+  bottom: "auto !important",
+  transform: "translate(-50%, -50%) !important",
+  width: { xs: "calc(100vw - 24px)", sm: "auto" },
+  maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
+} as const;
+
 function formatCount(value: number | null) {
   return value === null ? "—" : String(value);
 }
@@ -82,6 +94,7 @@ export function ProjectLibraryDialog({
   onMerge
 }: ProjectLibraryDialogProps) {
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
+  const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
   const { selectedIds, toggle, setMany, clear } = useRowSelection();
 
   const { linked, unlinked } = useMemo(() => sortProjectRows(rows), [rows]);
@@ -99,6 +112,7 @@ export function ProjectLibraryDialog({
     pendingDeleteRows,
     getDeleteCapability(pendingDeleteRows)
   );
+  const mergeConfirmText = getMergeConfirmText(selectedRows);
 
   const renderRow = (row: ProjectLibraryRow) => {
     const status: ProjectRowStatus = getProjectRowStatus(row, probes.get(row.id));
@@ -386,7 +400,7 @@ export function ProjectLibraryDialog({
           startIcon={<MergeTypeIcon />}
           disabled={selectedRows.length === 0}
           onClick={() => {
-            onMerge(selectedRows);
+            setMergeConfirmOpen(true);
           }}
         >
           Объединить ({String(selectedRows.length)})
@@ -404,17 +418,36 @@ export function ProjectLibraryDialog({
         <Button onClick={onClose}>Закрыть</Button>
       </DialogActions>
       <Snackbar
+        open={mergeConfirmOpen && selectedRows.length > 0}
+        anchorOrigin={{ vertical: "top", horizontal: "center" }}
+        sx={CENTERED_CONFIRM_SX}
+        message={mergeConfirmText}
+        action={
+          <>
+            <Button
+              color="inherit"
+              onClick={() => {
+                setMergeConfirmOpen(false);
+                onMerge(selectedRows);
+              }}
+            >
+              Объединить
+            </Button>
+            <Button
+              color="inherit"
+              onClick={() => {
+                setMergeConfirmOpen(false);
+              }}
+            >
+              Отмена
+            </Button>
+          </>
+        }
+      />
+      <Snackbar
         open={pendingDeleteIds.length > 0}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}
-        sx={{
-          top: "50% !important",
-          left: "50% !important",
-          right: "auto !important",
-          bottom: "auto !important",
-          transform: "translate(-50%, -50%) !important",
-          width: { xs: "calc(100vw - 24px)", sm: "auto" },
-          maxWidth: { xs: "calc(100vw - 24px)", sm: 560 }
-        }}
+        sx={CENTERED_CONFIRM_SX}
         message={deleteConfirmText}
         action={
           <>

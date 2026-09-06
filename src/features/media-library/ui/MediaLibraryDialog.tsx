@@ -56,9 +56,13 @@ type MediaLibraryDialogProps = {
 // Same rule as the picker: each sortable track fits its own label plus the sort icon (label + 4px
 // gap + 16px icon + 12px padding at 13px JetBrains Mono), and the two text columns grow to a cap.
 // The colour track stays wide enough for the inline swatch popover it hosts.
+// Minimums fit each header plus its sort icon; the two text columns grow with the dialog up to a
+// cap that follows their content. The date track carries extra slack because the dialog renders the
+// label a few pixels wider than the side panel does, and at the exact width the icon had nowhere to
+// go.
 const MEDIA_LIBRARY_COLUMNS =
-  "44px minmax(160px, 360px) minmax(118px, 260px) 82px 118px minmax(200px, max-content) 52px";
-const MEDIA_LIBRARY_MIN_WIDTH = 774;
+  "44px minmax(180px, 460px) minmax(140px, 340px) 86px 132px minmax(200px, max-content) 52px";
+const MEDIA_LIBRARY_MIN_WIDTH = 834;
 
 export function MediaLibraryDialog({
   open,
@@ -357,7 +361,19 @@ export function MediaLibraryDialog({
                   ) : (
                     <Typography
                       title={item.alias || undefined}
-                      sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      sx={{
+                        minWidth: 0,
+                        // Wraps rather than truncating: unlike a file name, the alias is prose the
+                        // user wrote and the whole point of it is being read. Capped at two lines so
+                        // one verbose alias cannot set the height of the whole table.
+                        overflowWrap: "break-word",
+                        lineHeight: 1.25,
+                        py: 0.25,
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                        overflow: "hidden"
+                      }}
                     >
                       {item.alias || "..."}
                     </Typography>

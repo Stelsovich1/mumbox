@@ -19,6 +19,7 @@ export type ActivationPlan =
   | { kind: "unsavedProject"; buttons: readonly string[] };
 
 const PROJECT_FORMS = ["проект", "проекта", "проектов"] as const;
+const PROJECT_INSTRUMENTAL_FORMS = ["проектом", "проектами", "проектами"] as const;
 
 /**
  * `NotFoundError` means the file is gone. `NotAllowedError` and `SecurityError` mean the grant
@@ -129,6 +130,22 @@ export function getDeleteConfirmText(
   const removable = rows.filter((row) => canRemoveFromDisk(row.handle)).length;
 
   return `Удалить ${count}? С диска будет удалено: ${String(removable)}. Остальные исчезнут только из списка.`;
+}
+
+/**
+ * Merging is additive and easy to fire by accident from a multi-row selection, so it asks first and
+ * says plainly whose panels are about to arrive.
+ */
+export function getMergeConfirmText(rows: readonly ProjectLibraryRow[]) {
+  const first = rows[0];
+  if (!first) {
+    return "";
+  }
+  if (rows.length === 1) {
+    return `Объединить текущий проект с "${getProjectRowLabel(first)}"? Его панели будут добавлены к текущему.`;
+  }
+
+  return `Объединить текущий проект с ${formatCountRu(rows.length, PROJECT_INSTRUMENTAL_FORMS)}? Их панели будут добавлены к текущему.`;
 }
 
 export const ACTIVATION_BUTTON_OPEN = "Открыть";

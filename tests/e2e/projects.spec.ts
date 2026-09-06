@@ -306,6 +306,11 @@ test("merges the projects selected in the list", async ({ page }) => {
   await page.getByRole("menuitem", { name: "Проекты" }).click();
   await page.getByRole("checkbox", { name: "Выбрать проект Из списка" }).check();
   await page.getByRole("button", { name: "Объединить (1)" }).click();
+  // Merging is additive and easy to fire from a multi-row selection, so it confirms first.
+  await expect(
+    page.getByText('Объединить текущий проект с "Из списка"? Его панели будут добавлены к текущему.')
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Объединить", exact: true }).click();
 
   // The row has no handle in this browser, so the app asks for the file through the input.
   await page.getByTestId("project-file-input").setInputFiles(projectPath);
