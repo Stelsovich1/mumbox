@@ -98,7 +98,7 @@ const MEDIA_PICKER_ROW_HEIGHT = 52;
 // glyph. The table needs 616px against 412px of visible panel, so it scrolls horizontally by
 // design; the panel is resizable for when the table is the focus.
 const MEDIA_PICKER_COLUMNS =
-  "32px 36px minmax(120px, 320px) minmax(118px, 200px) 82px 118px 74px 36px";
+  "32px 36px minmax(120px, 400px) minmax(118px, 300px) 82px 118px 74px 36px";
 const MEDIA_PICKER_MIN_WIDTH = 616;
 
 type CellSettingsDrawerProps = {
@@ -842,10 +842,16 @@ export function CellSettingsDrawer({
                       title={item.alias || undefined}
                       sx={{
                         minWidth: 0,
-                        px: 1,
+                        px: 0.75,
+                        // Wraps, unlike the file name beside it: the alias is prose the user wrote.
+                        overflowWrap: "break-word",
+                        lineHeight: 1.2,
+                        // Two lines, then an ellipsis: the virtualized picker positions rows at a
+                        // fixed pitch, so an unbounded alias would make them overlap.
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
                         overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap"
                       }}
                     >
                       {item.alias || "..."}

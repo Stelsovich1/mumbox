@@ -372,3 +372,67 @@ test("keeps sorting, search and the colour filter composed", async ({ page }) =>
     "descending"
   );
 });
+
+const LONG_ALIAS = "Очень длинный псевдоним записи, который заведомо не помещается в одну строку";
+
+test("wraps a long alias but keeps the file name on one line", async ({ page }) => {
+  await openLibrary(
+    page,
+    buildState([{ id: "media-a", fileName: "очень-длинное-имя-файла-записи.wav", alias: LONG_ALIAS }], [[]])
+  );
+
+  const metrics = await page.getByRole("table", { name: "Медиатека" }).evaluate((table) => {
+    const row = Array.from(table.querySelectorAll('[role="row"]'))[1];
+    if (!row) {
+      throw new Error("no data row");
+    }
+    const fileCell = row.children[1];
+    const aliasCell = row.children[2];
+    if (!fileCell || !aliasCell) {
+      throw new Error("row is missing its cells");
+    }
+    const lineHeight = parseFloat(getComputedStyle(aliasCell).lineHeight) || 16;
+
+    return {
+      fileClipped: fileCell.scrollWidth > fileCell.clientWidth + 0.5,
+      fileLines: Math.round(fileCell.getBoundingClientRect().height / lineHeight),
+      aliasLines: Math.round(aliasCell.getBoundingClientRect().height / lineHeight)
+    };
+  });
+
+  // A file name is an identifier: truncating it beats reflowing the table. An alias is prose.
+  expect(metrics.fileClipped).toBe(true);
+  expect(metrics.fileLines).toBe(1);
+  expect(metrics.aliasLines).toBe(2);
+});
+
+test("keeps every picker row at one pitch even with wrapping aliases", async ({ page }) => {
+  // The picker positions rows absolutely at a fixed pitch above 80 items, so an alias that grows
+  // without bound would make them overlap.
+  const media = Array.from({ length: 100 }, (_, index) => ({
+    id: `media-${String(index)}`,
+    fileName: `track-${String(index)}.wav`,
+    alias: index % 2 === 0 ? `${LONG_ALIAS} ${String(index)}` : ""
+  }));
+  await page.addInitScript(
+    ({ key, value }) => {
+      localStorage.setItem(key, JSON.stringify(value));
+    },
+    { key: "mumbox:state:v1", value: buildState(media, [[]]) }
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+
+  const picker = page.getByRole("table", { name: "Выбор медиа" });
+  await expect(picker).toBeVisible();
+
+  const heights = await picker.evaluate((table) =>
+    Array.from(table.querySelectorAll('[role="button"][aria-label^="Выбрать"]'))
+      .slice(0, 12)
+      .map((row) => Math.round(row.getBoundingClientRect().height))
+  );
+
+  expect(heights.length).toBeGreaterThan(4);
+  expect(new Set(heights).size).toBe(1);
+});
