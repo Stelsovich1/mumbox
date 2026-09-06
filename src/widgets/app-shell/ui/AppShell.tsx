@@ -79,11 +79,7 @@ import {
   setActivePanelId,
   setDiagnosticsSinks
 } from "../../../shared/lib/diagnostics";
-import {
-  pickProjectFilesToOpen,
-  pickProjectFileToSave,
-  supportsFilePickers
-} from "../../../shared/lib/fileSystemAccess";
+import { pickProjectFilesToOpen, pickProjectFileToSave } from "../../../shared/lib/fileSystemAccess";
 import {
   FileHandleLike,
   requestHandlePermission
@@ -755,14 +751,17 @@ export function AppShell() {
    * Chromium row keeps its handle instead of being demoted to the unlinked section forever.
    */
   const relinkProjectRow = async (row: ProjectLibraryRow) => {
-    const handles = await pickProjectFilesToOpen(false);
-    const handle = handles?.[0];
-    if (!handle) {
-      if (supportsFilePickers()) {
-        return;
-      }
+    const picked = await pickProjectFilesToOpen(false);
+    if (picked.kind === "cancelled") {
+      return;
+    }
+    if (picked.kind === "unsupported") {
       setRelinkRowId(row.id);
       projectInputRef.current?.click();
+      return;
+    }
+    const handle = picked.value[0];
+    if (!handle) {
       return;
     }
 
@@ -788,14 +787,18 @@ export function AppShell() {
   };
 
   const addProjectsToLibrary = async () => {
-    const handles = await pickProjectFilesToOpen(true);
-    if (!handles) {
+    const picked = await pickProjectFilesToOpen(true);
+    // A dismissed picker means the user changed their mind — it must not open a second dialog.
+    if (picked.kind === "cancelled") {
+      return;
+    }
+    if (picked.kind === "unsupported") {
       // No pickers here: the file input is the only way in, and a plain import is what it does.
       projectInputRef.current?.click();
       return;
     }
 
-    for (const handle of handles) {
+    for (const handle of picked.value) {
       try {
         const file = await handle.getFile();
         const project = await readProjectFile(file);
@@ -968,13 +971,12 @@ export function AppShell() {
     setSaveDialogOpen(false);
     // The picker must be opened while the click's user activation is still live, so it comes before
     // the (asynchronous) blob assembly, not after.
-    const handle = supportsFilePickers()
-      ? await pickProjectFileToSave(toProjectFileName(values.fileName))
-      : null;
-    if (supportsFilePickers() && !handle) {
+    const picked = await pickProjectFileToSave(toProjectFileName(values.fileName));
+    if (picked.kind === "cancelled") {
       setPendingActivationRow(null);
       return;
     }
+    const handle = picked.kind === "picked" ? picked.value : undefined;
 
     setImportLoading(true);
     updateOperationProgress({
@@ -995,10 +997,10 @@ export function AppShell() {
           dispatch({ type: "media/setContentHash", hashes });
         }
       });
-      const result = await saveProjectBlob(blob, values.fileName, handle ?? undefined);
+      const result = await saveProjectBlob(blob, values.fileName, handle);
       const row = await rememberSavedProject(
         { ...values, fileName: result.fileName },
-        handle ?? undefined,
+        handle,
         blob.size
       );
       // Without the row id every later save mints another row, and the "already open" check can
@@ -1626,7 +1628,9 @@ export function AppShell() {
         open={saveDialogOpen}
         defaultName={state.projectSession.name}
         defaultDescription={state.projectSession.description}
-        defaultFileName={state.projectSession.fileName ?? "mumbox-project.mumbox"}
+        // Without the extension: it is appended on save, so there is nothing to type.
+        defaultFileName={(state.projectSession.fileName ?? "").replace(/\.mumbox$/i, "")}
+        takenProjectNames={projectLibrary.rows.map((row) => row.projectName).filter(Boolean)}
         onCancel={() => {
           setSaveDialogOpen(false);
         }}

@@ -46,7 +46,7 @@ import {
   SELECTED_ROW_HOVER_BACKGROUND
 } from "../../../shared/config/colorPalette";
 import { formatDuration } from "../../../shared/lib/duration";
-import { formatCreatedAt } from "../../../shared/lib/formatDate";
+import { formatCreatedAtShort } from "../../../shared/lib/formatDate";
 import {
   beginNativeMediaDrag,
   beginPointerMediaDrag,
@@ -68,12 +68,16 @@ import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
-// 40 + 260 + 96 + 74 + 116 + 60 + 36 + 42. Keeping the arithmetic exact is what stops the header
+// 32 + 36 + 130 + 70 + 54 + 76 + 36 + 36. Keeping the arithmetic exact is what stops the header
 // grid and the body grids drifting apart, which the column-alignment e2e pins. The date track is
-// fixed rather than content-derived for the same reason.
+// fixed rather than content-derived for the same reason, and sized for the SHORT date the picker
+// renders — the full "05.01.2024 09:07" needs 132px and spilled into the colour column.
+//
+// Eight columns still cannot fit a 460px panel (412px of table viewport), so a modest horizontal
+// scroll remains by design; the panel is resizable for when the table is the focus.
 const MEDIA_PICKER_COLUMNS =
-  "40px minmax(260px, 2fr) minmax(96px, 1fr) 74px 116px 60px 36px 42px";
-const MEDIA_PICKER_MIN_WIDTH = 724;
+  "32px 36px minmax(130px, 2fr) minmax(70px, 1fr) 54px 76px 36px 36px";
+const MEDIA_PICKER_MIN_WIDTH = 470;
 
 type CellSettingsDrawerProps = {
   open: boolean;
@@ -602,6 +606,7 @@ export function CellSettingsDrawer({
                   backgroundColor: "rgba(5, 7, 13, 0.92)"
                 }}
               >
+                <Box role="columnheader" />
                 <Box role="columnheader" sx={{ display: "grid", placeItems: "center" }}>
                   <SelectAllCheckbox
                     size="small"
@@ -632,7 +637,6 @@ export function CellSettingsDrawer({
                     }}
                   />
                 ))}
-                  <Box role="columnheader" />
                   <Box role="columnheader" />
               </Box>
               <Box
@@ -734,6 +738,53 @@ export function CellSettingsDrawer({
                     }}
                   >
                     <Box sx={{ display: "grid", placeItems: "center" }}>
+                      <Tooltip title="Перетащить на ячейку">
+                        <Box
+                          role="button"
+                          tabIndex={-1}
+                          data-media-drag-handle
+                          aria-label={`Перетащить ${item.fileName}`}
+                          onClick={(event) => {
+                            // Without this the synthesised click after a touch drag bubbles to the
+                            // row and assigns the media to the selected cell.
+                            event.stopPropagation();
+                          }}
+                          onPointerDown={(event) => {
+                            // Every pointer type, not just touch. Gating this on `pointerType` made
+                            // the handle inert under devtools device emulation and on hybrid
+                            // laptops, and the row body cannot be the touch source — there it
+                            // scrolls the list.
+                            event.preventDefault();
+                            beginPointerMediaDrag({
+                              mediaIds: resolveDraggedMediaIds({
+                                draggedMediaId: item.id,
+                                selectedMediaIds: selectedIds,
+                                displayOrder: sortedIds
+                              }),
+                              pointerId: event.pointerId,
+                              clientX: event.clientX,
+                              clientY: event.clientY,
+                              sourceElement: event.currentTarget
+                            });
+                          }}
+                          sx={{
+                            display: "grid",
+                            placeItems: "center",
+                            width: 30,
+                            height: 30,
+                            borderRadius: 1,
+                            color: "text.secondary",
+                            cursor: "grab",
+                            // Scoped to the handle: `touch-action: none` on the row itself would
+                            // kill both the vertical list scroll and the horizontal table scroll.
+                            touchAction: "none"
+                          }}
+                        >
+                          <DragIndicatorIcon fontSize="small" />
+                        </Box>
+                      </Tooltip>
+                    </Box>
+                    <Box sx={{ display: "grid", placeItems: "center" }}>
                       <RowSelectCheckbox
                         size="small"
                         label={`Отметить ${item.fileName}`}
@@ -771,7 +822,7 @@ export function CellSettingsDrawer({
                       {formatDuration(item.durationMs)}
                     </Typography>
                     <Typography sx={{ px: 1, whiteSpace: "nowrap" }}>
-                      {formatCreatedAt(item.createdAt)}
+                      {formatCreatedAtShort(item.createdAt)}
                     </Typography>
                     <Box sx={{ px: 1, display: "grid", placeItems: "center" }}>
                       <Box
@@ -784,52 +835,6 @@ export function CellSettingsDrawer({
                           border: "1px solid rgba(247, 251, 255, 0.5)"
                         }}
                       />
-                    </Box>
-                    <Box sx={{ display: "grid", placeItems: "center" }}>
-                      <Tooltip title="Перетащить на ячейку">
-                        <Box
-                          role="button"
-                          tabIndex={-1}
-                          data-media-drag-handle
-                          aria-label={`Перетащить ${item.fileName}`}
-                          onClick={(event) => {
-                            // Without this the synthesised click after a touch drag bubbles to the
-                            // row and assigns the media to the selected cell.
-                            event.stopPropagation();
-                          }}
-                          onPointerDown={(event) => {
-                            if (event.pointerType === "mouse") {
-                              return;
-                            }
-                            event.preventDefault();
-                            beginPointerMediaDrag({
-                              mediaIds: resolveDraggedMediaIds({
-                                draggedMediaId: item.id,
-                                selectedMediaIds: selectedIds,
-                                displayOrder: sortedIds
-                              }),
-                              pointerId: event.pointerId,
-                              clientX: event.clientX,
-                              clientY: event.clientY,
-                              sourceElement: event.currentTarget
-                            });
-                          }}
-                          sx={{
-                            display: "grid",
-                            placeItems: "center",
-                            width: 30,
-                            height: 30,
-                            borderRadius: 1,
-                            color: "text.secondary",
-                            cursor: "grab",
-                            // Scoped to the handle: `touch-action: none` on the row itself would
-                            // kill both the vertical list scroll and the horizontal table scroll.
-                            touchAction: "none"
-                          }}
-                        >
-                          <DragIndicatorIcon fontSize="small" />
-                        </Box>
-                      </Tooltip>
                     </Box>
                     <Box sx={{ display: "grid", placeItems: "center", justifySelf: "stretch" }}>
                       <Tooltip title="Удалить из медиатеки">

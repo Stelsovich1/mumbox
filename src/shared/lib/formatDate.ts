@@ -27,4 +27,21 @@ export function formatCreatedAt(value: string | undefined | null) {
   return `${day}.${month}.${year} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/**
+ * `dd.MM.yy`, for the cell settings panel: a resizable side column cannot afford the 16 characters
+ * the full format needs, and a date without a time is enough to tell two imports apart there.
+ */
+export function formatCreatedAtShort(value: string | undefined | null) {
+  if (!value) {
+    return MISSING_DATE_LABEL;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return MISSING_DATE_LABEL;
+  }
+
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${pad(date.getFullYear() % 100)}`;
+}
+
 export { MISSING_DATE_LABEL };

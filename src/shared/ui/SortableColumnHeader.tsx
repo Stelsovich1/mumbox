@@ -38,6 +38,7 @@ export function SortableColumnHeader<TKey extends string>({
           alignItems: "center",
           gap: 0.5,
           width: "100%",
+          minWidth: 0,
           px: 1,
           py: 1,
           border: 0,
@@ -53,7 +54,18 @@ export function SortableColumnHeader<TKey extends string>({
           "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main" }
         }}
       >
-        <Box component="span" sx={{ minWidth: 0 }}>
+        {/* Clipped inside its own track: a header must never spill into the next column, and
+            breaking it mid-word is worse than an ellipsis in a narrow side panel. */}
+        <Box
+          component="span"
+          title={title}
+          sx={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap"
+          }}
+        >
           {title}
         </Box>
         {ariaSort === "ascending" ? (

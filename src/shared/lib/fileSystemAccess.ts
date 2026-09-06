@@ -46,6 +46,16 @@ function getPickerWindow(): FilePickerWindow {
   return window as unknown as FilePickerWindow;
 }
 
+/**
+ * Three outcomes, kept apart on purpose. Collapsing "cancelled" and "unsupported" into one `null`
+ * made a dismissed picker fall through to the file-input fallback, so cancelling opened a second
+ * dialog instead of doing nothing.
+ */
+export type PickerResult<TValue> =
+  | { kind: "unsupported" }
+  | { kind: "cancelled" }
+  | { kind: "picked"; value: TValue };
+
 export function supportsFilePickers() {
   const pickerWindow = getPickerWindow();
 
@@ -76,30 +86,39 @@ export function canRemoveFromDisk(handle: FileHandleLike | undefined) {
   return typeof handle?.remove === "function";
 }
 
-export async function pickProjectFilesToOpen(multiple: boolean) {
+export async function pickProjectFilesToOpen(
+  multiple: boolean
+): Promise<PickerResult<FileHandleLike[]>> {
   const picker = getPickerWindow().showOpenFilePicker;
   if (!picker) {
-    return null;
+    return { kind: "unsupported" };
   }
 
   try {
-    return await picker({ multiple, excludeAcceptAllOption: false, types: PROJECT_PICKER_TYPES });
+    const value = await picker({
+      multiple,
+      excludeAcceptAllOption: false,
+      types: PROJECT_PICKER_TYPES
+    });
+
+    return value.length > 0 ? { kind: "picked", value } : { kind: "cancelled" };
   } catch {
-    // The user dismissed the picker.
-    return null;
+    return { kind: "cancelled" };
   }
 }
 
-export async function pickProjectFileToSave(suggestedName: string) {
+export async function pickProjectFileToSave(
+  suggestedName: string
+): Promise<PickerResult<FileHandleLike>> {
   const picker = getPickerWindow().showSaveFilePicker;
   if (!picker) {
-    return null;
+    return { kind: "unsupported" };
   }
 
   try {
-    return await picker({ suggestedName, types: PROJECT_PICKER_TYPES });
+    return { kind: "picked", value: await picker({ suggestedName, types: PROJECT_PICKER_TYPES }) };
   } catch {
-    return null;
+    return { kind: "cancelled" };
   }
 }
 

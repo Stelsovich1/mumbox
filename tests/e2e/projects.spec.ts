@@ -388,3 +388,65 @@ test("a second merge builds on the result of the first", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Panel 1_2" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Panel 1_3" })).toBeVisible();
 });
+
+test("dismissing the add-projects picker does not open a second dialog", async ({ page }) => {
+  // The picker used to report "cancelled" and "unsupported" as the same null, so cancelling fell
+  // through to the file-input fallback and a second, different dialog appeared.
+  await installFilePickerMock(page, { mode: "handles", cancel: true });
+  let fileChoosers = 0;
+  page.on("filechooser", () => {
+    fileChoosers += 1;
+  });
+
+  await seedProjectRows(page, TWO_ROWS);
+  await openProjects(page);
+  await page.getByRole("button", { name: "Добавить проекты в список" }).click();
+
+  await expect.poll(async () => (await readPickerCalls(page))?.open).toBe(1);
+  await page.waitForTimeout(300);
+  expect(fileChoosers).toBe(0);
+  await expect(page.getByRole("table", { name: "Проекты" })).toBeVisible();
+});
+
+test("the project name fills the file name until the file name is edited", async ({ page }) => {
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Сохранить проект" }).click();
+
+  const nameField = page.getByLabel("Имя проекта");
+  const fileField = page.getByLabel("Имя файла проекта");
+
+  // A fresh project opens on a default name, and the file name follows it.
+  await expect(nameField).toHaveValue("Новый проект");
+  await expect(fileField).toHaveValue("Новый проект");
+
+  await nameField.fill("Концерт");
+  await expect(fileField).toHaveValue("Концерт");
+
+  // Once the file name is edited by hand the link is broken, in that direction only.
+  await fileField.fill("concert-2026");
+  await nameField.fill("Концерт в парке");
+  await expect(fileField).toHaveValue("concert-2026");
+  await expect(nameField).toHaveValue("Концерт в парке");
+
+  // The extension is never typed: it is appended on save.
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("concert-2026.mumbox");
+});
+
+test("a default project name avoids one that is already taken", async ({ page }) => {
+  await seedProjectRows(page, [
+    { id: "project-taken", fileName: "taken.mumbox", projectName: "Новый проект" }
+  ]);
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Сохранить проект" }).click();
+
+  await expect(page.getByLabel("Имя проекта")).toHaveValue("Новый проект_2");
+});
