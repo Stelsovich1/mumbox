@@ -1,10 +1,16 @@
 import { Box, Typography } from "@mui/material";
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { GridSize } from "../../../entities/panel/model/types";
 import { getReadableTextColor } from "../../../shared/lib/contrast";
+import {
+  getNativeMediaDragIds,
+  MediaDragEvent,
+  subscribeMediaDrag
+} from "../../../shared/lib/mediaDragSession";
+import { decodeMediaDragPayload, MEDIA_DRAG_MIME } from "../../../shared/lib/mediaDragTransfer";
 
 type FileSystemEntryLike = {
   isFile: boolean;
@@ -34,6 +40,8 @@ type WorkspaceGridProps = {
   onGateEnd: (cell: GridCell) => void;
   onCellMove: (fromCellId: string, toCellId: string) => void;
   onAudioDrop?: (files: File[]) => void;
+  /** Media dragged in from the picker. The target is where the fill starts, not where it ends. */
+  onMediaDrop?: (mediaIds: string[], targetCellId: string) => void;
 };
 
 type PlaybackIndicatorProps = {
@@ -179,6 +187,7 @@ type CellController = {
   onGateStart: (cell: GridCell) => void;
   onGateEnd: (cell: GridCell) => void;
   onCellMove: (fromCellId: string, toCellId: string) => void;
+  onMediaDrop: (mediaIds: string[], targetCellId: string) => void;
   setDraggingCellId: (next: string | null) => void;
   setDragOverCellId: (next: string | null | ((current: string | null) => string | null)) => void;
   suppressNextClick: () => void;
@@ -269,6 +278,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
         data-fade-in-ms={cell.fadeInEnabled ? cell.fadeInMs : ""}
         data-fade-out-ms={cell.fadeOutEnabled ? cell.fadeOutMs : ""}
         data-selected={isSelected ? "true" : "false"}
+        data-drop-target={activeDragOverCellId === cell.id ? "true" : "false"}
         draggable={editMode && Boolean(mediaAsset)}
         aria-label={
           label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
@@ -291,6 +301,14 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           if (!editMode) {
             return;
           }
+          if (getNativeMediaDragIds()) {
+            // An occupied cell still accepts the drop: the media slides forward to the next free
+            // cell rather than overwriting a configured one.
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            controller.current.setDragOverCellId(cell.id);
+            return;
+          }
           event.preventDefault();
           event.dataTransfer.dropEffect = "move";
           controller.current.setDragOverCellId(cell.id);
@@ -302,8 +320,19 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           event.preventDefault();
           controller.current.setDraggingCellId(null);
           controller.current.setDragOverCellId(null);
+
+          const mediaIds =
+            decodeMediaDragPayload(event.dataTransfer.getData(MEDIA_DRAG_MIME)) ??
+            getNativeMediaDragIds();
+          if (mediaIds) {
+            controller.current.suppressNextClick();
+            controller.current.onMediaDrop(mediaIds, cell.id);
+            return;
+          }
+
+          // Only our own cell ids may move a cell; a foreign `text/plain` drag must not.
           const fromCellId = event.dataTransfer.getData("text/plain");
-          if (fromCellId) {
+          if (/^cell-\d+$/.test(fromCellId)) {
             controller.current.suppressNextClick();
             controller.current.onCellMove(fromCellId, cell.id);
           }
@@ -601,7 +630,8 @@ export function WorkspaceGrid({
   onGateStart,
   onGateEnd,
   onCellMove,
-  onAudioDrop
+  onAudioDrop,
+  onMediaDrop
 }: WorkspaceGridProps) {
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
   const [draggingCellId, setDraggingCellId] = useState<string | null>(null);
@@ -631,6 +661,7 @@ export function WorkspaceGrid({
     onGateStart,
     onGateEnd,
     onCellMove,
+    onMediaDrop: () => undefined,
     setDraggingCellId,
     setDragOverCellId,
     suppressNextClick: () => undefined,
@@ -704,6 +735,49 @@ export function WorkspaceGrid({
     }
   };
 
+  const handleMediaDrop = (mediaIds: string[], targetCellId: string) => {
+    onMediaDrop?.(mediaIds, targetCellId);
+  };
+
+  // The touch path: the session publishes coordinates, the grid owns the hit-test because only it
+  // knows which cells exist. Kept in a ref refreshed every render so the subscription never
+  // re-registers, the same idiom as `controllerRef`.
+  const mediaDragRef = useRef({ editMode, onMediaDrop, setDragOverCellId });
+  mediaDragRef.current = { editMode, onMediaDrop, setDragOverCellId };
+
+  useEffect(
+    () =>
+      subscribeMediaDrag((event: MediaDragEvent) => {
+        const { editMode: dragEditMode, onMediaDrop: dropHandler } = mediaDragRef.current;
+        if (event.kind === "cancel") {
+          mediaDragRef.current.setDragOverCellId(null);
+          return;
+        }
+        if (!dragEditMode) {
+          return;
+        }
+
+        const targetCellId = document
+          .elementFromPoint(event.clientX, event.clientY)
+          ?.closest<HTMLElement>("[data-cell-id]")?.dataset.cellId;
+
+        if (event.kind === "move") {
+          // Guarded because `activeDragOverCellId` is a shared prop: writing it re-renders every
+          // cell in the panel, and a swipe crosses a dozen of them.
+          mediaDragRef.current.setDragOverCellId((current) =>
+            current === (targetCellId ?? null) ? current : targetCellId ?? null
+          );
+          return;
+        }
+
+        mediaDragRef.current.setDragOverCellId(null);
+        if (targetCellId) {
+          dropHandler?.(event.mediaIds, targetCellId);
+        }
+      }),
+    []
+  );
+
   // Refreshed after every handler above is defined, so the cells always call the current ones
   // while the ref itself stays identical.
   controllerRef.current = {
@@ -712,6 +786,7 @@ export function WorkspaceGrid({
     onGateStart,
     onGateEnd,
     onCellMove,
+    onMediaDrop: handleMediaDrop,
     setDraggingCellId,
     setDragOverCellId,
     suppressNextClick,
@@ -758,6 +833,10 @@ export function WorkspaceGrid({
 
   const handleGridDrop = async (event: React.DragEvent) => {
     if (!editMode || !onAudioDrop) {
+      return;
+    }
+    // A media drag belongs to the cells, never to the file importer.
+    if (getNativeMediaDragIds() || event.dataTransfer.types.includes(MEDIA_DRAG_MIME)) {
       return;
     }
     // Check if this is a cell drag (has cell data)
