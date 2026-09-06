@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
 import { installFilePickerMock, readPickerCalls } from "../support/fileSystemAccessMock";
 import { readProjectRowIds, seedProjectRows } from "../support/seedProjects";
 import type { SeededProjectRow } from "../support/seedProjects";
@@ -14,6 +17,51 @@ import type { SeededProjectRow } from "../support/seedProjects";
  */
 
 test.use({ timezoneId: "UTC" });
+
+const SHARED_AUDIO = {
+  name: "shared.wav",
+  mimeType: "audio/wav",
+  buffer: Buffer.from("RIFF....WAVEfmt ")
+};
+
+/** The picker path needs a working Audio double, same as the rest of the suite. */
+async function installAudioMock(page: Page) {
+  await page.addInitScript(() => {
+    class MockAudio extends EventTarget {
+      duration = 10;
+      currentTime = 0;
+      paused = true;
+      volume = 1;
+      loop = false;
+      preload = "";
+
+      constructor() {
+        super();
+        window.setTimeout(() => {
+          this.dispatchEvent(new Event("loadedmetadata"));
+        }, 0);
+      }
+
+      play() {
+        return Promise.resolve();
+      }
+
+      pause() {
+        // no-op
+      }
+
+      load() {
+        // no-op
+      }
+
+      removeAttribute() {
+        // no-op
+      }
+    }
+
+    Object.defineProperty(window, "Audio", { value: MockAudio });
+  });
+}
 
 const TWO_ROWS: SeededProjectRow[] = [
   {
@@ -168,4 +216,98 @@ test("the picker mock reports how many times a permission was requested", async 
   await page.goto("/");
 
   expect(await readPickerCalls(page)).toMatchObject({ requestPermission: 0, save: 0, open: 0 });
+});
+
+async function saveProjectAs(page: Page, projectName: string, fileName: string) {
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Сохранить проект" }).click();
+  await page.getByLabel("Имя проекта").fill(projectName);
+  await page.getByLabel("Имя файла проекта").fill(fileName);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Сохранить", exact: true }).click();
+
+  return downloadPromise;
+}
+
+test("merging appends panels and skips audio that is already present", async ({ page }) => {
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  // A project with one panel holding one audio file.
+  await page.getByTestId("audio-file-input").setInputFiles(SHARED_AUDIO);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать shared.wav" }).click();
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+
+  const download = await saveProjectAs(page, "Первый", "first");
+  const projectPath = join(tmpdir(), `merge-source-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  // Merge that same project back into itself: the panel is added, the audio is not duplicated.
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Объединить с проектом" }).click();
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+
+  await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
+  await expect(page.getByText(/дубликатов аудио пропущено: 1/)).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1_2" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Медиатека" }).click();
+  await expect(page.getByRole("checkbox", { name: "Выбрать запись shared.wav" })).toHaveCount(1);
+  await page.getByRole("button", { name: "Закрыть" }).click();
+
+  // The merged panel keeps its cell, pointing at the deduplicated media.
+  await page.getByRole("tab", { name: "Panel 1_2" }).click();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Ячейка 1 shared.wav"
+  );
+});
+
+test("merging keeps the current project's global settings", async ({ page }) => {
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const download = await saveProjectAs(page, "Донор", "donor");
+  const projectPath = join(tmpdir(), `merge-globals-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  // Change the master volume away from the value stored in the file.
+  await page.getByRole("button", { name: "Отключить звук" }).click();
+  await expect(page.getByRole("button", { name: "Включить звук" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Объединить с проектом" }).click();
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+  await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
+
+  // The incoming project was saved unmuted; the current setting must win.
+  await expect(page.getByRole("button", { name: "Включить звук" })).toBeVisible();
+});
+
+test("merges the projects selected in the list", async ({ page }) => {
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const download = await saveProjectAs(page, "Из списка", "from-list");
+  const projectPath = join(tmpdir(), `merge-row-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Проекты" }).click();
+  await page.getByRole("checkbox", { name: "Выбрать проект Из списка" }).check();
+  await page.getByRole("button", { name: "Объединить (1)" }).click();
+
+  // The row has no handle in this browser, so the app asks for the file through the input.
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+  await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Panel 1_2" })).toBeVisible();
 });

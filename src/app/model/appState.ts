@@ -135,7 +135,8 @@ export type AppAction =
       description: string;
     }
   | { type: "state/reset" }
-  | { type: "state/import"; state: SerializableAppState; session?: ProjectSession };
+  | { type: "state/import"; state: SerializableAppState; session?: ProjectSession }
+  | { type: "state/merge"; state: SerializableAppState };
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -583,6 +584,11 @@ function reducer(state: AppState, action: AppAction): AppState {
       return createInitialState();
     case "state/import":
       return sanitizeImportedState(action.state, action.session);
+    case "state/merge":
+      // The merged state was already built by `mergeProjectState`, which regenerated the incoming
+      // panel ids; the sanitizer is idempotent over them. The session stays, and dirty tracking
+      // marks the project changed.
+      return sanitizeImportedState(action.state, state.projectSession);
     default:
       return state;
   }
@@ -689,6 +695,44 @@ function remapImportedState(
       ])
     )
   };
+}
+
+/**
+ * Writes only the media the merge decided to keep, and rewrites incoming ids to the ids the merged
+ * project uses. Reused assets are never written again — that is the whole point of deduplicating.
+ */
+export async function writeMergedProjectMedia(
+  incoming: SerializableAppState,
+  blobs: { id: string; blob: Blob }[],
+  mediaIdMap: Map<string, string>,
+  keptIncomingIds: readonly string[],
+  onProgress?: (progress: MediaStorageProgress) => void
+) {
+  const kept = new Set(keptIncomingIds);
+  const idByImportedId = new Map<string, string>();
+  for (const [incomingId, targetId] of mediaIdMap) {
+    idByImportedId.set(incomingId, kept.has(incomingId) ? createId("media") : targetId);
+  }
+
+  const toWrite = blobs.filter((item) => kept.has(item.id));
+  for (const [index, item] of toWrite.entries()) {
+    const nextId = idByImportedId.get(item.id);
+    if (nextId) {
+      await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+    }
+    onProgress?.({
+      completed: index + 1,
+      total: toWrite.length,
+      label: `Запись аудио ${String(index + 1)} из ${String(toWrite.length)}`
+    });
+  }
+
+  const remapped = remapImportedState(incoming, idByImportedId);
+  const addedMedia = remapped.media.filter((media) =>
+    toWrite.some((item) => idByImportedId.get(item.id) === media.id)
+  );
+
+  return { state: remapped, addedMedia, idByImportedId };
 }
 
 export async function writeImportedProjectMedia(
