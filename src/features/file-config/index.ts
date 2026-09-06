@@ -1,6 +1,7 @@
 import { getMediaBlob } from "../../app/model/appState";
 import { SerializableAppState } from "../../app/model/appState";
 import { computeContentHash } from "../../shared/lib/contentHash";
+import { getCrc32 } from "../../shared/lib/crc32";
 import { FileHandleLike, writeBlobToHandle } from "../../shared/lib/fileSystemAccess";
 import { normalizeProjectMeta, ProjectMeta, toProjectFileName } from "./model/projectMeta";
 
@@ -62,28 +63,6 @@ export type ProjectFileProgress = {
   total: number;
   label: string;
 };
-
-function makeCrc32Table() {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < table.length; index += 1) {
-    let value = index;
-    for (let bit = 0; bit < 8; bit += 1) {
-      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-    }
-    table[index] = value >>> 0;
-  }
-  return table;
-}
-
-const crc32Table = makeCrc32Table();
-
-function getCrc32(bytes: Uint8Array) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc = (crc32Table[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
 
 function writeUint16(view: DataView, offset: number, value: number) {
   view.setUint16(offset, value, true);
