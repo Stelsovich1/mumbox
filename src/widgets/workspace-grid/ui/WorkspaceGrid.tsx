@@ -220,6 +220,19 @@ type WorkspaceGridCellProps = {
 };
 
 /**
+ * Press feedback is applied to the DOM node directly rather than through state. Routing it
+ * through React would put a reconciliation of the whole panel between the finger and the first
+ * visible pixel, which is exactly the latency the feedback exists to hide.
+ */
+function setPressed(element: HTMLElement, pressed: boolean) {
+  if (pressed) {
+    element.dataset.pressed = "true";
+    return;
+  }
+  delete element.dataset.pressed;
+}
+
+/**
  * Memoised on purpose, and it is not a micro-optimisation.
  *
  * Every warm-up state change re-rendered the whole grid. Measured on a 12x12 panel with 40 media:
@@ -284,6 +297,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
         }
         onDragStart={(event) => {
+          setPressed(event.currentTarget, false);
           if (!editMode || !mediaAsset) {
             event.preventDefault();
             return;
@@ -352,6 +366,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           event.preventDefault();
         }}
         onPointerDown={(event) => {
+          setPressed(event.currentTarget, true);
           if (editMode) {
             if (event.pointerType !== "mouse" && mediaAsset) {
               event.preventDefault();
@@ -423,6 +438,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           controller.current.finishTouchDrag(wasActive);
         }}
         onPointerUp={(event) => {
+          setPressed(event.currentTarget, false);
           event.currentTarget.blur();
           if (editMode && controller.current.touchDragRef.current) {
             const wasActive = controller.current.touchDragRef.current.active;
@@ -444,7 +460,8 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
             controller.current.onGateEnd(cell);
           }
         }}
-        onPointerCancel={() => {
+        onPointerCancel={(event) => {
+          setPressed(event.currentTarget, false);
           controller.current.pointerActivatedCellIdRef.current = null;
           if (editMode && controller.current.touchDragRef.current) {
             controller.current.suppressNextClick();
@@ -456,6 +473,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           }
         }}
         onPointerLeave={(event) => {
+          setPressed(event.currentTarget, false);
           event.currentTarget.blur();
           if (!editMode && cell.playbackMode === "gate") {
             controller.current.onGateEnd(cell);
@@ -516,9 +534,26 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
               borderColor: "primary.main"
             }
           },
-          "&:hover": {
-            transform: "translateY(-1px)",
-            borderColor: "primary.main"
+          // Hover is a fine-pointer affordance. Unguarded it also matched touch: a tap makes a
+          // mobile browser emulate hover and then hold it until the next tap elsewhere, so every
+          // triggered pad stayed lit and read as "selected". The old coarse override reset only
+          // `transform`, which left the primary border on.
+          "@media (hover: hover) and (pointer: fine)": {
+            "&:hover": {
+              transform: "translateY(-1px)",
+              borderColor: "primary.main"
+            }
+          },
+          // Press feedback must be immediate. The first visible confirmation used to be
+          // `data-playing`, which arrives after a React render and then fades in over 160 ms —
+          // the sound was on time and the pad still read as late. `data-pressed` is written
+          // straight to the DOM in the pointer handler (no state, no render) and skips the
+          // transition on the way in while keeping it on the way out.
+          "&[data-pressed='true']": {
+            transition: "none",
+            transform: "scale(0.97)",
+            borderColor: "primary.main",
+            filter: "brightness(1.24) saturate(1.28)"
           },
           '&[draggable="true"]:active': {
             cursor: "grabbing"
@@ -530,10 +565,10 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           },
           "@media (hover: none), (pointer: coarse)": {
             WebkitTapHighlightColor: "transparent",
-            touchAction: editMode ? "none" : "manipulation",
-            "&:hover": {
-              transform: "none"
-            },
+            // `manipulation` still permits panning, so the browser keeps the right to reclaim
+            // the gesture and delays committing to the tap. Nothing inside the grid scrolls —
+            // `#root` is `overflow: hidden` — so there is no pan to preserve.
+            touchAction: "none",
             "&:focus, &:focus-visible": {
               outline: "none"
             }
