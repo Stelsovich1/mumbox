@@ -20,6 +20,10 @@ import {
   buildAffectedCellsNote,
   buildMediaDeletionHeadline
 } from "../../../entities/media/model/mediaDeletion";
+import {
+  MEDIA_COMPARATORS,
+  MediaSortKey
+} from "../../../entities/media/model/mediaSort";
 import { MediaAsset } from "../../../entities/media/model/types";
 import {
   CELL_COLORS,
@@ -29,10 +33,12 @@ import {
 import { formatDuration } from "../../../shared/lib/duration";
 import { formatCreatedAt } from "../../../shared/lib/formatDate";
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
+import { cycleSortState, SortState, sortRows } from "../../../shared/lib/tableSort";
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
+import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
 type MediaLibraryDialogProps = {
   open: boolean;
@@ -64,6 +70,7 @@ export function MediaLibraryDialog({
   const [draftAlias, setDraftAlias] = useState("");
   const [colorEditorId, setColorEditorId] = useState<string | null>(null);
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
+  const [sort, setSort] = useState<SortState<MediaSortKey>>(null);
   const lastAliasTapRef = useRef<{ id: string; time: number } | null>(null);
   const { selectedIds, toggle, setMany, clear, prune } = useRowSelection();
 
@@ -74,6 +81,10 @@ export function MediaLibraryDialog({
         return haystack.includes(query.trim().toLowerCase()) && (!colorFilter || item.color === colorFilter);
       }),
     [colorFilter, media, query]
+  );
+  const sortedMedia = useMemo(
+    () => sortRows(filteredMedia, sort, MEDIA_COMPARATORS),
+    [filteredMedia, sort]
   );
   const filteredIds = useMemo(() => filteredMedia.map((item) => item.id), [filteredMedia]);
   const selectAllState = getSelectAllState(selectedIds, filteredIds);
@@ -230,13 +241,28 @@ export function MediaLibraryDialog({
                   }}
                 />
               </Box>
-              {["Файл", "Псевдоним", "Время", "Дата добавления", "Цвет", ""].map((title) => (
-                <Typography key={title} role="columnheader" sx={{ px: 1, fontWeight: 700 }}>
-                  {title}
-                </Typography>
+              {(
+                [
+                  { key: "fileName", title: "Файл" },
+                  { key: "alias", title: "Псевдоним" },
+                  { key: "durationMs", title: "Время" },
+                  { key: "createdAt", title: "Дата добавления" },
+                  { key: "color", title: "Цвет" }
+                ] as const
+              ).map((column) => (
+                <SortableColumnHeader
+                  key={column.key}
+                  columnKey={column.key}
+                  title={column.title}
+                  sort={sort}
+                  onSort={(key) => {
+                    setSort((current) => cycleSortState(current, key));
+                  }}
+                />
               ))}
+              <Box role="columnheader" />
             </Box>
-            {filteredMedia.map((item) => (
+            {sortedMedia.map((item) => (
               <Box
                 role="row"
                 key={item.id}
@@ -387,7 +413,7 @@ export function MediaLibraryDialog({
                 </Box>
               </Box>
             ))}
-            {filteredMedia.length === 0 ? (
+            {sortedMedia.length === 0 ? (
               <Box
                 role="row"
                 sx={{

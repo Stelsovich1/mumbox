@@ -263,3 +263,109 @@ test("keeps the media library columns aligned", async ({ page }) => {
   expect(templates[0]).toBe(templates[1]);
   expect(templates[0]?.split(" ")).toHaveLength(7);
 });
+
+async function fileNameOrder(page: Page) {
+  return page.getByRole("table", { name: "Медиатека" }).evaluate((table) => {
+    const rows = Array.from(table.children).slice(1);
+
+    return rows
+      .map((row) => row.children[1]?.textContent ?? "")
+      .filter((name) => name !== "Нет аудио");
+  });
+}
+
+test("cycles a column through three sort states", async ({ page }) => {
+  await openLibrary(page, buildState(DATED_MEDIA, [[]]));
+
+  const header = page.getByRole("columnheader", { name: "Дата добавления" });
+  const button = page.getByRole("button", { name: "Дата добавления" });
+
+  await expect(header).toHaveAttribute("aria-sort", "none");
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "alpha.wav",
+    "beta.wav",
+    "gamma.wav"
+  ]);
+
+  await button.click();
+  await expect(header).toHaveAttribute("aria-sort", "ascending");
+  // gamma.wav has no date at all, so it sorts last ascending.
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "beta.wav",
+    "alpha.wav",
+    "gamma.wav"
+  ]);
+
+  await button.click();
+  await expect(header).toHaveAttribute("aria-sort", "descending");
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "gamma.wav",
+    "alpha.wav",
+    "beta.wav"
+  ]);
+
+  await button.click();
+  await expect(header).toHaveAttribute("aria-sort", "none");
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "alpha.wav",
+    "beta.wav",
+    "gamma.wav"
+  ]);
+});
+
+test("sorts file names naturally and keeps only one column sorted", async ({ page }) => {
+  await openLibrary(
+    page,
+    buildState(
+      [
+        { id: "media-10", fileName: "track-10.wav" },
+        { id: "media-2", fileName: "track-2.wav" },
+        { id: "media-1", fileName: "track-1.wav" }
+      ],
+      [[]]
+    )
+  );
+
+  await page.getByRole("button", { name: "Файл" }).click();
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "track-1.wav",
+    "track-2.wav",
+    "track-10.wav"
+  ]);
+
+  await page.getByRole("button", { name: "Время" }).click();
+  await expect(page.getByRole("columnheader", { name: "Файл" })).toHaveAttribute(
+    "aria-sort",
+    "none"
+  );
+  await expect(page.getByRole("columnheader", { name: "Время" })).toHaveAttribute(
+    "aria-sort",
+    "ascending"
+  );
+});
+
+test("keeps sorting, search and the colour filter composed", async ({ page }) => {
+  await openLibrary(page, buildState(THREE_MEDIA, [[]]));
+
+  await page.getByRole("button", { name: "Файл" }).click();
+  await page.getByRole("button", { name: "Файл" }).click();
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "gamma.wav",
+    "beta.wav",
+    "alpha.wav"
+  ]);
+
+  await page.getByLabel("Поиск по медиатеке").fill("a");
+  await expect.poll(async () => fileNameOrder(page)).toEqual([
+    "gamma.wav",
+    "beta.wav",
+    "alpha.wav"
+  ]);
+
+  await page.getByRole("button", { name: "Фильтр по цвету #6df7a5" }).click();
+  await expect.poll(async () => fileNameOrder(page)).toEqual(["gamma.wav"]);
+  await expect(page.getByRole("columnheader", { name: "Файл" })).toHaveAttribute(
+    "aria-sort",
+    "descending"
+  );
+});

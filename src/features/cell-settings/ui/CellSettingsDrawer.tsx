@@ -36,6 +36,7 @@ import {
   buildAffectedCellsNote,
   buildMediaDeletionHeadline
 } from "../../../entities/media/model/mediaDeletion";
+import { MEDIA_COMPARATORS, MediaSortKey } from "../../../entities/media/model/mediaSort";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { Panel } from "../../../entities/panel/model/types";
 import { AudioEditorDialog } from "../../../features/audio-editor";
@@ -47,10 +48,12 @@ import { formatDuration } from "../../../shared/lib/duration";
 import { formatCreatedAt } from "../../../shared/lib/formatDate";
 import { isInteractiveRowTarget } from "../../../shared/lib/interactiveTarget";
 import { getSelectAllState } from "../../../shared/lib/rowSelection";
+import { cycleSortState, SortState, sortRows } from "../../../shared/lib/tableSort";
 import { useRowSelection } from "../../../shared/lib/useRowSelection";
 import { ColorSwatches } from "../../../shared/ui/ColorSwatches";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 import { RowSelectCheckbox, SelectAllCheckbox } from "../../../shared/ui/RowSelectionControls";
+import { SortableColumnHeader } from "../../../shared/ui/SortableColumnHeader";
 
 const MEDIA_PICKER_VIEWPORT_HEIGHT = 360;
 const MEDIA_PICKER_ROW_HEIGHT = 52;
@@ -95,6 +98,7 @@ export function CellSettingsDrawer({
   const [capturedHotkey, setCapturedHotkey] = useState("");
   const [hotkeyError, setHotkeyError] = useState("");
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
+  const [sort, setSort] = useState<SortState<MediaSortKey>>(null);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
   const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
@@ -192,6 +196,10 @@ export function CellSettingsDrawer({
     setAliasDraft(cell?.aliasOverride.trim() ? cell.aliasOverride : defaultAliasName);
   }, [cell?.aliasOverride, cellId, cellMediaId, defaultAliasName, open, selectedMedia]);
 
+  const sortedMedia = useMemo(
+    () => sortRows(filteredMedia, sort, MEDIA_COMPARATORS),
+    [filteredMedia, sort]
+  );
   const filteredIds = useMemo(() => filteredMedia.map((item) => item.id), [filteredMedia]);
   const selectAllState = getSelectAllState(selectedIds, filteredIds);
   const pendingDeleteTargets = useMemo(
@@ -223,10 +231,10 @@ export function CellSettingsDrawer({
     cell.fadeOutMs !== 0;
   const pickerStart = Math.max(0, Math.floor(pickerScrollTop / MEDIA_PICKER_ROW_HEIGHT) - 6);
   const pickerEnd = Math.min(
-    filteredMedia.length,
+    sortedMedia.length,
     Math.ceil((pickerScrollTop + MEDIA_PICKER_VIEWPORT_HEIGHT) / MEDIA_PICKER_ROW_HEIGHT) + 6
   );
-  const visibleMedia = filteredMedia.length > 80 ? filteredMedia.slice(pickerStart, pickerEnd) : filteredMedia;
+  const visibleMedia = sortedMedia.length > 80 ? sortedMedia.slice(pickerStart, pickerEnd) : sortedMedia;
   const emptyPickerText = colorFilter ? "по фильтру нет аудио" : "Нет аудио";
 
   const resetPickerScroll = () => {
@@ -583,21 +591,26 @@ export function CellSettingsDrawer({
                     }}
                   />
                 </Box>
-                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
-                  Название файла
-                </Typography>
-                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
-                  Псевдоним
-                </Typography>
-                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
-                  Время
-                </Typography>
-                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
-                  Дата добавления
-                </Typography>
-                <Typography role="columnheader" sx={{ px: 1, py: 1 }}>
-                  Цвет
-                </Typography>
+                {(
+                  [
+                    { key: "fileName", title: "Название файла" },
+                    { key: "alias", title: "Псевдоним" },
+                    { key: "durationMs", title: "Время" },
+                    { key: "createdAt", title: "Дата добавления" },
+                    { key: "color", title: "Цвет" }
+                  ] as const
+                ).map((column) => (
+                  <SortableColumnHeader
+                    key={column.key}
+                    columnKey={column.key}
+                    title={column.title}
+                    sort={sort}
+                    onSort={(key) => {
+                      setSort((current) => cycleSortState(current, key));
+                      resetPickerScroll();
+                    }}
+                  />
+                ))}
                   <Box role="columnheader" />
               </Box>
               <Box
@@ -611,13 +624,13 @@ export function CellSettingsDrawer({
                   maxHeight: MEDIA_PICKER_VIEWPORT_HEIGHT,
                   overflowY: "auto",
                   position: "relative",
-                  height: filteredMedia.length > 80 ? MEDIA_PICKER_VIEWPORT_HEIGHT : "auto"
+                  height: sortedMedia.length > 80 ? MEDIA_PICKER_VIEWPORT_HEIGHT : "auto"
                 }}
               >
                 <Box
                   component="div"
                   sx={{
-                    height: filteredMedia.length > 80 ? filteredMedia.length * MEDIA_PICKER_ROW_HEIGHT : "auto",
+                    height: sortedMedia.length > 80 ? sortedMedia.length * MEDIA_PICKER_ROW_HEIGHT : "auto",
                     position: "relative"
                   }}
                 >
@@ -657,7 +670,7 @@ export function CellSettingsDrawer({
                           ? SELECTED_ROW_BACKGROUND
                           : SELECTED_ROW_HOVER_BACKGROUND
                       },
-                      ...(filteredMedia.length > 80
+                      ...(sortedMedia.length > 80
                         ? {
                             position: "absolute",
                             left: 0,
@@ -751,7 +764,7 @@ export function CellSettingsDrawer({
                     </Box>
                   </Box>
                 ))}
-                {filteredMedia.length === 0 ? (
+                {sortedMedia.length === 0 ? (
                   <Box
                     role="row"
                     sx={{
