@@ -1672,18 +1672,16 @@ test("sorts the virtualized media picker and slices the sorted order", async ({ 
 
   const picker = page.getByRole("table", { name: "Выбор медиа" });
   await expect(picker).toBeVisible();
-  const rowGroup = picker.getByRole("rowgroup");
-
   await page.getByRole("button", { name: "Название файла" }).click();
   await expect(picker.getByRole("columnheader", { name: "Название файла" })).toHaveAttribute(
     "aria-sort",
     "ascending"
   );
-  expect(await rowGroup.evaluate((element) => element.scrollTop)).toBe(0);
+  expect(await picker.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(page.getByRole("button", { name: "Выбрать pick-0.wav" })).toBeVisible();
 
   // Natural ordering puts pick-119 last; it only renders if the window slices the sorted array.
-  await rowGroup.evaluate((element) => {
+  await picker.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
   await expect(page.getByRole("button", { name: "Выбрать pick-119.wav" })).toBeVisible();
@@ -1838,6 +1836,68 @@ test("reports the media that did not fit on the grid", async ({ page }, testInfo
     .dragTo(page.locator('[data-cell-id="cell-65"]'));
 
   await expect(page.getByText("Назначено ячеек: 1, не поместилось: 2")).toBeVisible();
+});
+
+test("keeps the media picker to one scroller with aligned, non-overlapping columns", async ({
+  page
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "measured against the desktop panel width");
+  const manyFiles = Array.from({ length: 100 }, (_, index) => ({
+    name: `pick-${String(index)}.wav`,
+    mimeType: "audio/wav",
+    buffer: Buffer.from("RIFF....WAVEfmt ")
+  }));
+  await openPickerWithMedia(page, manyFiles);
+
+  const layout = await page
+    .getByRole("table", { name: "Выбор медиа" })
+    .evaluate((table) => {
+      const header = table.querySelector('[role="row"]');
+      const row = table.querySelector('[role="button"][aria-label^="Выбрать"]');
+      if (!header || !row) {
+        throw new Error("picker rows are not rendered");
+      }
+
+      // Nested scrollers were the bug: the panel showed two horizontal scrollbars, and the rows'
+      // box ended up narrower than the header's by the width of the vertical scrollbar.
+      const scrollers = Array.from(table.querySelectorAll("*")).filter((node) => {
+        const style = getComputedStyle(node);
+
+        return style.overflowX === "auto" || style.overflowX === "scroll";
+      });
+
+      const swatch = row.querySelector('[aria-label^="Цвет"]');
+      const swatchBox = swatch?.getBoundingClientRect();
+      const swatchCell = swatch?.parentElement?.getBoundingClientRect();
+
+      const cells = Array.from(row.children).map((cell) => cell.getBoundingClientRect());
+      const overlaps = cells.some((cell, index) => {
+        const next = cells[index + 1];
+
+        return next ? cell.right > next.left + 0.5 : false;
+      });
+
+      return {
+        innerScrollers: scrollers.length,
+        headerWidth: Math.round(header.getBoundingClientRect().width),
+        rowWidth: Math.round(row.getBoundingClientRect().width),
+        swatchInsideCell:
+          swatchBox && swatchCell
+            ? swatchBox.left >= swatchCell.left - 0.5 && swatchBox.right <= swatchCell.right + 0.5
+            : false,
+        overlaps,
+        headerClipped: Array.from(header.querySelectorAll("button > span")).some(
+          (span) => span.scrollWidth > span.clientWidth
+        )
+      };
+    });
+
+  expect(layout.innerScrollers).toBe(0);
+  expect(layout.headerWidth).toBe(layout.rowWidth);
+  expect(layout.swatchInsideCell).toBe(true);
+  expect(layout.overlaps).toBe(false);
+  // A one-word header has no break opportunity, so a track too narrow for it clips the label away.
+  expect(layout.headerClipped).toBe(false);
 });
 
 test("assigns media by dragging the picker handle with a mouse", async ({ page }, testInfo) => {
