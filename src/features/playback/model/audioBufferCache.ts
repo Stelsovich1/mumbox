@@ -22,6 +22,26 @@ export type PlaybackBufferEntry = {
   sliceStartSeconds: number;
   /** Duration of the ORIGINAL media, which is what trim clamping must be measured against. */
   sourceDurationSeconds: number;
+  /**
+   * Present only when this buffer is the HEAD of a streamed window: the rest arrives as further
+   * segments, fetched while the head plays.
+   *
+   * Optional so nothing else in this module changes — the cache still stores one buffer per key,
+   * still charges it by bytes, and `has(key)` still means "this cue starts instantly", because a
+   * warm head does. Segments are never cached: they belong to a live route and are released as they
+   * finish. Caching a reassembled window would put the whole track's PCM back in memory, and would
+   * do it silently, because `protectedBytes` would then include it and the warm-up would start
+   * skipping the panel on screen in order to protect it.
+   */
+  partial?: {
+    mediaId: string;
+    /** Source time where the head ends and the next segment must continue. */
+    headEndSeconds: number;
+    /** Source time the whole window ends. */
+    windowEndSeconds: number;
+    /** Captured at plan time, never re-read: a mid-cue change would alter the channel count. */
+    mono: boolean;
+  };
 };
 
 export type PlaybackBufferKeyInput = {

@@ -175,8 +175,99 @@ worker takes a target, or every worker checks the budget before any has finished
 and the pool overshoots by its own width.
 
 Anything that deletes or replaces media must go through `src/shared/lib/mediaCacheRegistry.ts`
-(`purgeMediaCaches` / `clearMediaCaches`) — the decoded PCM, the waveform peaks and the decoded
-durations live in three different caches, and the IndexedDB blob is a fourth store.
+(`purgeMediaCaches` / `clearMediaCaches`) — the decoded PCM, the waveform peaks, the decoded
+durations and the media probes live in four different caches, and the IndexedDB blob is a fifth
+store.
+
+### Byte-range decoding (MP3 and WAV)
+
+`decodeAudioData` has no partial-decode API, but a file does: `blob.slice(a, b)` on an
+IndexedDB-backed blob reads only that range. Measured — 64 reads of 256 KiB out of a 60 MiB blob
+took 98 ms against 59 ms for one full read, i.e. 39x less work than materialising the file per read.
+So MP3 and WAV take a **fast path** that decodes only what a cell plays; every other container
+(m4a, ogg, flac, opus, webm) keeps the full decode, byte for byte.
+
+TWO ORTHOGONAL GATES, and conflating them was the first draft's bug. `shouldReadRange` asks whether
+the window is small enough relative to the file that reading only its bytes pays — the trimmed-cue
+case, which a whole untrimmed track fails because its window IS the file. `shouldSegmentWindow`
+asks whether the window's PCM is large enough that it must arrive in pieces — the whole-long-track
+case, which a 2-second one-shot fails because 0.34 MiB is not worth a seam. A single gate on window
+LENGTH excluded a 5-second window out of a 180-second file, the most profitable case there is.
+
+**The time base is the invariant that matters.** Every position handed out is a position in the
+original media *as the app understands it*, and the app's timeline is the FULL DECODE's, because
+that is what the editor measured the trim against. A standalone mid-file MP3 slice is not on that
+timeline: the full decode strips the encoder delay a LAME header declares, an isolated slice does
+not. Measured at **2257 samples** on a real 192 kbps file — 1152 (one preamble frame) plus 1105
+(LAME delay). Both terms are file-dependent, so the offset is MEASURED per media
+(`partialVerify.ts`, during warm-up, two anchored decodes) and a mid-file MP3 window is REFUSED
+until it is. Two comparison windows must agree, because a sustained tone matches at every multiple
+of its period and one window cannot tell a period from a delay.
+
+A frame range must start on a frame boundary and carry preamble for the bit reservoir
+(`main_data_begin` reaches up to 511 bytes back). With that, a mid-file slice decoded
+**bit-identically** to the same range of a full decode — peak correlation 1.000000, residual RMS 0.
+
+Streaming shape: a head (0.5 s, cached, so a warm cell still starts instantly) plus segments on a
+**progressively growing ladder** (4, 8, then 16 s). Progressive purely to cut seams — a fixed 4 s
+chunk gives a 3-minute track about 45 of them, the ladder gives 13, at the same memory ceiling.
+Every seam is a chance to click.
+
+Things that ladder and that head force, none of them optional:
+
+- **The head of a streamed route is scheduled with an EXPLICIT time**, not `start(0)`. Measured: a
+  requested time in the future is honoured to the sample, while `start(0)` never reports which
+  frame it landed on — and every handoff time is derived from that number, so guessing it skips
+  audio at each seam. `SCHEDULE_LEAD_SECONDS` is one render quantum and only streamed routes pay
+  it; a single-segment route keeps `start(0)` and its 0.5 ms baseline.
+- **`scheduleEnvelope` therefore takes a `startTime`** (defaulting to `context.currentTime`), or the
+  fades would run a quantum ahead of the sound. ONE curve covers the whole window on the shared
+  gain, and no segment ever reschedules it: a second `setValueCurveAtTime` overlapping the first
+  throws, its `setValueAtTime` fallback throws too inside a running curve, and the gain would be
+  left pinned at full scale for the rest of the cue.
+- **The handoff is `prev.stop(T)` and `next.start(T)` at the same absolute time**, which is
+  sample-accurate on both sides. Each buffer carries a 60 ms margin of real audio past its nominal
+  end so the outgoing segment always has samples up to T.
+- **`stopRoute` clamps with `Math.min`.** Measured: a later `stop` EXTENDS an earlier one
+  (`stop(0.3)` then `stop(0.6)` plays to 0.6), so a blind `stop(now + RELEASE)` on a segment already
+  stopping at its handoff would overlap it with the next one.
+- **`isLast` is explicit on the segment**, never inferred. An `onended` from the head means "the
+  next segment's turn"; code treating any `onended` as "cue finished" restarts a loop at the seam.
+- **Two levels of teardown.** `promoteToLast` ends a cue whose chain gave up, the whole chain runs
+  inside one `try`, and the rAF watchdog is the second line of defence. The watchdog INCREMENTS
+  `partial.segments.watchdog`, because a cue ending there rather than from its last segment sounds
+  identical — without the counter a broken `isLast` would be silently covered up by its own safety
+  net, which is exactly what survived a mutation round until the counter existed.
+- **One shared decode semaphore** (`decodeSemaphore.ts`), used by the warm-up pool AND every live
+  chain. `stopOthers` is off by default, so six live pads would otherwise mean six unsynchronised
+  decodes on top of the warm-up.
+- **`mono` and the window are captured into the chain at press time**, never re-read from a ref: a
+  live route is immune to a mid-cue mono toggle because its cache key is pinned, and a chain
+  re-reading the ref would feed a one-channel buffer to the same gain the two-channel head feeds.
+- **The staging exclusion.** The warm-up stages a shared full decode for media several targets need;
+  range-bound targets are excluded from that count, or the 220-330 MiB transient is paid anyway and
+  then discarded.
+- **Loops are excluded from streaming in v1.** A looping cue is heard over and over, so one full
+  decode is the right price — and it avoids re-streaming the track every iteration. A loop still
+  gets a plain range read of its window.
+
+Segments are NEVER cached. The cached entry is the head, so `has(key)` still means "starts
+instantly"; caching a reassembled window would put the whole track's PCM back in memory and do it
+silently, because `protectedBytes` would then include it and the warm-up would start skipping the
+panel on screen in order to protect it.
+
+Four switches, because iOS Safari cannot be reached from CI at all (CoreAudio, not ffmpeg):
+`?partial=0` / `?partial=1` per load; a verdict persisted per browser in `mumbox:partial-decode:v1`
+(a sidecar, like `mumbox:project-session:v1` — outside `SerializableAppState` and outside the
+`.mumbox` payload); a per-media flag in the probe cache; and structurally, `loadPlaybackEntry` calls
+the partial path inside a `try` where any throw falls through to the full decode. **WAV is exempt
+from the verdict entirely** — its path never invokes the browser's decoder, so there is nothing
+about a device that could make `value / 32768` behave differently. Do not add device self-checks to
+the WAV path.
+
+Measured effect, panel of 12 whole 180 s stereo tracks: resident PCM **762 048 000 → 2 370 912
+bytes** (321x), full decodes 12 → 0. `partial-off-12x180s` in `tests/perf/baseline.json` holds the
+pre-change figures so the claim is auditable from one file.
 
 ### Diagnostics
 

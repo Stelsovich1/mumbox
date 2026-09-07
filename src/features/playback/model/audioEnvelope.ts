@@ -97,9 +97,19 @@ export function scheduleEnvelope(
   gain: GainNode,
   settings: AudioEnvelopeSettings,
   currentSeconds: number,
-  endSeconds: number
+  endSeconds: number,
+  /**
+   * Absolute context time the curve should start at. Defaults to `gain.context.currentTime`, which
+   * is what every caller wanted before segment streaming existed.
+   *
+   * A streamed route schedules its first source slightly ahead of `currentTime` so the app knows
+   * the exact frame it begins on — measured as necessary, because `start(0)` never reports where it
+   * actually landed. Without this parameter the envelope would be anchored to `currentTime` while
+   * the audio starts a render quantum later, putting the fades ahead of the sound by that much.
+   */
+  startTime?: number
 ): boolean {
-  const now = gain.context.currentTime;
+  const now = startTime ?? gain.context.currentTime;
   const remainingSeconds = Math.max(0, endSeconds - currentSeconds);
   const initialValue = getEnvelopeValue(settings, currentSeconds, endSeconds);
 

@@ -12,6 +12,13 @@
  * and the latter additionally needs cross-origin isolation, which GitHub Pages cannot set.
  */
 
+import {
+  getPartialDecodeMode,
+  PartialDecodeMode,
+  readPartialDecodeRecord,
+  setPartialDecodeMode
+} from "./partialDecodePolicy";
+
 const SESSION_KEY = "mumbox:diag:session:v1";
 const DECODE_HISTORY_LIMIT = 64;
 const TIME_TO_FIRST_SOUND_LIMIT = 32;
@@ -75,11 +82,44 @@ export type DiagDevice = {
   standalone: boolean;
 };
 
+/**
+ * Byte-range decoding, as seen from the outside.
+ *
+ * Exists because iOS Safari cannot be reached from CI at all — its MP3 decoding goes through
+ * CoreAudio, not ffmpeg — so these counters are the only way to find out on a real device whether
+ * the feature is working, declining, or blocked. `rangeReads` in particular answers the one
+ * assumption the whole design rests on: that reading a slice of an IndexedDB blob reads only the
+ * slice. It measured that way in Chromium; a phone reporting bytes far above the windows requested
+ * would say otherwise.
+ */
+export type DiagPartial = {
+  mode: string;
+  verdict: string;
+  uaKey: string;
+  probes: { mp3: number; wav: number; unsupported: number };
+  /** Windows served without a full decode, split by shape. */
+  served: { range: number; streamed: number; declined: number };
+  /**
+   * `watchdog` counts cues ended by the rAF safety net rather than by their last segment.
+   *
+   * On a healthy streamed cue it must stay 0: the last segment's `onended` is what ends a cue, and
+   * the watchdog exists only for a chain that died. A non-zero value on a working path means the
+   * `isLast` bookkeeping is broken — the cue still ends, so nothing sounds wrong, which is exactly
+   * why the mechanism has to be observable rather than inferred from timing.
+   */
+  segments: { scheduled: number; late: number; missed: number; watchdog: number };
+  verifications: { pass: number; fail: number; skipped: number };
+  /** Measured samples between an isolated mid-file decode and the full one, per media. */
+  alignDeltaSamples: Record<string, number>;
+  rangeReads: { count: number; bytes: number };
+};
+
 export type DiagSnapshot = {
   version: 1;
   overlayEnabled: boolean;
   uptimeMs: number;
   pcm: DiagPcmAccounting;
+  partial: DiagPartial;
   decodeMsByMediaId: Record<string, DiagDecodeEntry>;
   decodeCount: number;
   lastWarmupMs: number | null;
@@ -113,6 +153,10 @@ export type MumboxDiag = {
   reset: () => void;
   termination: () => DiagTermination;
   serviceWorker: () => DiagServiceWorker;
+  /** Byte-range decoding counters, the only way to read this feature on a real device. */
+  partial: () => DiagPartial;
+  /** `"off"` disables byte-range decoding, `"force"` overrides a blocked verdict, `null` clears. */
+  setPartialDecode: (mode: PartialDecodeMode | null) => void;
 };
 
 declare global {
@@ -167,7 +211,15 @@ const state = {
     storageUsage: null
   } as DiagTermination,
   lastHiddenWriteAt: 0,
-  installed: false
+  installed: false,
+  partial: {
+    probes: { mp3: 0, wav: 0, unsupported: 0 },
+    served: { range: 0, streamed: 0, declined: 0 },
+    segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0 },
+    verifications: { pass: 0, fail: 0, skipped: 0 },
+    alignDeltaSamples: new Map<string, number>(),
+    rangeReads: { count: 0, bytes: 0 }
+  }
 };
 
 let accountingSource: () => DiagPcmAccounting = () => EMPTY_ACCOUNTING;
@@ -293,6 +345,41 @@ export function recordTimeToFirstSound(ms: number): void {
   }
 }
 
+export function recordProbe(format: "mp3" | "wav" | "unsupported"): void {
+  state.partial.probes[format] += 1;
+}
+
+export function recordPartialServed(kind: "range" | "streamed" | "declined"): void {
+  state.partial.served[kind] += 1;
+}
+
+/**
+ * One range read. `bytes` is what was actually pulled from the file.
+ *
+ * Segment decodes are tagged here rather than through `recordDecode`: one entry per segment per
+ * playing track would bury the warm-up decodes in the decode history, and that history is the
+ * primary signal readable on a real device.
+ */
+export function recordRangeRead(bytes: number): void {
+  state.partial.rangeReads.count += 1;
+  state.partial.rangeReads.bytes += bytes;
+}
+
+export function recordSegment(kind: "scheduled" | "late" | "missed" | "watchdog"): void {
+  state.partial.segments[kind] += 1;
+}
+
+export function recordPartialVerificationResult(
+  kind: "pass" | "fail" | "skipped",
+  mediaId?: string,
+  alignDeltaSamples?: number
+): void {
+  state.partial.verifications[kind] += 1;
+  if (mediaId !== undefined && alignDeltaSamples !== undefined) {
+    state.partial.alignDeltaSamples.set(mediaId, alignDeltaSamples);
+  }
+}
+
 export function recordWarmup(totalMs: number, warmed: number, skipped: number): void {
   state.lastWarmupMs = totalMs;
   state.lastWarmupWarmed = warmed;
@@ -344,12 +431,33 @@ function getDevice(): DiagDevice {
   };
 }
 
+/**
+ * Assembled here rather than exported as raw state so the mode and verdict come from the policy
+ * module itself — the one place that knows how a query flag, a runtime override and a stored
+ * verdict combine.
+ */
+export function getPartialDiag(): DiagPartial {
+  const record = readPartialDecodeRecord();
+  return {
+    mode: getPartialDecodeMode(),
+    verdict: record.verdict,
+    uaKey: record.uaKey,
+    probes: { ...state.partial.probes },
+    served: { ...state.partial.served },
+    segments: { ...state.partial.segments },
+    verifications: { ...state.partial.verifications },
+    alignDeltaSamples: Object.fromEntries(state.partial.alignDeltaSamples),
+    rangeReads: { ...state.partial.rangeReads }
+  };
+}
+
 export async function getSnapshot(): Promise<DiagSnapshot> {
   return {
     version: 1,
     overlayEnabled: isDiagnosticsEnabled(),
     uptimeMs: performance.now() - state.startedAt,
     pcm: accountingSource(),
+    partial: getPartialDiag(),
     decodeMsByMediaId: Object.fromEntries(state.decodeMsByMediaId),
     decodeCount: state.decodeCount,
     lastWarmupMs: state.lastWarmupMs,
@@ -497,7 +605,11 @@ export function installDiagnostics(): void {
       state.timeToFirstSoundMs = [];
     },
     termination: () => ({ ...state.termination }),
-    serviceWorker: readServiceWorker
+    serviceWorker: readServiceWorker,
+    partial: getPartialDiag,
+    setPartialDecode: (mode) => {
+      setPartialDecodeMode(mode);
+    }
   };
 
   window.__mumboxDiag = api;

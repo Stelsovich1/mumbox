@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import type {
+  DiagPartial,
   DiagPcmAccounting,
   DiagSnapshot,
   DiagTermination,
@@ -58,6 +59,16 @@ export async function diagLastPanelSwitchMs(page: Page): Promise<number | null> 
 
 export async function diagLastTimeToFirstSoundMs(page: Page): Promise<number | null> {
   return page.evaluate(() => (window as DiagWindow).__mumboxDiag?.lastTimeToFirstSoundMs() ?? null);
+}
+
+export async function diagPartial(page: Page): Promise<DiagPartial | null> {
+  return page.evaluate(() => (window as DiagWindow).__mumboxDiag?.partial() ?? null);
+}
+
+export async function diagSetPartialDecode(page: Page, mode: "auto" | "off" | "force" | null) {
+  await page.evaluate((next) => {
+    (window as DiagWindow).__mumboxDiag?.setPartialDecode(next);
+  }, mode);
 }
 
 export async function diagSetBudgetMb(page: Page, mb: number): Promise<void> {

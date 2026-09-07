@@ -1,7 +1,7 @@
 import { getMediaBlob } from "../../app/model/appState";
 import { SerializableAppState } from "../../app/model/appState";
 import { computeContentHash } from "../../shared/lib/contentHash";
-import { getCrc32 } from "../../shared/lib/crc32";
+import { CRC32_INITIAL, finalizeCrc32, updateCrc32 } from "../../shared/lib/crc32";
 import { FileHandleLike, writeBlobToHandle } from "../../shared/lib/fileSystemAccess";
 import { normalizeProjectMeta, ProjectMeta, toProjectFileName } from "./model/projectMeta";
 
@@ -128,21 +128,41 @@ function makeZipEndRecord(entryCount: number, centralDirectorySize: number, cent
   return buffer;
 }
 
+/**
+ * How much of an entry is held in memory at once while its CRC is computed.
+ *
+ * A project is 700 MB - 1 GB of media, so the old shape — `await entry.blob.arrayBuffer()` per
+ * entry — put a whole media file in memory just to checksum it, on top of the assembled output.
+ * Reading in slices keeps the export peak at one slice, and the entry itself goes into the output
+ * `Blob` by reference: a `Blob` built from other blobs does not copy their bytes.
+ */
+const ZIP_CRC_CHUNK_BYTES = 4 * 1024 * 1024;
+
+async function getBlobCrc32(blob: Blob) {
+  let state = CRC32_INITIAL;
+  for (let offset = 0; offset < blob.size; offset += ZIP_CRC_CHUNK_BYTES) {
+    const end = Math.min(blob.size, offset + ZIP_CRC_CHUNK_BYTES);
+    const chunk = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
+    state = updateCrc32(state, chunk);
+  }
+
+  return finalizeCrc32(state);
+}
+
 async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?: (progress: ProjectFileProgress) => void) {
   const encoder = new TextEncoder();
   const parts: BlobPart[] = [];
-  const centralParts: BlobPart[] = [];
+  const centralParts: ArrayBuffer[] = [];
   let offset = 0;
   const total = entries.length;
 
   for (const [index, entry] of entries.entries()) {
     const nameBytes = encoder.encode(entry.name);
-    const bytes = new Uint8Array(await entry.blob.arrayBuffer());
-    const crc32 = getCrc32(bytes);
-    const localHeader = makeZipLocalHeader(nameBytes, crc32, bytes.byteLength);
-    parts.push(localHeader, bytes);
-    centralParts.push(makeZipCentralHeader(nameBytes, crc32, bytes.byteLength, offset));
-    offset += localHeader.byteLength + bytes.byteLength;
+    const crc32 = await getBlobCrc32(entry.blob);
+    const localHeader = makeZipLocalHeader(nameBytes, crc32, entry.blob.size);
+    parts.push(localHeader, entry.blob);
+    centralParts.push(makeZipCentralHeader(nameBytes, crc32, entry.blob.size, offset));
+    offset += localHeader.byteLength + entry.blob.size;
     onProgress?.({
       phase: "export",
       completed: index + 1,
@@ -155,7 +175,7 @@ async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?:
   }
 
   const centralDirectoryOffset = offset;
-  const centralDirectorySize = centralParts.reduce((sum, part) => sum + (part as ArrayBuffer).byteLength, 0);
+  const centralDirectorySize = centralParts.reduce((sum, part) => sum + part.byteLength, 0);
   return new Blob([...parts, ...centralParts, makeZipEndRecord(entries.length, centralDirectorySize, centralDirectoryOffset)], {
     type: PROJECT_FILE_MIME_TYPE
   });
@@ -165,8 +185,22 @@ function isZipFile(bytes: Uint8Array) {
   return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
 }
 
+/**
+ * The end-of-central-directory record sits within the last 65 557 bytes: 22 bytes of record plus a
+ * comment field that cannot exceed 65 535. Scanned backwards, so a comment that happens to contain
+ * the signature does not win over the real record.
+ */
+const ZIP_END_RECORD_SEARCH_BYTES = 65_557;
+const ZIP_LOCAL_HEADER_BYTES = 30;
+/**
+ * Local headers are separated by entry data, so each one is its own small read. They are issued in
+ * batches rather than one at a time because a project can hold hundreds of media entries and the
+ * reads are independent; the batch width matches the 24 used elsewhere for per-media work.
+ */
+const ZIP_HEADER_READ_BATCH = 24;
+
 function findEndOfCentralDirectory(bytes: Uint8Array) {
-  const minOffset = Math.max(0, bytes.length - 65_557);
+  const minOffset = Math.max(0, bytes.length - ZIP_END_RECORD_SEARCH_BYTES);
   for (let offset = bytes.length - 22; offset >= minOffset; offset -= 1) {
     if (
       bytes[offset] === 0x50 &&
@@ -180,53 +214,104 @@ function findEndOfCentralDirectory(bytes: Uint8Array) {
   return -1;
 }
 
+async function readSlice(file: File, start: number, end: number) {
+  return new Uint8Array(await file.slice(start, end).arrayBuffer());
+}
+
+function viewOf(bytes: Uint8Array) {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+type ZipCentralEntry = { name: string; localOffset: number; compressedSize: number };
+
+/**
+ * Reads a project without materialising it.
+ *
+ * The previous shape did `new Uint8Array(await file.arrayBuffer())` and then `bytes.slice(...)` per
+ * entry — and `Uint8Array.slice` copies — so peak memory was the whole project plus a second copy
+ * of every media byte: roughly 2 GB for a 1 GB project, which is reached before playback memory
+ * ever matters. Here only the directory, the local headers and `project.json` are read; every media
+ * entry stays a lazy `File.slice` view, and the third argument to `slice` stamps the MIME type
+ * directly so the bytes are never wrapped or copied to fix it up.
+ */
 async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFileProgress) => void): Promise<ImportedProject> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const endOffset = findEndOfCentralDirectory(bytes);
-  if (endOffset < 0) {
+  const tailStart = Math.max(0, file.size - ZIP_END_RECORD_SEARCH_BYTES);
+  const tail = await readSlice(file, tailStart, file.size);
+  const endOffsetInTail = findEndOfCentralDirectory(tail);
+  if (endOffsetInTail < 0) {
     throw new Error("Unsupported MUMBOX project file");
   }
 
+  const tailView = viewOf(tail);
+  const entryCount = tailView.getUint16(endOffsetInTail + 10, true);
+  const centralDirectoryOffset = tailView.getUint32(endOffsetInTail + 16, true);
+  const centralDirectoryEnd = tailStart + endOffsetInTail;
+  if (centralDirectoryOffset > centralDirectoryEnd) {
+    throw new Error("Unsupported MUMBOX project file");
+  }
+
+  const directory = await readSlice(file, centralDirectoryOffset, centralDirectoryEnd);
+  const directoryView = viewOf(directory);
   const decoder = new TextDecoder();
-  const entryCount = view.getUint16(endOffset + 10, true);
-  const centralDirectoryOffset = view.getUint32(endOffset + 16, true);
-  const entries = new Map<string, Blob>();
-  let cursor = centralDirectoryOffset;
+  const centralEntries: ZipCentralEntry[] = [];
+  let cursor = 0;
 
   for (let index = 0; index < entryCount; index += 1) {
-    if (view.getUint32(cursor, true) !== 0x02014b50) {
+    if (cursor + 46 > directory.length || directoryView.getUint32(cursor, true) !== 0x02014b50) {
       throw new Error("Unsupported MUMBOX project file");
     }
-    const method = view.getUint16(cursor + 10, true);
-    const compressedSize = view.getUint32(cursor + 20, true);
-    const fileNameLength = view.getUint16(cursor + 28, true);
-    const extraLength = view.getUint16(cursor + 30, true);
-    const commentLength = view.getUint16(cursor + 32, true);
-    const localOffset = view.getUint32(cursor + 42, true);
-    const name = decoder.decode(bytes.slice(cursor + 46, cursor + 46 + fileNameLength));
+    const method = directoryView.getUint16(cursor + 10, true);
+    const compressedSize = directoryView.getUint32(cursor + 20, true);
+    const fileNameLength = directoryView.getUint16(cursor + 28, true);
+    const extraLength = directoryView.getUint16(cursor + 30, true);
+    const commentLength = directoryView.getUint16(cursor + 32, true);
+    const localOffset = directoryView.getUint32(cursor + 42, true);
     if (method !== 0) {
       throw new Error("Unsupported MUMBOX project compression");
     }
-
-    const localFileNameLength = view.getUint16(localOffset + 26, true);
-    const localExtraLength = view.getUint16(localOffset + 28, true);
-    const dataStart = localOffset + 30 + localFileNameLength + localExtraLength;
-    entries.set(name, new Blob([bytes.slice(dataStart, dataStart + compressedSize)]));
+    const name = decoder.decode(directory.subarray(cursor + 46, cursor + 46 + fileNameLength));
+    centralEntries.push({ name, localOffset, compressedSize });
     cursor += 46 + fileNameLength + extraLength + commentLength;
+  }
+
+  // The local header's own name and extra fields are what fix where the data starts, and ZIP
+  // permits them to differ from the central directory's — so they are read rather than assumed.
+  const dataRanges = new Map<string, { start: number; end: number }>();
+  for (let from = 0; from < centralEntries.length; from += ZIP_HEADER_READ_BATCH) {
+    const batch = centralEntries.slice(from, from + ZIP_HEADER_READ_BATCH);
+    const headers = await Promise.all(
+      batch.map((entry) =>
+        readSlice(file, entry.localOffset, entry.localOffset + ZIP_LOCAL_HEADER_BYTES)
+      )
+    );
+    headers.forEach((header, offsetInBatch) => {
+      const entry = batch[offsetInBatch];
+      if (!entry || header.length < ZIP_LOCAL_HEADER_BYTES) {
+        throw new Error("Unsupported MUMBOX project file");
+      }
+      const headerView = viewOf(header);
+      const dataStart =
+        entry.localOffset +
+        ZIP_LOCAL_HEADER_BYTES +
+        headerView.getUint16(26, true) +
+        headerView.getUint16(28, true);
+      dataRanges.set(entry.name, { start: dataStart, end: dataStart + entry.compressedSize });
+    });
     onProgress?.({
       phase: "import",
-      completed: index + 1,
-      total: entryCount,
-      label: `Чтение проекта ${String(index + 1)} из ${String(entryCount)}`
+      completed: Math.min(centralEntries.length, from + batch.length),
+      total: centralEntries.length,
+      label: `Чтение проекта ${String(Math.min(centralEntries.length, from + batch.length))} из ${String(centralEntries.length)}`
     });
   }
 
-  const manifestBlob = entries.get(PROJECT_MANIFEST_NAME);
-  if (!manifestBlob) {
+  const manifestRange = dataRanges.get(PROJECT_MANIFEST_NAME);
+  if (!manifestRange) {
     throw new Error("Unsupported MUMBOX project file");
   }
-  const parsed = JSON.parse(await manifestBlob.text()) as unknown;
+  const parsed = JSON.parse(
+    await file.slice(manifestRange.start, manifestRange.end).text()
+  ) as unknown;
   if (!isProjectFile(parsed)) {
     throw new Error("Unsupported MUMBOX project file");
   }
@@ -235,15 +320,15 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
     state: parsed.state,
     meta: normalizeProjectMeta(parsed.meta),
     mediaBlobs: parsed.mediaBlobs.map((media) => {
-      const blob = entries.get(`${PROJECT_MEDIA_DIR}${media.id}`);
-      if (!blob) {
+      const range = dataRanges.get(`${PROJECT_MEDIA_DIR}${media.id}`);
+      if (!range) {
         throw new Error(`Missing media blob: ${media.fileName}`);
       }
       return {
         id: media.id,
         fileName: media.fileName,
         mimeType: media.mimeType,
-        blob: blob.type ? blob : new Blob([blob], { type: media.mimeType })
+        blob: file.slice(range.start, range.end, media.mimeType)
       };
     })
   };
@@ -253,9 +338,12 @@ export type MakeProjectBlobOptions = {
   meta?: ProjectMeta;
   onProgress?: (progress: ProjectFileProgress) => void;
   /**
-   * Called with any content hash computed along the way. Every blob is already loaded here, so
-   * hashing costs one pass and never a second read; the caller stores the result so a media asset
-   * is hashed at most once per session.
+   * Called with any content hash computed along the way. The caller stores the result so a media
+   * asset is hashed at most once per session — which is what keeps the cost bearable, because
+   * `crypto.subtle.digest` has no incremental form and hashing therefore does need the whole blob
+   * in memory. That is the one remaining full-file read in an export, and it is bounded to a single
+   * media file at a time: the CRC beside it reads in slices, and entry bytes reach the output blob
+   * by reference.
    */
   onHash?: (hashes: { mediaId: string; contentHash: string }[]) => void;
 };
