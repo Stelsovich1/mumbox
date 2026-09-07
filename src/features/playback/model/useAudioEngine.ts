@@ -8,6 +8,8 @@ import {
   markStart,
   recordDecode,
   recordPanelSwitchEngine,
+  recordPartialServed,
+  recordSegment,
   recordTimeToFirstSound,
   recordWarmup,
   setMonoState
@@ -20,7 +22,19 @@ import {
   makePlaybackBufferKey
 } from "./audioBufferCache";
 import type { PlaybackBufferEntry } from "./audioBufferCache";
-import { decodeAudioBlob, shouldSliceBuffer, sliceToAudioBuffer } from "./decodeAudio";
+import {
+  DECODE_SAMPLE_RATE,
+  decodeAudioBlob,
+  shouldSliceBuffer,
+  sliceToAudioBuffer
+} from "./decodeAudio";
+import {
+  planSegments,
+  resolveLateSegment,
+  shouldReadRange,
+  shouldSegmentWindow
+} from "./partialPlan";
+import { decodeMediaRange, ensureMp3Alignment, planMediaSegments } from "./partialSource";
 import { playbackBufferCache, setActivePanelKeys } from "./playbackBufferCache";
 import {
   getEnvelopeValue,
@@ -37,13 +51,46 @@ type PlayingCell = {
 
 export type WarmState = "warming" | "ready";
 
+/**
+ * One `AudioBufferSourceNode` and the source-time window it is responsible for.
+ *
+ * A classic route holds exactly one segment, which is why this refactor changes no behaviour: the
+ * single-segment path still schedules `start(0, offset, duration)` and still ends the cue from its
+ * own `onended`. Several segments only become possible once a route streams a long window.
+ */
+type RouteSegment = {
+  source: AudioBufferSourceNode;
+  /** Source-time window this segment covers. */
+  startSeconds: number;
+  endSeconds: number;
+  /** Absolute context time this segment was scheduled to begin at. */
+  atContextTime: number;
+  /**
+   * Only the last segment ends the cue or restarts a loop. Explicit rather than inferred: with
+   * several segments, an `onended` from the head means "the next segment's turn", and code that
+   * treated any `onended` as "cue finished" would restart a loop at the seam — audible as a short
+   * fragment repeating forever.
+   */
+  isLast: boolean;
+  /**
+   * Absolute context time a `stop` is already scheduled for, or null when none is.
+   *
+   * Measured, not assumed: a later `stop` EXTENDS an earlier one rather than being ignored
+   * (`stop(0.3)` then `stop(0.6)` plays to 0.6). So a teardown that blindly called
+   * `stop(now + RELEASE)` on a segment already stopping at its handoff would push it past that
+   * handoff and overlap the next segment — the same signal twice for a few milliseconds.
+   */
+  stopAtContextTime: number | null;
+};
+
 type AudioRoute = {
   mode: "buffer" | "media";
   context: AudioContext;
   envelopeGain: GainNode;
   volumeGain: GainNode;
   lastVolume: number;
-  source?: AudioBufferSourceNode;
+  /** Empty for the media-element route; length 1 on a classic buffer route. */
+  segments: RouteSegment[];
   audio?: HTMLAudioElement;
   url?: string;
   startedAtContextTime: number;
@@ -62,6 +109,29 @@ type WarmupTarget = {
 };
 
 const RELEASE_SECONDS = 0.018;
+/**
+ * How far ahead of `currentTime` a streamed route's first source is scheduled.
+ *
+ * One render quantum. Measured: a requested time in the future is honoured to the sample, while
+ * `start(0)` gives the app no way to learn which frame it landed on — and the handoff time for
+ * every later segment is derived from that number, so a guess there is a skipped fragment, audible
+ * as a click at every seam. The lead guarantees the requested moment is still in the future even if
+ * the main thread was busy when it was scheduled.
+ *
+ * Only streamed routes pay it. A single-segment route keeps `start(0)` and its 0.5 ms baseline;
+ * 2.9 ms on a three-minute backing track is inaudible and sits far under the 20 ms warm ceiling.
+ */
+const SCHEDULE_LEAD_SECONDS = 128 / 44_100;
+/**
+ * How long before a segment's handoff its decode is started.
+ *
+ * Long enough that a slow read cannot miss the boundary, short enough that resident PCM stays
+ * bounded: with the ladder's 16 s ceiling this keeps a playing cue at roughly head plus two
+ * segments, about 11 MiB, instead of the whole track.
+ */
+const SEGMENT_PREFETCH_SECONDS = 6;
+/** Polling step while waiting for a segment's prefetch window to open. */
+const SEGMENT_WAIT_STEP_MS = 120;
 const PROGRESS_EPSILON = 0.001;
 /**
  * How often a progress change may reach React.
@@ -117,6 +187,44 @@ function getTrimmedDurationMs(cell: GridCell, durationMs: number | null) {
   const startMs = Math.min(durationMs, Math.max(0, cell.trimStartMs ?? 0));
   const endMs = Math.min(durationMs, Math.max(startMs, cell.trimEndMs ?? durationMs));
   return endMs - startMs;
+}
+
+/**
+ * Whether a cell is likely to avoid a full decode — either by reading only its window, or by
+ * streaming that window in segments.
+ *
+ * Both gates, because they answer different questions and each misses the other's case. A 5-second
+ * window out of a 180-second file is worth a range read but far too small to stream; a whole
+ * untrimmed 3-minute track has nothing to skip but must be streamed. Testing only one of them would
+ * leave the dominant shape of a real project on the full-decode path.
+ *
+ * Judged from the duration and the trim alone, so it can be answered synchronously — which is what
+ * lets the warm-up decide whether to stage a shared full decode BEFORE any probe has run. The
+ * container is only known after a probe, so this is a hint: a cell that passes here can still fall
+ * back, and the only cost of that is one unshared decode.
+ *
+ * Stereo is assumed, the same assumption `estimatePcmBytes` makes and for the same reason — the
+ * channel count is unknown before decoding. The ratio term is channel-independent anyway.
+ */
+function isPartialPathLikely(cell: GridCell, durationMs: number | null): boolean {
+  const sourceSeconds = (durationMs ?? 0) / 1000;
+  if (sourceSeconds <= 0) {
+    return false;
+  }
+  const { startSeconds, endSeconds } = getClampedPlaybackRange(cell, sourceSeconds);
+  const windowSeconds = endSeconds - startSeconds;
+  if (windowSeconds <= 0) {
+    return false;
+  }
+  return (
+    shouldReadRange({
+      sourceSeconds,
+      windowSeconds,
+      sampleRate: DECODE_SAMPLE_RATE,
+      channels: 2
+    }) ||
+    shouldSegmentWindow({ windowSeconds, sampleRate: DECODE_SAMPLE_RATE, channels: 2 })
+  );
 }
 
 /**
@@ -191,9 +299,16 @@ function stopRoute(route: AudioRoute) {
     route.envelopeGain.gain.setValueAtTime(0, now);
   }
 
-  if (route.source) {
+  for (const segment of route.segments) {
+    // Never later than a stop this segment already has: a later `stop` extends an earlier one, so
+    // pushing a segment past its handoff would overlap it with the next one.
+    const stopAt =
+      segment.stopAtContextTime === null
+        ? now + RELEASE_SECONDS
+        : Math.min(segment.stopAtContextTime, now + RELEASE_SECONDS);
     try {
-      route.source.stop(now + RELEASE_SECONDS);
+      segment.source.stop(stopAt);
+      segment.stopAtContextTime = stopAt;
     } catch {
       // The source may already be stopped by the browser.
     }
@@ -204,7 +319,9 @@ function stopRoute(route: AudioRoute) {
   }
 
   window.setTimeout(() => {
-    route.source?.disconnect();
+    for (const segment of route.segments) {
+      segment.source.disconnect();
+    }
     route.envelopeGain.disconnect();
     route.volumeGain.disconnect();
     if (route.mode === "media") {
@@ -391,6 +508,92 @@ export function useAudioEngine(
     [decodeFullBuffer]
   );
 
+  /**
+   * Decodes just the cell's window straight out of the file, or declines.
+   *
+   * Declining is the normal outcome for most cells and costs nothing: a short cue, an untrimmed
+   * one, or a container without a partial path all fall through to the full decode. The gate is on
+   * SAVING, not on window length — a 5-second window out of a 180-second file is the single most
+   * profitable case there is, and a length gate would have excluded it.
+   */
+  const tryDecodeRange = useCallback(
+    async (cell: GridCell, mediaId: string, mono: boolean): Promise<PlaybackBufferEntry | null> => {
+      const asset = mediaRef.current.find((candidate) => candidate.id === mediaId);
+      if (!isPartialPathLikely(cell, asset?.durationMs ?? null)) {
+        return null;
+      }
+      const sourceSeconds = (asset?.durationMs ?? 0) / 1000;
+      const { startSeconds, endSeconds } = getClampedPlaybackRange(cell, sourceSeconds);
+
+      try {
+        // A window large enough to stream becomes a HEAD plus a plan; the rest arrives while the
+        // head plays. The head is what gets cached, so a warm cell still starts instantly.
+        //
+        // Loops are excluded from streaming in this version, deliberately. A looping cue is by
+        // definition one the user hears over and over, so decoding it once in full is the right
+        // price rather than a loss — and it sidesteps re-streaming the whole track on every
+        // iteration. A loop still benefits from a plain range read of its window.
+        const plan =
+          cell.playbackMode === "loop"
+            ? null
+            : await planMediaSegments({ mediaId, startSeconds, endSeconds });
+        const head = plan?.segments[0];
+        if (plan && head) {
+          const result = await decodeMediaRange({
+            mediaId,
+            startSeconds: head.startSeconds,
+            // The margin is real audio past the nominal boundary, so the outgoing segment always
+            // has samples to play right up to the handoff.
+            endSeconds: head.bufferEndSeconds,
+            mono
+          });
+          if (result) {
+            recordPartialServed("streamed");
+            return {
+              ...result.entry,
+              // The larger of the container's and the decoder's idea of the duration. A container
+              // duration shorter by one frame would silently shorten every cell whose trim end is
+              // "to the end", because the editor measured that against the decoder's.
+              sourceDurationSeconds: Math.max(
+                result.entry.sourceDurationSeconds,
+                plan.sourceDurationSeconds
+              ),
+              partial: {
+                mediaId,
+                headEndSeconds: head.endSeconds,
+                windowEndSeconds: endSeconds,
+                mono
+              }
+            };
+          }
+        }
+
+        // Falling back to a plain range read only when it actually pays. Without this check a
+        // window that was merely large enough to stream — but had nothing to skip — would be range
+        // read in full: correct audio, no saving, and the gate bypassed.
+        if (
+          !shouldReadRange({
+            sourceSeconds,
+            windowSeconds: endSeconds - startSeconds,
+            sampleRate: DECODE_SAMPLE_RATE,
+            channels: 2
+          })
+        ) {
+          recordPartialServed("declined");
+          return null;
+        }
+        const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono });
+        recordPartialServed(result ? "range" : "declined");
+        return result?.entry ?? null;
+      } catch {
+        // Never fail a cue from here; the full decode below is the fallback.
+        recordPartialServed("declined");
+        return null;
+      }
+    },
+    []
+  );
+
   const loadPlaybackEntry = useCallback(
     async (cell: GridCell, mediaId: string, cacheKey: string): Promise<PlaybackBufferEntry | null> => {
       const cached = playbackBufferCache.get(cacheKey);
@@ -406,6 +609,18 @@ export function useAudioEngine(
       const mono = monoRef.current;
       const purgeGeneration = purgeGenerationRef.current;
       const promise = (async () => {
+        // Byte-range path first, and inside a `try` that swallows everything: the partial path must
+        // never be able to fail a cue, only to decline it. Any decline — an unsupported container,
+        // a mid-file MP3 window with no measured offset, a blocked browser, a throw from the
+        // decoder — falls through to the full decode below, which is unchanged.
+        const rangeEntry = await tryDecodeRange(cell, mediaId, mono);
+        if (rangeEntry) {
+          if (purgeGenerationRef.current === purgeGeneration) {
+            playbackBufferCache.set(cacheKey, rangeEntry);
+          }
+          return rangeEntry;
+        }
+
         const full = await getFullBuffer(mediaId);
         if (!full) {
           return null;
@@ -449,7 +664,7 @@ export function useAudioEngine(
       inflightRef.current.set(cacheKey, promise);
       return promise;
     },
-    [getFullBuffer]
+    [getFullBuffer, tryDecodeRange]
   );
 
   const getCacheKey = useCallback(
@@ -594,6 +809,24 @@ export function useAudioEngine(
           );
         }
 
+        // Watchdog for a streamed route whose chain died without reaching its last segment. End of
+        // cue is normally detected from a segment's `onended`, so a route with no segment still to
+        // come would otherwise stay `data-playing="true"` forever and keep this loop re-arming at
+        // 60 Hz for the rest of the session. A one-segment route can never hit this: its only
+        // segment is last by construction.
+        if (
+          route.mode === "buffer" &&
+          currentSeconds > route.endSeconds + RELEASE_SECONDS &&
+          !route.segments.some((segment) => segment.isLast)
+        ) {
+          // Counted, because a cue ending HERE rather than from its last segment is a symptom, not
+          // a feature: the audible result is the same, so without a counter a broken `isLast` would
+          // be silently covered up by its own safety net.
+          recordSegment("watchdog");
+          endedCellKeys.push(cell.cellKey);
+          return [];
+        }
+
         const range = Math.max(0.1, route.endSeconds - route.offsetSeconds);
         return [
           {
@@ -678,6 +911,8 @@ export function useAudioEngine(
         envelopeGain,
         volumeGain,
         lastVolume: baseVolume,
+        // The media-element route drives an HTMLAudioElement, not buffer sources.
+        segments: [],
         audio,
         url,
         startedAtContextTime: context.currentTime,
@@ -720,6 +955,188 @@ export function useAudioEngine(
     [addPlayingCell, getCacheKey, masterMuted, masterVolume, stopCellKey]
   );
 
+  /**
+   * Marks a segment as the cue's last one and, if it has already finished, ends the cue.
+   *
+   * The escape hatch for a chain that gives up: without it, `isLast` would never be reached, and a
+   * cue would sit `data-playing="true"` forever while the rAF loop spun at 60 Hz for the rest of
+   * the session — it re-arms while any route is live, and end-of-cue for a buffer route is only
+   * ever detected from a segment's `onended`.
+   */
+  const promoteToLast = useCallback(
+    (route: AudioRoute, cellKey: string, token: number) => {
+      const last = route.segments[route.segments.length - 1];
+      if (!last) {
+        stopCellKey(cellKey);
+        return;
+      }
+      last.isLast = true;
+      const ended =
+        last.stopAtContextTime !== null && route.context.currentTime >= last.stopAtContextTime;
+      if (ended) {
+        // Its `onended` already fired and did nothing, because it was not last at the time.
+        if (
+          routeByCellRef.current.get(cellKey) === route &&
+          playTokenByCellRef.current.get(cellKey) === token
+        ) {
+          stopCellKey(cellKey);
+        }
+      }
+    },
+    [stopCellKey]
+  );
+
+  /**
+   * Fetches and schedules the segments after the head, one at a time, while the cue plays.
+   *
+   * Every value it works in is source time except the two context times it derives, and the mapping
+   * between them is fixed by `t0`: segment n covers source `[start_n, end_n)` at context
+   * `[t0 + start_n - windowStart, ...)`. That is what lets a single envelope curve, scheduled once
+   * at press time on the shared gain, stay correct across every segment.
+   *
+   * `mono` and the window come from the plan, captured at press time and never re-read from a ref:
+   * a live route is immune to a mid-cue mono toggle today because its cache key is pinned, and a
+   * chain that re-read the ref would hand a one-channel buffer to the same gain the two-channel
+   * head feeds, collapsing the cue to dual mono partway through.
+   */
+  const runSegmentChain = useCallback(
+    async (input: {
+      route: AudioRoute;
+      cell: GridCell;
+      mediaAsset: MediaAsset;
+      token: number;
+      cellKey: string;
+      partial: NonNullable<PlaybackBufferEntry["partial"]>;
+      windowStartSeconds: number;
+      windowEndSeconds: number;
+      t0: number;
+    }) => {
+      const { route, cell, mediaAsset, token, cellKey, partial, t0 } = input;
+      const context = route.context;
+      const isStale = () =>
+        routeByCellRef.current.get(cellKey) !== route ||
+        playTokenByCellRef.current.get(cellKey) !== token;
+
+      // Everything below runs inside one guard, so a throw anywhere in the scheduling — not only in
+      // the decode, which has its own — still ends the cue through the normal path. Without it, an
+      // exception outside the inner try would kill the chain silently: the cue would keep its route
+      // with no segment left to fire `onended`, and only the rAF watchdog would ever notice. The
+      // watchdog is meant to be the second line of defence, not the first.
+      try {
+        const segments = planSegments({
+          startSeconds: input.windowStartSeconds,
+          endSeconds: input.windowEndSeconds,
+          sourceDurationSeconds: route.bufferDurationSeconds
+        });
+
+        for (let index = 1; index < segments.length; index += 1) {
+          const planned = segments[index];
+          if (!planned || isStale()) {
+            return;
+          }
+
+          const at = t0 + (planned.startSeconds - input.windowStartSeconds);
+
+          // Wait until the prefetch window opens. Decoding every segment up front would put the whole
+          // track's PCM back in memory, which is the thing this feature exists to avoid.
+          while (context.currentTime < at - SEGMENT_PREFETCH_SECONDS) {
+            await new Promise<void>((resolve) => {
+              window.setTimeout(resolve, SEGMENT_WAIT_STEP_MS);
+            });
+            if (isStale()) {
+              return;
+            }
+          }
+
+          let result: Awaited<ReturnType<typeof decodeMediaRange>> = null;
+          try {
+            result = await decodeMediaRange({
+              mediaId: partial.mediaId,
+              startSeconds: planned.startSeconds,
+              endSeconds: planned.bufferEndSeconds,
+              mono: partial.mono
+            });
+          } catch {
+            result = null;
+          }
+          if (isStale()) {
+            return;
+          }
+          if (!result) {
+            // Nothing to continue with. End the cue the way an ordinary cue ends rather than leaving
+            // a route with no live source.
+            recordSegment("missed");
+            promoteToLast(route, cellKey, token);
+            return;
+          }
+
+          const resolution = resolveLateSegment({
+            scheduledAtSeconds: at,
+            nowSeconds: context.currentTime
+          });
+          if (resolution.action === "give-up") {
+            recordSegment("missed");
+            promoteToLast(route, cellKey, token);
+            return;
+          }
+          recordSegment(resolution.skippedSeconds > 0 ? "late" : "scheduled");
+
+          const isLast = index === segments.length - 1;
+          const nextPlanned = segments[index + 1];
+          const nextAt =
+            isLast || !nextPlanned
+              ? null
+              : t0 + (nextPlanned.startSeconds - input.windowStartSeconds);
+
+          const source = context.createBufferSource();
+          source.buffer = result.entry.buffer;
+          source.connect(route.envelopeGain);
+
+          const segment: RouteSegment = {
+            source,
+            // A late segment resumes at the correct SOURCE position, so the cue stays on its own
+            // timeline: the audible result is a dropout as long as the lateness, not a shift that
+            // would drift out of phase with the envelope.
+            startSeconds: planned.startSeconds + resolution.skippedSeconds,
+            endSeconds: planned.endSeconds,
+            atContextTime: resolution.atSeconds,
+            isLast,
+            stopAtContextTime: null
+          };
+          route.segments.push(segment);
+
+          source.onended = () => {
+            if (isStale()) {
+              return;
+            }
+            if (!segment.isLast) {
+              source.disconnect();
+              return;
+            }
+            stopCellKey(cellKey);
+          };
+
+          source.start(
+            resolution.atSeconds,
+            segment.startSeconds - result.entry.sliceStartSeconds
+          );
+          if (nextAt !== null) {
+            source.stop(nextAt);
+            segment.stopAtContextTime = nextAt;
+          }
+        }
+          void cell;
+          void mediaAsset;
+      } catch {
+        if (!isStale()) {
+          recordSegment("missed");
+          promoteToLast(route, cellKey, token);
+        }
+      }
+    },
+    [promoteToLast, stopCellKey]
+  );
+
   const startBufferRoute = useCallback(
     (
       cell: GridCell,
@@ -757,7 +1174,25 @@ export function useAudioEngine(
       envelopeGain.connect(volumeGain);
       volumeGain.connect(context.destination);
       volumeGain.gain.setValueAtTime(baseVolume, context.currentTime);
-      scheduleEnvelope(envelopeGain, cell, startSeconds, endSeconds);
+      if (!entry.partial) {
+        // A streamed route schedules its envelope below instead, anchored to the same explicit
+        // start time as its head. Scheduling here as well would leave two curves on one gain: the
+        // second `setValueCurveAtTime` overlaps the first, which the spec makes throw, and the
+        // fallback `setValueAtTime` throws too inside a running curve — leaving the gain pinned
+        // wherever the cancel stopped it, at full scale, for the rest of the cue.
+        scheduleEnvelope(envelopeGain, cell, startSeconds, endSeconds);
+      }
+
+      const segment: RouteSegment = {
+        source,
+        startSeconds,
+        endSeconds,
+        atContextTime: context.currentTime,
+        // A classic route is one segment, so it is the last one by construction and keeps today's
+        // end-of-cue behaviour exactly.
+        isLast: true,
+        stopAtContextTime: null
+      };
 
       const route: AudioRoute = {
         mode: "buffer",
@@ -765,7 +1200,7 @@ export function useAudioEngine(
         envelopeGain,
         volumeGain,
         lastVolume: baseVolume,
-        source,
+        segments: [segment],
         startedAtContextTime: context.currentTime,
         offsetSeconds: startSeconds,
         endSeconds,
@@ -782,11 +1217,19 @@ export function useAudioEngine(
         if (playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
+        // Only the last segment ends the cue. A non-last segment finishing means the next one is
+        // already playing, so its node is simply released.
+        if (!segment.isLast) {
+          source.disconnect();
+          return;
+        }
         if (cell.playbackMode === "loop") {
           // An AudioBufferSourceNode cannot be restarted, so a loop must build a new one. The
           // gains it fed are finished as well; disconnecting them releases the chain
           // deterministically instead of leaving it to the collector.
-          source.disconnect();
+          for (const finished of route.segments) {
+            finished.source.disconnect();
+          }
           envelopeGain.disconnect();
           volumeGain.disconnect();
           startBufferRoute(cell, mediaAsset, entry, token, cellKey, cacheKey);
@@ -795,11 +1238,54 @@ export function useAudioEngine(
         stopCellKey(cellKey);
       };
       // Buffer time, not source time: a sliced buffer starts at `sliceStartSeconds`.
+      if (entry.partial) {
+        // Streamed window. The head is scheduled with an EXPLICIT time rather than `start(0)`,
+        // because `start(0)` never reports which frame it actually landed on — the browser begins
+        // it on the next render quantum, up to 128 frames later — and the handoff time for the next
+        // segment is computed from this number. Measured: a requested time in the future is honoured
+        // to the sample, while `start(0)` leaves the app guessing.
+        const t0 = context.currentTime + SCHEDULE_LEAD_SECONDS;
+        const headEnd = Math.min(entry.partial.headEndSeconds, endSeconds);
+        const handoffAt = t0 + (headEnd - startSeconds);
+
+        segment.atContextTime = t0;
+        segment.endSeconds = headEnd;
+        segment.isLast = headEnd >= endSeconds;
+        route.startedAtContextTime = t0;
+
+        // The envelope must be anchored to the same t0, or the fades would run ahead of the sound
+        // by the lead. One curve covers the whole window on the shared gain, so no segment ever
+        // reschedules it.
+        scheduleEnvelope(envelopeGain, cell, startSeconds, endSeconds, t0);
+
+        // No `duration`: the segment is bounded by its `stop` at the shared handoff time, which is
+        // sample-accurate on both sides and therefore leaves no gap and no overlap.
+        source.start(t0, startSeconds - entry.sliceStartSeconds);
+        if (!segment.isLast) {
+          source.stop(handoffAt);
+          segment.stopAtContextTime = handoffAt;
+          void runSegmentChain({
+            route,
+            cell,
+            mediaAsset,
+            token,
+            cellKey,
+            partial: entry.partial,
+            windowStartSeconds: startSeconds,
+            windowEndSeconds: endSeconds,
+            t0
+          });
+        }
+
+        addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
+        return true;
+      }
+
       source.start(0, startSeconds - entry.sliceStartSeconds, playDurationSeconds);
       addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
       return true;
     },
-    [addPlayingCell, getContext, masterMuted, masterVolume, stopCellKey]
+    [addPlayingCell, getContext, masterMuted, masterVolume, runSegmentChain, stopCellKey]
   );
 
   const playCell = useCallback(
@@ -1035,8 +1521,22 @@ export function useAudioEngine(
 
     // Media that more than one target needs is staged so its full decode is shared instead of
     // repeated. Counted up front, because that is exactly how many releases to expect.
+    //
+    // Targets that will take the byte-range path are excluded, and that exclusion is load-bearing:
+    // staging kicks off a FULL decode before the targets are processed, so leaving a range-bound
+    // media in the count means paying the whole 220-330 MiB transient anyway and then not using it.
+    // Sharing a decode is what staging is for, and two range reads have nothing to share — each is
+    // about ten milliseconds of work on a different part of the file.
+    //
+    // The test is a hint, not a guarantee: eligibility is judged from the duration and trim, which
+    // are known synchronously, while the container is only known after a probe. A wrong hint costs
+    // one unshared decode, never a wrong buffer.
     const pendingByMedia = new Map<string, number>();
     for (const target of uniqueTargets) {
+      const asset = mediaRef.current.find((candidate) => candidate.id === target.mediaId);
+      if (isPartialPathLikely(target.cell, asset?.durationMs ?? null)) {
+        continue;
+      }
       pendingByMedia.set(target.mediaId, (pendingByMedia.get(target.mediaId) ?? 0) + 1);
     }
     const startWarmup = async () => {
@@ -1113,6 +1613,18 @@ export function useAudioEngine(
               promise: decodeFullBuffer(target.mediaId).catch(() => null),
               pending: waiting
             });
+          }
+
+          // A cue starting mid-file needs the decoder offset measured before its window can be
+          // read as a range at all, and measuring costs two short decodes — so it happens here, in
+          // the warm-up, and only for the cells that actually need it. A cue starting at the head
+          // never does: a decode from byte 0 is already on the app's timeline.
+          if ((target.cell.trimStartMs ?? 0) > 0) {
+            await ensureMp3Alignment(target.mediaId).catch(() => false);
+            if (warmupRunRef.current !== runId) {
+              releaseStaged(target.mediaId);
+              return;
+            }
           }
 
           reservedBytes += estimate ?? 0;

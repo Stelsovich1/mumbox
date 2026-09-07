@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-09-05T21:31:22.012Z",
-  "notes": "WAV-only fixtures: decode is near-free by design, which isolates memory and IndexedDB cost from codec cost. Recorded locally; see codec-cost.perf.spec.ts for the codec axis.",
+  "recordedAt": "2026-09-07T19:33:24.697Z",
+  "notes": "WAV-only fixtures: decode is near-free by design, which isolates memory and IndexedDB cost from codec cost. Recorded locally; see codec-cost.perf.spec.ts for the codec axis. Fixtures long enough to be streamed take the byte-range path, so their decode counts are 0 and their cached bytes are heads; partial-off-12x180s holds the full-decode figures for comparison.",
   "env": {
     "os": "win32",
     "cpuModel": "Intel(R) Xeon(R) Gold 6430",
@@ -54,15 +54,15 @@
           "unit": "count"
         },
         "warmupTotalMs": {
-          "value": 200.6000000089407,
+          "value": 231.89999999850988,
           "unit": "ms"
         },
         "decodeMsPerMb": {
-          "value": 40.62060730641919,
+          "value": 67.26016837995593,
           "unit": "ms/MB"
         },
         "firstPaintMs": {
-          "value": 338,
+          "value": 398,
           "unit": "ms"
         },
         "panelSwitchFirstMs": {
@@ -82,7 +82,7 @@
           "unit": "ms"
         },
         "jsHeapBytes": {
-          "value": 7537908,
+          "value": 7476888,
           "unit": "bytes"
         }
       }
@@ -102,63 +102,15 @@
           "unit": "count"
         },
         "warmupTotalMs": {
-          "value": 305.70000000298023,
+          "value": 214.89999999850988,
           "unit": "ms"
         },
         "decodeMsPerMb": {
-          "value": 37.03087920761388,
+          "value": 53.84592131316032,
           "unit": "ms/MB"
         },
         "firstPaintMs": {
-          "value": 396,
-          "unit": "ms"
-        },
-        "panelSwitchFirstMs": {
-          "value": 0,
-          "unit": "ms"
-        },
-        "panelSwitchRepeatMs": {
-          "value": 0,
-          "unit": "ms"
-        },
-        "fpsDuring8Plays": {
-          "value": 58,
-          "unit": "fps"
-        },
-        "frameIntervalP95Ms": {
-          "value": 17,
-          "unit": "ms"
-        },
-        "jsHeapBytes": {
-          "value": 8066496,
-          "unit": "bytes"
-        }
-      }
-    },
-    "grid144-small-distinct-1panel": {
-      "metrics": {
-        "cachedPcmBytesTotal": {
-          "value": 76204800,
-          "unit": "bytes"
-        },
-        "cachedPcmBytesActive": {
-          "value": 76204800,
-          "unit": "bytes"
-        },
-        "warmupSkippedCount": {
-          "value": 0,
-          "unit": "count"
-        },
-        "warmupTotalMs": {
-          "value": 7094.699999988079,
-          "unit": "ms"
-        },
-        "decodeMsPerMb": {
-          "value": 201.7805051539444,
-          "unit": "ms/MB"
-        },
-        "firstPaintMs": {
-          "value": 574,
+          "value": 365,
           "unit": "ms"
         },
         "panelSwitchFirstMs": {
@@ -178,19 +130,19 @@
           "unit": "ms"
         },
         "jsHeapBytes": {
-          "value": 14221608,
+          "value": 8089156,
           "unit": "bytes"
         }
       }
     },
-    "grid100-medium-1panel": {
+    "grid144-small-distinct-1panel": {
       "metrics": {
         "cachedPcmBytesTotal": {
-          "value": 127008000,
+          "value": 76204800,
           "unit": "bytes"
         },
         "cachedPcmBytesActive": {
-          "value": 127008000,
+          "value": 76204800,
           "unit": "bytes"
         },
         "warmupSkippedCount": {
@@ -198,15 +150,15 @@
           "unit": "count"
         },
         "warmupTotalMs": {
-          "value": 910.7000000029802,
+          "value": 7260.39999999851,
           "unit": "ms"
         },
         "decodeMsPerMb": {
-          "value": 16.770457690827968,
+          "value": 211.7939571679126,
           "unit": "ms/MB"
         },
         "firstPaintMs": {
-          "value": 532,
+          "value": 522,
           "unit": "ms"
         },
         "panelSwitchFirstMs": {
@@ -218,7 +170,7 @@
           "unit": "ms"
         },
         "fpsDuring8Plays": {
-          "value": 57,
+          "value": 59,
           "unit": "fps"
         },
         "frameIntervalP95Ms": {
@@ -226,19 +178,19 @@
           "unit": "ms"
         },
         "jsHeapBytes": {
-          "value": 11609372,
+          "value": 15312132,
           "unit": "bytes"
         }
       }
     },
-    "grid36-medium-5panels": {
+    "grid100-medium-1panel": {
       "metrics": {
         "cachedPcmBytesTotal": {
-          "value": 127008000,
+          "value": 2370912,
           "unit": "bytes"
         },
         "cachedPcmBytesActive": {
-          "value": 127008000,
+          "value": 2370912,
           "unit": "bytes"
         },
         "warmupSkippedCount": {
@@ -246,23 +198,23 @@
           "unit": "count"
         },
         "warmupTotalMs": {
-          "value": 674.7999999970198,
+          "value": 418.80000000447035,
           "unit": "ms"
         },
         "decodeMsPerMb": {
-          "value": 16.458668901645694,
+          "value": 0,
           "unit": "ms/MB"
         },
         "firstPaintMs": {
-          "value": 407,
+          "value": 468,
           "unit": "ms"
         },
         "panelSwitchFirstMs": {
-          "value": 179,
+          "value": 0,
           "unit": "ms"
         },
         "panelSwitchRepeatMs": {
-          "value": 146,
+          "value": 0,
           "unit": "ms"
         },
         "fpsDuring8Plays": {
@@ -274,7 +226,55 @@
           "unit": "ms"
         },
         "jsHeapBytes": {
-          "value": 10244160,
+          "value": 12089824,
+          "unit": "bytes"
+        }
+      }
+    },
+    "grid36-medium-5panels": {
+      "metrics": {
+        "cachedPcmBytesTotal": {
+          "value": 2370912,
+          "unit": "bytes"
+        },
+        "cachedPcmBytesActive": {
+          "value": 2370912,
+          "unit": "bytes"
+        },
+        "warmupSkippedCount": {
+          "value": 0,
+          "unit": "count"
+        },
+        "warmupTotalMs": {
+          "value": 281.79999999701977,
+          "unit": "ms"
+        },
+        "decodeMsPerMb": {
+          "value": 0,
+          "unit": "ms/MB"
+        },
+        "firstPaintMs": {
+          "value": 396,
+          "unit": "ms"
+        },
+        "panelSwitchFirstMs": {
+          "value": 186,
+          "unit": "ms"
+        },
+        "panelSwitchRepeatMs": {
+          "value": 167,
+          "unit": "ms"
+        },
+        "fpsDuring8Plays": {
+          "value": 54,
+          "unit": "fps"
+        },
+        "frameIntervalP95Ms": {
+          "value": 33,
+          "unit": "ms"
+        },
+        "jsHeapBytes": {
+          "value": 10694788,
           "unit": "bytes"
         }
       }
@@ -292,6 +292,106 @@
         "storageUsageBytes": {
           "value": 8504,
           "unit": "bytes"
+        }
+      }
+    },
+    "partial-trimmed-12x180s": {
+      "metrics": {
+        "cachedPcmBytesTotal": {
+          "value": 21168000,
+          "unit": "bytes"
+        },
+        "maxSingleDecodeOutputBytes": {
+          "value": 0,
+          "unit": "bytes"
+        },
+        "fullDecodeCount": {
+          "value": 0,
+          "unit": "count"
+        },
+        "rangeReadBytes": {
+          "value": 11468736,
+          "unit": "bytes"
+        },
+        "warmupTotalMs": {
+          "value": 439.79999999701977,
+          "unit": "ms"
+        }
+      }
+    },
+    "partial-streamed-12x180s": {
+      "metrics": {
+        "cachedPcmBytesTotal": {
+          "value": 2370912,
+          "unit": "bytes"
+        },
+        "headBytesPerCell": {
+          "value": 197576,
+          "unit": "bytes"
+        },
+        "fullDecodeCount": {
+          "value": 0,
+          "unit": "count"
+        },
+        "streamedServed": {
+          "value": 12,
+          "unit": "count"
+        },
+        "peakConcurrentDecodeBytes": {
+          "value": 0,
+          "unit": "bytes"
+        },
+        "segmentsMissed": {
+          "value": 0,
+          "unit": "count"
+        }
+      }
+    },
+    "partial-off-12x180s": {
+      "metrics": {
+        "cachedPcmBytesTotal": {
+          "value": 762048000,
+          "unit": "bytes"
+        },
+        "maxSingleDecodeOutputBytes": {
+          "value": 63504000,
+          "unit": "bytes"
+        },
+        "fullDecodeCount": {
+          "value": 12,
+          "unit": "count"
+        }
+      }
+    },
+    "partial-streamed-first-sound": {
+      "metrics": {
+        "timeToFirstSoundWarmMaxMs": {
+          "value": 0.7999999970197678,
+          "unit": "ms"
+        },
+        "timeToFirstSoundWarmMedianMs": {
+          "value": 0.6999999955296516,
+          "unit": "ms"
+        }
+      }
+    },
+    "partial-144cells-long": {
+      "metrics": {
+        "cachedPcmBytesTotal": {
+          "value": 4741824,
+          "unit": "bytes"
+        },
+        "fullDecodeCount": {
+          "value": 0,
+          "unit": "count"
+        },
+        "streamedServed": {
+          "value": 24,
+          "unit": "count"
+        },
+        "warmupTotalMs": {
+          "value": 1078.8000000044703,
+          "unit": "ms"
         }
       }
     }

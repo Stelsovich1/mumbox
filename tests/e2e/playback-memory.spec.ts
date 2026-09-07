@@ -323,7 +323,9 @@ test("keeps the whole buffer when trimming would not pay", async ({ page }) => {
   expect(await diagPcmBytes(page)).toBe(DECODED_BYTES);
 });
 
-test("two trims of one media share a single decode", async ({ page }) => {
+test("two trims of one media are read as two byte ranges instead of one shared decode", async ({
+  page
+}) => {
   await installBufferAudioMock(page);
   await seedProject(page, {
     panels: 1,
@@ -341,8 +343,15 @@ test("two trims of one media share a single decode", async ({ page }) => {
   await waitForWarm(page, 2);
 
   await expect.poll(async () => (await diagCacheKeys(page)).length, { timeout: 20_000 }).toBe(2);
-  // The staging buffer means the second trim slices the first decode instead of decoding again.
-  expect(await diagDecodeCount(page)).toBe(1);
+  // This assertion used to be `1`: staging decoded the whole 60 s once and sliced it twice, which
+  // is the best a full-decode path can do. Two range reads beat it outright — 10 s of this file is
+  // touched instead of 60 — so there is no full decode left to count.
+  //
+  // Sharing a decode was never the goal; avoiding the 60 s decode was. Two 5 s reads never allocate
+  // the transient that one 60 s decode does, and that transient is what kills a tab. Do not
+  // "restore" this to 1 by keeping staging alive for range-bound media: that would pay the whole
+  // transient and then throw the result away.
+  expect(await diagDecodeCount(page)).toBe(0);
   expect(await diagPcmBytes(page)).toBe(2 * 5 * 44_100 * 2 * 4);
 });
 

@@ -14,10 +14,20 @@ In scope (logic that is unit- or probe-testable):
 | `src/features/playback/model/audioEnvelope.ts` | all |
 | `src/features/playback/model/audioBufferCache.ts` | all |
 | `src/features/playback/model/decodeAudio.ts` | `shouldSliceBuffer`, `sliceAudioBuffer` |
+| `src/features/playback/model/mp3FrameIndex.ts` | all |
+| `src/features/playback/model/wavPartial.ts` | all |
+| `src/features/playback/model/mediaFormat.ts` | all |
+| `src/features/playback/model/partialPlan.ts` | all |
+| `src/features/playback/model/pcmAlign.ts` | all |
+| `src/features/playback/model/mediaProbeCache.ts` | all |
+| `src/features/playback/model/decodeSemaphore.ts` | `createSemaphore` |
+| `src/features/playback/model/partialSource.ts` | `planMediaSegments`, `decodeWavRange`, `decodeMp3Range`, `verifyConstantFrameBytes`, `ensureScannedTo`, `ensureMp3Alignment` |
+| `src/features/playback/model/partialVerify.ts` | `verifyMp3Alignment` |
+| `src/shared/lib/partialDecodePolicy.ts` | all |
 | `src/features/audio-editor/model/waveformCache.ts` | all |
 | `src/shared/lib/mediaCacheRegistry.ts` | all |
 | `src/shared/lib/diagnostics.ts` | `recordDecode`, `recordTimeToFirstSound`, `getBudgetOverrideFromQuery` |
-| `src/features/playback/model/useAudioEngine.ts` | `getEffectiveVolume`, `getHtmlAudioVolume`, `getClampedPlaybackRange`, `getTrimmedDurationMs`, `getEnvelopeSignature`, `arePlayingCellsEqual`, `setRouteVolume`, `stopRoute`, `startBufferRoute`, the `playCell` token guards, the rAF `tick`, the warm-up and panel-eviction effects |
+| `src/features/playback/model/useAudioEngine.ts` | `getEffectiveVolume`, `getHtmlAudioVolume`, `getClampedPlaybackRange`, `getTrimmedDurationMs`, `getEnvelopeSignature`, `arePlayingCellsEqual`, `setRouteVolume`, `stopRoute`, `startBufferRoute` including its `entry.partial` branch, the `playCell` token guards, the rAF `tick` including the streamed-route watchdog, the warm-up and panel-eviction effects, `isPartialPathLikely`, `tryDecodeRange`, `runSegmentChain`, `promoteToLast` |
 | `src/app/model/appState.ts` | the `media/deleteMany` case, the `cell/assignMany` case, `remapImportedState`, `writeMergedProjectMedia` |
 | `src/entities/panel/model/panelCells.ts` | `getPanelCellIds`, `normalizePanelCellIds`, `remapLegacyCells`, `ensurePanelCells` |
 | `src/entities/panel/model/panelName.ts` | all |

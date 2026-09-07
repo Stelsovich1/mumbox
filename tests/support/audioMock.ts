@@ -25,6 +25,16 @@ export type AudioMockOptions = {
   contextState?: "running" | "suspended" | "interrupted";
   /** When false, `createBufferSource` is absent and the media-element fallback is driven. */
   bufferSource?: boolean;
+  /**
+   * Makes the Nth `Blob.slice(...).arrayBuffer()` reject (1-based); 0 disables it.
+   *
+   * The byte-range path reads through `blob.slice`, and for WAV it never calls `decodeAudioData` at
+   * all — the conversion is our own arithmetic — so a decode-level failure injection cannot reach
+   * it. Failing a read is the only way to exercise what happens when a segment cannot be fetched,
+   * which is what both the give-up path and the watchdog exist for. Without this, a mutation to
+   * either of them survives every test.
+   */
+  failNthRangeRead?: number;
 };
 
 export type MockCurveCall = { curve: number[]; startTime: number; duration: number };
@@ -320,7 +330,12 @@ const MOCK_SCRIPT = (options: Required<AudioMockOptions>) => {
       });
       const playFor =
         resolvedDuration ?? (this.buffer ? this.buffer.duration - resolvedOffset : 0);
-      this.endsAtClock = probe.clock + Math.max(0, playFor);
+      // `when` must be honoured, not ignored: a source scheduled into the future ends that much
+      // later, and treating every start as "now" would make any future-scheduled source — the
+      // whole basis of a segment handoff — end at the wrong clock and fire `onended` early.
+      // Invisible to specs that pass no `when`, since `max(clock, 0)` is `clock`.
+      const startsAt = Math.max(probe.clock, when ?? 0);
+      this.endsAtClock = startsAt + Math.max(0, playFor);
     }
 
     stop(when?: number) {
@@ -616,6 +631,27 @@ const MOCK_SCRIPT = (options: Required<AudioMockOptions>) => {
     originalRevokeObjectURL(url);
   };
 
+  if (options.failNthRangeRead > 0) {
+    // Wraps `arrayBuffer` on slices only, by counting every call and rejecting the chosen one. The
+    // byte-range reader is the only thing in the app that reads blobs this way, so this is a
+    // targeted failure injection rather than a blanket outage.
+    // Typed through a `this`-annotated shape rather than read straight off the prototype: an
+    // unannotated `Blob.prototype.arrayBuffer` is an unbound method reference, which the lint rules
+    // reject for good reason.
+    const proto = Blob.prototype as unknown as {
+      arrayBuffer: (this: Blob) => Promise<ArrayBuffer>;
+    };
+    const original = proto.arrayBuffer;
+    let reads = 0;
+    proto.arrayBuffer = function patchedArrayBuffer(this: Blob) {
+      reads += 1;
+      if (reads === options.failNthRangeRead) {
+        return Promise.reject(new Error("injected range-read failure"));
+      }
+      return original.call(this);
+    };
+  }
+
   Object.defineProperty(window, "__mumboxAudio", { value: probe, configurable: true });
   Object.defineProperty(window, "AudioContext", { value: MockAudioContext, configurable: true });
   Object.defineProperty(window, "webkitAudioContext", {
@@ -636,7 +672,8 @@ function resolveOptions(options: AudioMockOptions, bufferSource: boolean): Requi
     decodedChannels: options.decodedChannels ?? 1,
     decodeDelayMs: options.decodeDelayMs ?? 0,
     contextState: options.contextState ?? "running",
-    bufferSource
+    bufferSource,
+    failNthRangeRead: options.failNthRangeRead ?? 0
   };
 }
 

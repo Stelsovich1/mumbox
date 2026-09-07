@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { diagDecodeCount, diagPcmBytes, diagPcmBytesForActivePanel, diagSnapshot } from "../support/diag";
+import { diagPcmBytes, diagPcmBytesForActivePanel, diagSnapshot } from "../support/diag";
 import { seedProject } from "../support/seedProject";
 import type { GridSize, SeedResult } from "../support/seedProject";
 import { SIZES } from "../support/audioFixtures";
@@ -45,8 +45,12 @@ const FULL: Scenario[] = [
 const scenarios = process.env.PERF_FULL === "1" ? [...SMOKE, ...FULL] : SMOKE;
 
 async function waitForWarmupToSettle(page: Page, expectedMedia: number) {
+  // Warm cells rather than decode count. A window large enough to stream never produces a full
+  // decode at all — that is the point of the byte-range path — so `decodeCount` is 0 for the
+  // 30-second fixtures and would time out here while the warm-up in fact finished normally.
+  // The warm indicator is true in both modes.
   await expect
-    .poll(async () => diagDecodeCount(page), { timeout: 240_000 })
+    .poll(async () => page.locator('[data-warm-state="ready"]').count(), { timeout: 240_000 })
     .toBeGreaterThanOrEqual(Math.min(expectedMedia, 1));
   // The warm-up total is recorded after the final inter-decode gap.
   await expect.poll(async () => (await diagSnapshot(page))?.lastWarmupMs ?? null, {

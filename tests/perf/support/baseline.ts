@@ -130,7 +130,10 @@ export function expectWithinBaseline(scenario: string, metrics: ScenarioMetrics)
       recordedAt: new Date().toISOString(),
       notes:
         "WAV-only fixtures: decode is near-free by design, which isolates memory and IndexedDB " +
-        "cost from codec cost. Recorded locally; see codec-cost.perf.spec.ts for the codec axis.",
+        "cost from codec cost. Recorded locally; see codec-cost.perf.spec.ts for the codec axis. " +
+        "Fixtures long enough to be streamed take the byte-range path, so their decode counts are " +
+        "0 and their cached bytes are heads; partial-off-12x180s holds the full-decode figures for " +
+        "comparison.",
       env: environment,
       scenarios: {
         ...(existing?.scenarios ?? {}),
