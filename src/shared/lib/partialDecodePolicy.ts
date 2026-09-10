@@ -62,8 +62,10 @@ export const PARTIAL_MIN_VERIFICATIONS = 3;
  * Rule 1 blocked on any failure past `PARTIAL_MIN_VERIFICATIONS`, on the argument that a soundboard
  * playing the wrong thing once in twenty is worse than a slow one. The argument is sound and the
  * threshold was not: measured on a real 16-file library, 14 passes and ONE `windows-disagree`
- * blocked the browser permanently, and the fallback cost 1 539 MiB of resident PCM against 182 MiB
- * with the path on — a mobile tab kill, which is not "merely slower".
+ * blocked the browser permanently, and the fallback was measured at 1 539 MiB of resident PCM with
+ * the tab then killed. A panel with the path working measures 110-180 MiB, though on other hardware
+ * and another project — so the comparison is an order of magnitude, not a clean ratio. Either way
+ * the outcome is a mobile tab kill, which is not "merely slower".
  *
  * The two failure kinds are what make a ratio safe here. A browser that cannot do byte-range MP3 at
  * all throws, which is `hardBlocked` and needs no tally. A browser that CAN but decodes ranges

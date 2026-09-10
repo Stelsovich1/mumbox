@@ -45,7 +45,7 @@ ramp that starts early.
 Decoded PCM is Float32: one second of 44.1 kHz stereo is 0.34 MiB, so a 15 MB MP3 becomes 220–330
 MiB resident.
 
-**No default budget on a fine pointer, 384 MiB on a coarse one.** A cap smaller than the project
+**No default budget on a fine pointer, 1 GiB on a coarse one.** A cap smaller than the project
 turns every trigger into a cold decode, and this app is a soundboard: a pad that is not instant is
 not a pad. So on a desktop the bound comes from housekeeping alone: deleted media releases its PCM,
 a full track is not cached for a cell that plays twelve seconds of it, a looping fallback no longer
@@ -53,14 +53,21 @@ leaks a context per iteration — and, above all, **only the panel on screen is 
 
 On a phone that housekeeping is necessary and not sufficient, because one panel's worth can be more
 than the device has. Measured on a real 18-cell panel of whole MP3s with the byte-range path off:
-1 539 MiB resident, `__mumboxDiag.termination()` reporting the previous session killed; the same
-panel with the path on held 182 MiB. So the budget is not what makes this app fit — the byte-range
-path is — it is the backstop for when that path DECLINES, which is legitimate and sometimes
+1 539 MiB resident, `__mumboxDiag.termination()` reporting the previous session killed. A panel with
+the path working measured 110-180 MiB — on other hardware and another project, so the pair is two
+separate observations rather than a before/after of one thing, and what they establish together is
+the ORDER of magnitude and nothing finer. So the budget is not what makes this app fit — the
+byte-range path is — it is the backstop for when that path DECLINES, which is legitimate and sometimes
 permanent: a loop is excluded from streaming by design, and a file whose alignment cannot be
 measured is off the path for good. A handful of those must not be able to end the session. The
-number is a floor-of-evidence, not a measurement: above the 182 MiB a working panel of long tracks
-needs, far below the 1 539 MiB that got a tab killed. Two-tier eviction is what makes being wrong
-survivable — a pinned buffer is never evicted, so a playing cue cannot be cut.
+number is deliberately generous rather than protective: a working panel needs 110-180 MiB once
+byte-range decoding is doing its job, so the ceiling is not reached in the healthy case, and that is
+the point — the warm-up's predictive skip consults the budget, and a tighter number leaves pads dim
+on a panel that would have fitted. The trade is real and is taken knowingly: 384 MiB would have
+survived the 1 539 MiB failure and 1 GiB probably will not, but that failure now has its own guard
+and its own tests, while a dim pad has none and is felt at every show. `__mumboxDiag.termination()`
+reporting `ungraceful` after a long session is this number being wrong. Two-tier eviction is what
+makes being wrong survivable — a pinned buffer is never evicted, so a playing cue cannot be cut.
 
 `src/features/playback/model/audioBufferCache.ts` is a byte-budget LRU (not entry count);
 `playbackBufferCache.ts` owns the singleton and derives the default from
@@ -260,7 +267,9 @@ the partial path inside a `try` where any throw falls through to the full decode
 first rule blocked on any failure past three verifications and guarded its own recovery branch with
 `verdict !== "blocked"`, so one file was enough to take byte-range decoding off a browser profile
 forever. Measured in the field: 14 passes, 1 `windows-disagree`, blocked; the fallback cost
-1 539 MiB against 182 MiB. The two failure kinds are what make a ratio safe. `decode-rejected` — a
+1 539 MiB resident on the device that hit it, where the working figure measured elsewhere is
+110-180 MiB — different hardware and a different project, so an order of magnitude rather than a
+ratio anyone should quote. The two failure kinds are what make a ratio safe. `decode-rejected` — a
 slice the browser refuses while the full decode accepts it — is a CAPABILITY, recorded as
 `hardBlocked` and liftable by nothing. `windows-disagree` and `no-alignment` are properties of the
 FILE, and that file is already off the path through its own probe flag, so they may only speak for

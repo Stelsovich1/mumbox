@@ -30,22 +30,34 @@ import { createAudioBufferCache } from "./audioBufferCache";
  * The mobile half exists because housekeeping bounds the footprint to ONE PANEL'S WORTH, and on a
  * phone one panel's worth can still be more than the device has. Measured on a real 18-cell panel
  * of whole MP3s with byte-range decoding off: 1 539 MiB resident, and `__mumboxDiag.termination()`
- * reporting the previous session killed. With the path on the same panel held 182 MiB — so the
- * budget is not the mechanism that makes this app fit, it is the backstop for when that mechanism
- * declines. Declining is legitimate and permanent for some cells: a loop is excluded from
+ * reporting the previous session killed. A panel with the path working was measured at 110-180 MiB
+ * — on other hardware and another project, so the two are separate observations rather than a
+ * before/after of one thing; what they establish together is only the ORDER of magnitude between a
+ * declining path and a working one. So the budget is not the mechanism that makes this app fit, it
+ * is the backstop for when that mechanism declines. Declining is legitimate and permanent for some cells: a loop is excluded from
  * streaming by design, and a file whose alignment cannot be measured is off the path for good. A
  * handful of those must not be able to kill the tab.
  *
- * 384 MiB, and the number is a floor-of-evidence rather than a measurement: it is above the 182 MiB
- * a working panel of long tracks needs, and far below the 1 539 MiB that got a tab killed. The
- * two-tier eviction is what makes it safe to be wrong — a pinned buffer is never evicted, so a
+ * 1 GiB, and the number is deliberately generous rather than protective. A working panel of long
+ * tracks needs about 110-180 MiB once byte-range decoding is doing its job, so this ceiling is not
+ * reached at all in the healthy case — which is the point: the predictive skip in the warm-up
+ * consults the budget, and a tighter number leaves pads dim on a panel that would have fitted.
+ *
+ * The trade, stated plainly because it is a real one. The failure this exists for — the byte-range
+ * path declining across the board, measured at 1 539 MiB resident with the tab then killed — is one
+ * a few hundred MiB of ceiling would have survived and this one probably will not. It is set here anyway
+ * because that failure now has its own guard (a browser verdict that cannot latch on one file) and
+ * its own regression tests, while a dim pad has no guard at all and is felt at every show. Revisit
+ * with `__mumboxDiag.termination()`: `ungraceful` after a long session is this number being wrong.
+ *
+ * The two-tier eviction is what makes it safe to be wrong — a pinned buffer is never evicted, so a
  * playing cue cannot be cut, and the active panel is evicted last.
  *
  * Both halves stay overridable, and the override still wins in BOTH directions: `?pcmBudgetMb=N`
  * at load or `__mumboxDiag.setBudgetMb(n)` at runtime sets it, `?pcmBudgetMb=0` clears it even
  * where a default would apply. That is the knob for measuring where a device gives up.
  */
-export const COARSE_POINTER_BUDGET_BYTES = 384 * 1024 * 1024;
+export const COARSE_POINTER_BUDGET_BYTES = 1024 * 1024 * 1024;
 
 export function getDefaultBudgetBytes(): number | null {
   const override = readBudgetOverride();

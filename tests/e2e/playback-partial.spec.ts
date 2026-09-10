@@ -566,8 +566,9 @@ test("a streamed cue releases each segment as it finishes", async ({ page }) => 
  * The rule it was written under blocked on ANY failure past three verifications, so one file whose
  * alignment could not be measured latched `blocked` for the life of the browser profile — and the
  * recovery branch was guarded by `verdict !== "blocked"`, so passes could never lift it. Measured
- * in the field: 14 passes, 1 failure, byte-range decoding off, 1 539 MiB of resident PCM against
- * 182 MiB with the path on, and the previous session reported killed.
+ * in the field: 14 passes, 1 failure, byte-range decoding off, 1 539 MiB of resident PCM and the
+ * previous session reported killed. A working panel measures 110-180 MiB — other hardware, other
+ * project, so read it as an order of magnitude and not as a before/after pair.
  *
  * Shipping the new rule alone would have fixed nothing for anyone who had already hit the old one:
  * the verdict is persisted, and nothing in the app ever rewrites it while it reads `blocked`. So
