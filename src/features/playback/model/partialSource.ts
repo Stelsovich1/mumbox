@@ -25,7 +25,7 @@ import { isPartialDecodeAllowed } from "../../../shared/lib/partialDecodePolicy"
 import { PlaybackBufferEntry } from "./audioBufferCache";
 import { DECODE_SAMPLE_RATE } from "./decodeAudio";
 import { getEngineSampleRate, shouldUseNativeRateForWav } from "./playbackRate";
-import { getDecodeSemaphore } from "./decodeSemaphore";
+import { DecodeLane, getDecodeSemaphore } from "./decodeSemaphore";
 import { PlannedSegment, planSegments, shouldSegmentWindow } from "./partialPlan";
 import { FORMAT_PROBE_BYTES, PartialMediaFormat, sniffMediaFormat } from "./mediaFormat";
 import { MediaProbe, mediaProbeCache } from "./mediaProbeCache";
@@ -422,12 +422,18 @@ async function decodeMp3Range(
  * media, a mid-file MP3 window with no measured offset yet, a range the index cannot resolve. The
  * caller treats null as "use the existing full decode", so this function can never fail a cue.
  *
- * Every decode goes through the shared semaphore, including a segment fetched mid-playback: the
- * whole point of bounding concurrency is that simultaneous decodes multiply the transient, and a
- * chain that bypassed the bound would reintroduce exactly that.
+ * Every decode goes through the shared gate, including a segment fetched mid-playback: the whole
+ * point of bounding concurrency is that simultaneous decodes multiply the transient, and a chain
+ * that bypassed the bound would reintroduce exactly that.
+ *
+ * `lane` picks WHICH bound. A cue that is already audible has a deadline measured in hundreds of
+ * milliseconds and must not queue behind speculative warm-up work — see `decodeSemaphore.ts`. It
+ * defaults to the background lane so that only the two call sites that really are on a deadline,
+ * the press path and the live segment chain, have to say so.
  */
 export async function decodeMediaRange(
-  request: RangeDecodeRequest
+  request: RangeDecodeRequest,
+  lane: DecodeLane = "background"
 ): Promise<RangeDecodeResult | null> {
   const probe = await getMediaProbe(request.mediaId);
   if (!probe || probe.partialDisabled || !isPartialDecodeAllowed(probe.format)) {
@@ -438,10 +444,12 @@ export async function decodeMediaRange(
     return null;
   }
 
-  return getDecodeSemaphore().run(async () =>
-    probe.format === "wav"
-      ? decodeWavRange(blob, probe, request)
-      : decodeMp3Range(blob, probe, request)
+  return getDecodeSemaphore().run(
+    async () =>
+      probe.format === "wav"
+        ? decodeWavRange(blob, probe, request)
+        : decodeMp3Range(blob, probe, request),
+    lane
   );
 }
 

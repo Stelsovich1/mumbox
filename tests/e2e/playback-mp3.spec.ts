@@ -128,4 +128,71 @@ test.describe(() => {
     // ...and none of them gave up, which is how the cue used to end at the head.
     expect(playing?.segments.missed).toBe(0);
   });
+
+  test("a cell tapped while the panel is still warming plays past its head", async ({ page }) => {
+    // The user-facing report, reproduced through the user's own steps: open a panel loaded with
+    // tracks, tap one that has not warmed yet, and it starts after a moment, plays half a second
+    // and stops.
+    //
+    // Nothing about the decode is wrong on that path. The cue streams, and the segment after the
+    // head has to be fetched, decoded and scheduled inside the head's 0.5 s — while the warm-up of
+    // every other cell holds the decode gate, one alignment measurement alone being two decodes of
+    // about two seconds. The chain lost that race and the cue was ended at the head.
+    //
+    // Two changes have to hold together for this to pass, and each is pinned on its own in
+    // `playback-partial.spec.ts` and `decode-semaphore.spec.ts`: the press and the chain decode in
+    // a lane the warm-up cannot fill, and a segment that is late or missing no longer ends the cue.
+    test.setTimeout(240_000);
+    const files = readMp3Fixtures(6);
+    test.skip(files.length < 3, "needs at least three fixtures to load the warm-up");
+
+    await page.goto("/");
+    await page.getByTestId("audio-file-input").setInputFiles(files);
+    const importDialog = page.getByRole("dialog", { name: "Импорт аудио" });
+    await expect(importDialog).toBeVisible();
+    await page.getByLabel("Выбрать все аудио").click();
+    await page.getByRole("button", { name: "Сохранить" }).click();
+    await expect(importDialog).toBeHidden({ timeout: 180_000 });
+
+    await page.getByRole("button", { name: "Режим редактирования" }).click();
+    for (const [index, file] of files.entries()) {
+      await page
+        .getByRole("button", { name: `Пустая ячейка ${String(index + 1)}`, exact: true })
+        .click();
+      await page.getByRole("button", { name: `Выбрать ${file.name}` }).click();
+    }
+    await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+    // Contention, produced rather than hoped for. On an idle desktop with four background lanes
+    // the decoder is fast enough that the chain wins its race even when nothing protects it, so
+    // this test passed on the broken code — a green run that proves the machine is fast. Throttling
+    // the CPU is what makes the deadline real here; it is a magnifier, not a phone, and the only
+    // thing asserted below is that audio continues, which must hold at any speed.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+    // Reloaded so the warm-up of the whole panel starts again, under the throttle, and the tap
+    // lands while it is running. Deliberately NOT waiting for it: the last cell is the one the pool
+    // reaches last, so tapping it is the contended case rather than a lucky one.
+    await page.reload();
+    const cell = page.locator("[data-cell-id]").nth(files.length - 1);
+    await cell.click();
+    await expect(cell).toHaveAttribute("data-playing", "true", { timeout: 120_000 });
+
+    // Well past the head and past the first seam, in real time against the real decoder.
+    await page.waitForTimeout(8_000);
+    await expect(cell).toHaveAttribute("data-playing", "true");
+
+    // Three outcomes are correct here and the test deliberately accepts all of them: the chain
+    // streamed on through, a failed segment was rescued by the full decode, or the cue never
+    // streamed at all because the decoder offset had not been measured yet and
+    // `planMediaSegments` refused — the one that must NOT happen is silence after the head.
+    //
+    // Which one occurs depends on how contended the machine is, so this is a smoke test of the
+    // user's own steps rather than the regression detector for either fix. Those are
+    // `playback-partial.spec.ts` ("keeps the cue alive on the full decode", "late by more than a
+    // quarter second") and `decode-semaphore.spec.ts`, where the failure is injected instead of
+    // waited for.
+    const partial = await diagPartial(page);
+    expect(partial?.segments.watchdog).toBe(0);
+  });
 });

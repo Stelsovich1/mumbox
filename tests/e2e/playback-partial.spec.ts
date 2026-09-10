@@ -317,15 +317,20 @@ test("__mumboxDiag can turn the partial path off at runtime", async ({ page }) =
   expect(await diagDecodeCount(page)).toBeGreaterThan(0);
 });
 
-test("a chain that cannot fetch a segment ends the cue and leaves the pad usable", async ({
+test("a chain that cannot fetch a segment keeps the cue alive on the full decode", async ({
   page
 }) => {
-  // The give-up path and the watchdog behind it. Both exist for exactly this: a segment that never
-  // arrives. Without a failure injection neither can be exercised, and a mutation to either
-  // survives every other test — verified by a mutation round.
+  // The rule: a cue that has been STARTED must never be dropped. Its pair — a cue that cannot be
+  // continued must never be started — lives in `planMediaSegments`, and the two together are what
+  // stop a pad from playing 0.5 s and going silent.
   //
-  // The read that fails is chosen to land after the head has been read and warmed, so the failure
-  // hits a segment fetch rather than the warm-up itself.
+  // This test asserted the opposite until the recovery existed: "ends the cue". Ending it was the
+  // honest thing to do while there was nothing to continue WITH, but there always was — the full
+  // decode is the path every cue used before byte-range decoding, and it does not touch the range
+  // read that just failed. Silence is the one outcome worse than the memory.
+  //
+  // The failing read is chosen to land after the head has been read and warmed, so the failure hits
+  // a segment fetch rather than the warm-up.
   await installBufferAudioMock(page, { failNthRangeRead: 4 });
   await seedProject(page, {
     panels: 1,
@@ -341,24 +346,79 @@ test("a chain that cannot fetch a segment ends the cue and leaves the pad usable
 
   const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
   await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
 
-  // However the chain fails, the cue must not sit lit forever: either it ends on its own or the
-  // watchdog ends it once the window is past. What is not acceptable is a pad stuck playing.
-  await advanceAudioClock(page, 20);
+  // Past the head and past the segment whose read fails, in steps so the chain keeps up. A cue that
+  // gave up would already read `false` here — the head is 0.5 s of a 13 s window.
+  for (let elapsed = 0; elapsed < 8; elapsed += 2) {
+    await advanceAudioClock(page, 2);
+    await page.waitForTimeout(250);
+    await expect(cell).toHaveAttribute("data-playing", "true");
+  }
+
+  // It recovered rather than merely surviving: the counter is the mechanism, and without it a cue
+  // rescued by the full decode sounds nearly right, so a range path that had stopped working
+  // entirely would show up only as memory.
+  const recoveredPartial = await diagPartial(page);
+  expect(recoveredPartial?.segments.recovered).toBeGreaterThan(0);
+
+  // And it still ends by itself when the window runs out, rather than being mopped up by the
+  // watchdog: the recovery schedules a real last segment, not an orphan source.
+  await advanceAudioClock(page, 8);
   await expect(cell).toHaveAttribute("data-playing", "false", { timeout: 20_000 });
-
-  // And it ended through the give-up path, not by the watchdog having to mop up: when a chain
-  // cannot continue it is supposed to end the cue itself. If `promoteToLast` stopped marking the
-  // segment, the cue would still end — the watchdog would catch it minutes later on a long track —
-  // so the mechanism is asserted rather than the outcome.
   const partial = await diagPartial(page);
-  expect(partial?.segments.missed).toBeGreaterThan(0);
   expect(partial?.segments.watchdog).toBe(0);
 
   // And the pad still works. "Приходится перезапускать приложение" means the next press does
   // nothing, so the next press is the assertion.
   await cell.click();
   await expect(cell).toHaveAttribute("data-playing", "true");
+});
+
+test("a segment late by more than a quarter second is played, not used to end the cue", async ({
+  page
+}) => {
+  // The other half of the same defect, and the half nothing injected before.
+  //
+  // `resolveLateSegment` was called with the default 0.25 s limit, so the chain had the head's
+  // 0.5 s plus a quarter second to fetch, decode and schedule the first segment — and past that,
+  // `promoteToLast` ended the cue at the head. On a panel that is still warming, missing that
+  // budget is the ordinary case rather than the rare one, which is exactly what a user reports as
+  // "it plays half a second and stops". The limit is the segment's own length now: lateness inside
+  // it is played from the correct source position, so the audible result is a hole as long as the
+  // delay instead of a cue that stops.
+  //
+  // The read that is DELAYED rather than failed is what makes this a lateness test: it succeeds,
+  // just after the moment it was supposed to start.
+  await installBufferAudioMock(page, { slowNthRangeRead: { nth: 4, ms: 2_500 } });
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: { seconds: 30, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 1,
+    trimStartMs: 0,
+    trimEndMs: 13_000
+  });
+  await page.goto("/");
+  await waitForWarm(page, 1);
+
+  const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
+  await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
+
+  // Move the audio clock while that read is still in flight, so the segment resolves two and a half
+  // seconds after the time it was scheduled for — ten times the old limit, and well inside the
+  // segment's own four.
+  await advanceAudioClock(page, 3);
+  await page.waitForTimeout(3_500);
+
+  await expect(cell).toHaveAttribute("data-playing", "true");
+  const partial = await diagPartial(page);
+  // Scheduled late rather than dropped: the mechanism, not just the outcome. A cue that survived
+  // because the segment was skipped entirely would show `missed` here instead.
+  expect(partial?.segments.late).toBeGreaterThan(0);
+  expect(partial?.segments.watchdog).toBe(0);
 });
 
 test("a short untrimmed cue is neither streamed nor range-read", async ({ page }) => {

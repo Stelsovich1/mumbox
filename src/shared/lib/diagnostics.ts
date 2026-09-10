@@ -128,11 +128,18 @@ export type DiagPartial = {
    * `peakLive` is the discrete quantity that would have shown it: bounded by
    * `SEGMENT_LOOKAHEAD + 1`, it was reaching the segment count of the window.
    */
+  /**
+   * `recovered` counts cues that lost a segment and were continued from the full decode instead of
+   * being ended. It has to be visible for the same reason `watchdog` does: a recovered cue sounds
+   * almost right — one dropout, then the rest of the track — so a range path that has stopped
+   * working entirely would hide behind its own safety net and show up only as memory.
+   */
   segments: {
     scheduled: number;
     late: number;
     missed: number;
     watchdog: number;
+    recovered: number;
     live: number;
     peakLive: number;
   };
@@ -245,7 +252,7 @@ const state = {
   partial: {
     probes: { mp3: 0, wav: 0, unsupported: 0 },
     served: { range: 0, streamed: 0, declined: 0 },
-    segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0, live: 0, peakLive: 0 },
+    segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0, recovered: 0, live: 0, peakLive: 0 },
     verifications: { pass: 0, fail: 0, skipped: 0 },
     alignDeltaSamples: new Map<string, number>(),
     rangeReads: { count: 0, bytes: 0 }
@@ -420,7 +427,9 @@ export function recordRangeRead(bytes: number): void {
   state.partial.rangeReads.bytes += bytes;
 }
 
-export function recordSegment(kind: "scheduled" | "late" | "missed" | "watchdog"): void {
+export function recordSegment(
+  kind: "scheduled" | "late" | "missed" | "watchdog" | "recovered"
+): void {
   state.partial.segments[kind] += 1;
 }
 

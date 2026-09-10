@@ -333,9 +333,32 @@ Things that ladder and that head force, none of them optional:
   `partial.segments.watchdog`, because a cue ending there rather than from its last segment sounds
   identical — without the counter a broken `isLast` would be silently covered up by its own safety
   net, which is exactly what survived a mutation round until the counter existed.
-- **One shared decode semaphore** (`decodeSemaphore.ts`), used by the warm-up pool AND every live
-  chain. `stopOthers` is off by default, so six live pads would otherwise mean six unsynchronised
-  decodes on top of the warm-up.
+- **A cue that has been started is never dropped, and that is the pair of the rule above it.**
+  `planMediaSegments` refuses to START a stream it cannot continue; `recoverRouteFromFullDecode`
+  refuses to END one it has started. A segment whose range read fails is replaced by the tail of
+  the FULL decode, scheduled at the handoff the outgoing segment is already stopping at, and the
+  cue plays to its end with a dropout as long as the failure. It costs the whole file's PCM — the
+  price every cue paid before byte-range decoding — and is paid only where the alternative is
+  silence. `partial.segments.recovered` counts it, for the same reason `watchdog` is counted: a
+  recovered cue sounds nearly right, so a range path that had stopped working would otherwise show
+  up only as memory.
+- **Lateness is measured against the SEGMENT'S OWN LENGTH, not a fixed 0.25 s.** A segment late by
+  less than its length still has audio to play and is scheduled at its correct source position, so
+  the hole equals the delay; one whose audio is entirely in the past is skipped, and only when it
+  was the LAST segment does the cue end. The fixed limit meant the whole budget from the press was
+  the head's 0.5 s plus a quarter second — routinely missed on a panel that is still warming, where
+  the answer was a three-minute track audible for half a second.
+- **One shared decode gate** (`decodeSemaphore.ts`), used by the warm-up pool AND every live chain
+  — in TWO LANES. `stopOthers` is off by default, so six live pads would otherwise mean six
+  unsynchronised decodes on top of the warm-up, and both lanes are bounded for that reason. They
+  are separate because one FIFO queue starves the only work with a deadline: a warm-up decode is
+  speculative and may be thrown away by the next panel switch, while a segment decode is due before
+  the 0.5 s head runs out, and a decode can be neither cancelled nor preempted, so priority
+  ordering alone would not have helped. The live lane is deliberately narrow (2) and carries only
+  the press path and the segment chain; everything else must say nothing and get the background
+  bound. The memory argument survives the split: a live decode is one rung of the ladder, at most
+  16 s of stereo (5.6 MB), against the 105 MB whole-file decode that happens in the background
+  lane.
 - **`mono` and the window are captured into the chain at press time**, never re-read from a ref: a
   live route is immune to a mid-cue mono toggle because its cache key is pinned, and a chain
   re-reading the ref would feed a one-channel buffer to the same gain the two-channel head feeds.

@@ -36,6 +36,7 @@ import {
   shouldReadRange,
   shouldSegmentWindow
 } from "./partialPlan";
+import { DecodeLane } from "./decodeSemaphore";
 import { decodeMediaRange, ensureMp3Alignment, planMediaSegments } from "./partialSource";
 import {
   getEngineSampleRate,
@@ -705,7 +706,13 @@ export function useAudioEngine(
    * profitable case there is, and a length gate would have excluded it.
    */
   const tryDecodeRange = useCallback(
-    async (cell: GridCell, mediaId: string, mono: boolean): Promise<PlaybackBufferEntry | null> => {
+    async (
+      cell: GridCell,
+      mediaId: string,
+      mono: boolean,
+      // Background by default, so only the press path has to name the deadline it is under.
+      lane: DecodeLane = "background"
+    ): Promise<PlaybackBufferEntry | null> => {
       const asset = mediaByIdRef.current.get(mediaId);
       if (!isPartialPathLikely(cell, asset?.durationMs ?? null)) {
         return null;
@@ -735,14 +742,17 @@ export function useAudioEngine(
               });
         const head = plan?.segments[0];
         if (plan && head) {
-          const result = await decodeMediaRange({
-            mediaId,
-            startSeconds: head.startSeconds,
-            // The margin is real audio past the nominal boundary, so the outgoing segment always
-            // has samples to play right up to the handoff.
-            endSeconds: head.bufferEndSeconds,
-            mono
-          });
+          const result = await decodeMediaRange(
+            {
+              mediaId,
+              startSeconds: head.startSeconds,
+              // The margin is real audio past the nominal boundary, so the outgoing segment always
+              // has samples to play right up to the handoff.
+              endSeconds: head.bufferEndSeconds,
+              mono
+            },
+            lane
+          );
           if (result) {
             recordPartialServed("streamed");
             return {
@@ -778,7 +788,7 @@ export function useAudioEngine(
           recordPartialServed("declined");
           return null;
         }
-        const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono });
+        const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono }, lane);
         recordPartialServed(result ? "range" : "declined");
         return result?.entry ?? null;
       } catch {
@@ -791,7 +801,12 @@ export function useAudioEngine(
   );
 
   const loadPlaybackEntry = useCallback(
-    async (cell: GridCell, mediaId: string, cacheKey: string): Promise<PlaybackBufferEntry | null> => {
+    async (
+      cell: GridCell,
+      mediaId: string,
+      cacheKey: string,
+      lane: DecodeLane = "background"
+    ): Promise<PlaybackBufferEntry | null> => {
       const cached = playbackBufferCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -809,7 +824,7 @@ export function useAudioEngine(
         // never be able to fail a cue, only to decline it. Any decline — an unsupported container,
         // a mid-file MP3 window with no measured offset, a blocked browser, a throw from the
         // decoder — falls through to the full decode below, which is unchanged.
-        const rangeEntry = await tryDecodeRange(cell, mediaId, mono);
+        const rangeEntry = await tryDecodeRange(cell, mediaId, mono, lane);
         if (rangeEntry) {
           if (purgeGenerationRef.current === purgeGeneration) {
             playbackBufferCache.set(cacheKey, rangeEntry);
@@ -1278,6 +1293,102 @@ export function useAudioEngine(
   );
 
   /**
+   * Continues an audible cue whose next segment could not be decoded, using the full decode.
+   *
+   * The rule this enforces is the pair of the one `planMediaSegments` enforces. That one says a cue
+   * that cannot be continued must never be STARTED; this one says a cue that has been started must
+   * never be DROPPED. Before it, a single failed range read ended the cue at whatever had already
+   * been scheduled — most visibly the 0.5 s head, which is what a user reports as "the pad plays
+   * half a second and stops". Silence is the one outcome worse than any amount of memory.
+   *
+   * Cost, stated rather than hidden: the whole file is decoded, and the tail of the window is
+   * copied out of it — the same price the app paid for every cue before byte-range decoding
+   * existed. It is paid only on a path that would otherwise have produced silence, and
+   * `partial.segments.recovered` counts every time it happens, because a recovered cue sounds
+   * nearly right and would otherwise hide a range path that had stopped working.
+   *
+   * The resume position is derived from the clock AFTER the decode, and scheduled no earlier than
+   * the handoff the outgoing segment is already stopping at: earlier would overlap two sources on
+   * one gain, later would leave a hole longer than the failure itself.
+   */
+  const recoverRouteFromFullDecode = useCallback(
+    async (input: {
+      route: AudioRoute;
+      cellKey: string;
+      mediaId: string;
+      mono: boolean;
+      t0: number;
+      windowStartSeconds: number;
+      windowEndSeconds: number;
+      isStale: () => boolean;
+    }): Promise<boolean> => {
+      const { route, cellKey, isStale } = input;
+      const context = route.context;
+
+      const full = await getFullBuffer(input.mediaId);
+      if (!full || isStale()) {
+        return false;
+      }
+
+      let at = context.currentTime + SCHEDULE_LEAD_SECONDS;
+      for (const segment of route.segments) {
+        if (segment.stopAtContextTime !== null && segment.stopAtContextTime > at) {
+          at = segment.stopAtContextTime;
+        }
+      }
+      const resumeSeconds = input.windowStartSeconds + (at - input.t0);
+      if (resumeSeconds >= input.windowEndSeconds) {
+        // Nothing of the window is left to play, so there is nothing to recover: the cue is simply
+        // over, and the caller ends it the ordinary way.
+        return false;
+      }
+
+      // Sliced rather than played whole: the source must start at the resume position with the
+      // window's own end, and holding the entire track on the route would undo the bound the
+      // segments exist for. `mono` comes from the plan captured at press time, so the tail cannot
+      // change channel count mid-cue.
+      const tail = sliceToAudioBuffer(full, {
+        startSeconds: resumeSeconds,
+        endSeconds: input.windowEndSeconds,
+        mono: input.mono
+      });
+      if (isStale()) {
+        return false;
+      }
+
+      const source = context.createBufferSource();
+      source.buffer = tail;
+      source.connect(route.envelopeGain);
+      const segment: RouteSegment = {
+        source,
+        startSeconds: resumeSeconds,
+        endSeconds: input.windowEndSeconds,
+        atContextTime: at,
+        isLast: true,
+        stopAtContextTime: null
+      };
+      for (const finished of listFinishedSegments(route.segments, context.currentTime)) {
+        finished.source.disconnect();
+      }
+      pruneFinishedSegments(route.segments, context.currentTime);
+      route.segments.push(segment);
+      syncLiveSegments();
+
+      source.onended = () => {
+        if (isStale()) {
+          return;
+        }
+        stopCellKey(cellKey);
+      };
+      // Offset 0: the slice already begins at the resume position.
+      source.start(at, 0);
+      recordSegment("recovered");
+      return true;
+    },
+    [getFullBuffer, stopCellKey, syncLiveSegments]
+  );
+
+  /**
    * Fetches and schedules the segments after the head, one at a time, while the cue plays.
    *
    * Every value it works in is source time except the two context times it derives, and the mapping
@@ -1341,12 +1452,17 @@ export function useAudioEngine(
 
           let result: Awaited<ReturnType<typeof decodeMediaRange>> = null;
           try {
-            result = await decodeMediaRange({
-              mediaId: partial.mediaId,
-              startSeconds: planned.startSeconds,
-              endSeconds: planned.bufferEndSeconds,
-              mono: partial.mono
-            });
+            result = await decodeMediaRange(
+              {
+                mediaId: partial.mediaId,
+                startSeconds: planned.startSeconds,
+                endSeconds: planned.bufferEndSeconds,
+                mono: partial.mono
+              },
+              // The cue is audible and the head is 0.5 s long: this decode has a deadline, and the
+              // background lane is where a whole-file warm-up decode sits for seconds.
+              "live"
+            );
           } catch {
             result = null;
           }
@@ -1354,19 +1470,49 @@ export function useAudioEngine(
             return;
           }
           if (!result) {
-            // Nothing to continue with. End the cue the way an ordinary cue ends rather than leaving
-            // a route with no live source.
-            recordSegment("missed");
-            promoteToLast(route, cellKey, token);
+            // A range read that failed is not a reason to stop audio the user is listening to. The
+            // full decode still works — it is what every cue used before this feature — so the cue
+            // continues from where the clock is now, with a dropout as long as the failure.
+            const recovered = await recoverRouteFromFullDecode({
+              route,
+              cellKey,
+              mediaId: partial.mediaId,
+              mono: partial.mono,
+              t0,
+              windowStartSeconds: input.windowStartSeconds,
+              windowEndSeconds: input.windowEndSeconds,
+              isStale
+            });
+            if (isStale()) {
+              return;
+            }
+            if (!recovered) {
+              // Even the full decode could not produce audio, or the window had already run out.
+              // End the cue the way an ordinary cue ends rather than leaving a route with no live
+              // source.
+              recordSegment("missed");
+              promoteToLast(route, cellKey, token);
+            }
             return;
           }
 
           const resolution = resolveLateSegment({
             scheduledAtSeconds: at,
-            nowSeconds: context.currentTime
+            nowSeconds: context.currentTime,
+            // The segment's OWN length, not a fixed 0.25 s. Lateness within it is played as a
+            // dropout — the segment resumes at its correct source position — and only a segment
+            // whose audio is entirely in the past has nothing left to schedule. The fixed limit
+            // meant a chain that lost a quarter of a second to a busy decoder ended the cue,
+            // which on a warming panel is the common case rather than the rare one.
+            maxLatenessSeconds: Math.max(0, planned.endSeconds - planned.startSeconds)
           });
           if (resolution.action === "give-up") {
             recordSegment("missed");
+            if (index < segments.length - 1) {
+              // Skip it and keep the chain: the hole is this segment, not the rest of the track.
+              continue;
+            }
+            // It was the last one, so nothing after it would ever fire `onended` and end the cue.
             promoteToLast(route, cellKey, token);
             return;
           }
@@ -1441,7 +1587,7 @@ export function useAudioEngine(
         }
       }
     },
-    [promoteToLast, stopCellKey, syncLiveSegments]
+    [promoteToLast, recoverRouteFromFullDecode, stopCellKey, syncLiveSegments]
   );
 
   const startBufferRoute = useCallback(
@@ -1655,7 +1801,9 @@ export function useAudioEngine(
       const canUseBufferSource = typeof context.createBufferSource === "function";
       if (canUseBufferSource) {
         const cacheKey = warmCacheKey;
-        const entry = await loadPlaybackEntry(cell, cell.mediaId, cacheKey);
+        // The live lane: this decode is what the user is waiting to hear, and the background lane
+        // may be full of warm-up work for cells nobody has touched.
+        const entry = await loadPlaybackEntry(cell, cell.mediaId, cacheKey, "live");
         if (!entry || playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
