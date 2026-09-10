@@ -3,10 +3,30 @@ import { SerializableAppState } from "../../app/model/appState";
 import { computeContentHash } from "../../shared/lib/contentHash";
 import { CRC32_INITIAL, finalizeCrc32, updateCrc32 } from "../../shared/lib/crc32";
 import { FileHandleLike, writeBlobToHandle } from "../../shared/lib/fileSystemAccess";
+import { ProjectFileError } from "./model/projectFileError";
 import { normalizeProjectMeta, ProjectMeta, toProjectFileName } from "./model/projectMeta";
+import { parseProjectManifest } from "./model/projectManifest";
+export type { ProjectFile, ProjectMediaBlob } from "./model/projectManifest";
+import type { ProjectFile, ProjectMediaBlob } from "./model/projectManifest";
+import {
+  beginCrc32Fold,
+  checkZipWriteLimits,
+  findEndOfCentralDirectory,
+  foldCrc32Chunk,
+  parseCentralDirectory,
+  readEndRecord,
+  resolveDataRange,
+  verifyCrc32Fold,
+  ZIP_END_RECORD_SEARCH_BYTES,
+  ZIP_LOCAL_HEADER_BYTES,
+  ZipCentralEntry,
+  ZipDataRange
+} from "./model/zipDirectory";
 
 export { normalizeProjectMeta, toProjectFileName };
 export type { ProjectMeta };
+export { ProjectFileError, classifyProjectFileError } from "./model/projectFileError";
+export type { ProjectFileFailureKind } from "./model/projectFileError";
 
 export const PROJECT_FILE_EXTENSION = ".mumbox";
 export const PROJECT_FILE_MIME_TYPE = "application/vnd.mumbox.project+zip";
@@ -31,30 +51,10 @@ export type SaveProjectResult = {
   completed: boolean;
 };
 
-export type ProjectMediaBlob = {
-  id: string;
-  fileName: string;
-  mimeType: string;
-  size: number;
-  contentHash?: string;
-};
-
-export type ProjectFile = {
-  kind: "mumbox-project";
-  // Deliberately not bumped for `meta`. `isProjectFile` checks this exactly, and the app ships as a
-  // PWA with `registerType: "prompt"`, so a user on an older build must still be able to open a
-  // file a newer build wrote — and the other way round.
-  version: 2;
-  exportedAt: string;
-  meta?: ProjectMeta;
-  state: SerializableAppState;
-  mediaBlobs: ProjectMediaBlob[];
-};
-
 export type ImportedProject = {
   state: SerializableAppState;
   meta: ProjectMeta;
-  mediaBlobs: { id: string; fileName: string; mimeType: string; blob: Blob }[];
+  mediaBlobs: { id: string; fileName: string; mimeType: string; crc32: number; blob: Blob }[];
 };
 
 export type ProjectFileProgress = {
@@ -149,7 +149,35 @@ async function getBlobCrc32(blob: Blob) {
   return finalizeCrc32(state);
 }
 
+/**
+ * Refuses an archive that cannot be addressed by the format.
+ *
+ * Every size and offset in a ZIP local or central header is uint32, and `DataView.setUint32` takes
+ * its value modulo 2^32 without complaint. So a project past 4 GiB produced a file that reported
+ * success and no reader — including this one — could open. `CLAUDE.md` puts the working size at
+ * 700 MB to 1 GB, so this is a guard rather than a limit anyone should meet.
+ *
+ * ZIP64 is deliberately not implemented. It is four coordinated additions (an extra field in both
+ * header types, the ZIP64 end record, its locator, version-needed 45), written conditionally so a
+ * build frozen at `version: 2` can still open the result, with a matching reader shipped at the
+ * same time — and it cannot be fixtured at an honest size in CI. It would also buy the ability to
+ * write a file the rest of the app cannot use: `saveProjectBlob` assembles ONE `Blob` and hands it
+ * to `createWritable` or to an anchor, and on iOS — the only save path there — a 4 GiB blob URL
+ * will not survive. Refusing is cheap, testable at any size through the injected limits, and turns
+ * silent corruption into one sentence.
+ */
+function assertWritableArchive(entries: readonly { name: string; blob: Blob }[]) {
+  const limits = checkZipWriteLimits(
+    entries.map((entry) => ({ name: entry.name, size: entry.blob.size }))
+  );
+  if (!limits.ok) {
+    throw new ProjectFileError("too-large", limits.reason);
+  }
+}
+
 async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?: (progress: ProjectFileProgress) => void) {
+  // Authoritative: real blob sizes, checked before a single byte is assembled.
+  assertWritableArchive(entries);
   const encoder = new TextEncoder();
   const parts: BlobPart[] = [];
   const centralParts: ArrayBuffer[] = [];
@@ -190,8 +218,6 @@ function isZipFile(bytes: Uint8Array) {
  * comment field that cannot exceed 65 535. Scanned backwards, so a comment that happens to contain
  * the signature does not win over the real record.
  */
-const ZIP_END_RECORD_SEARCH_BYTES = 65_557;
-const ZIP_LOCAL_HEADER_BYTES = 30;
 /**
  * Local headers are separated by entry data, so each one is its own small read. They are issued in
  * batches rather than one at a time because a project can hold hundreds of media entries and the
@@ -199,30 +225,9 @@ const ZIP_LOCAL_HEADER_BYTES = 30;
  */
 const ZIP_HEADER_READ_BATCH = 24;
 
-function findEndOfCentralDirectory(bytes: Uint8Array) {
-  const minOffset = Math.max(0, bytes.length - ZIP_END_RECORD_SEARCH_BYTES);
-  for (let offset = bytes.length - 22; offset >= minOffset; offset -= 1) {
-    if (
-      bytes[offset] === 0x50 &&
-      bytes[offset + 1] === 0x4b &&
-      bytes[offset + 2] === 0x05 &&
-      bytes[offset + 3] === 0x06
-    ) {
-      return offset;
-    }
-  }
-  return -1;
-}
-
 async function readSlice(file: File, start: number, end: number) {
   return new Uint8Array(await file.slice(start, end).arrayBuffer());
 }
-
-function viewOf(bytes: Uint8Array) {
-  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-}
-
-type ZipCentralEntry = { name: string; localOffset: number; compressedSize: number };
 
 /**
  * Reads a project without materialising it.
@@ -239,44 +244,32 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
   const tail = await readSlice(file, tailStart, file.size);
   const endOffsetInTail = findEndOfCentralDirectory(tail);
   if (endOffsetInTail < 0) {
-    throw new Error("Unsupported MUMBOX project file");
+    throw new ProjectFileError("not-a-project", "no-end-record");
   }
 
-  const tailView = viewOf(tail);
-  const entryCount = tailView.getUint16(endOffsetInTail + 10, true);
-  const centralDirectoryOffset = tailView.getUint32(endOffsetInTail + 16, true);
-  const centralDirectoryEnd = tailStart + endOffsetInTail;
-  if (centralDirectoryOffset > centralDirectoryEnd) {
-    throw new Error("Unsupported MUMBOX project file");
+  const endRecord = readEndRecord(tail, endOffsetInTail, tailStart, file.size);
+  if (!endRecord.ok) {
+    throw new ProjectFileError(
+      endRecord.reason === "zip64-unsupported" ? "too-large" : "corrupt",
+      endRecord.reason
+    );
   }
 
-  const directory = await readSlice(file, centralDirectoryOffset, centralDirectoryEnd);
-  const directoryView = viewOf(directory);
-  const decoder = new TextDecoder();
-  const centralEntries: ZipCentralEntry[] = [];
-  let cursor = 0;
-
-  for (let index = 0; index < entryCount; index += 1) {
-    if (cursor + 46 > directory.length || directoryView.getUint32(cursor, true) !== 0x02014b50) {
-      throw new Error("Unsupported MUMBOX project file");
-    }
-    const method = directoryView.getUint16(cursor + 10, true);
-    const compressedSize = directoryView.getUint32(cursor + 20, true);
-    const fileNameLength = directoryView.getUint16(cursor + 28, true);
-    const extraLength = directoryView.getUint16(cursor + 30, true);
-    const commentLength = directoryView.getUint16(cursor + 32, true);
-    const localOffset = directoryView.getUint32(cursor + 42, true);
-    if (method !== 0) {
-      throw new Error("Unsupported MUMBOX project compression");
-    }
-    const name = decoder.decode(directory.subarray(cursor + 46, cursor + 46 + fileNameLength));
-    centralEntries.push({ name, localOffset, compressedSize });
-    cursor += 46 + fileNameLength + extraLength + commentLength;
+  const directory = await readSlice(
+    file,
+    endRecord.value.centralDirectoryOffset,
+    endRecord.value.endRecordOffset
+  );
+  const parsedDirectory = parseCentralDirectory(directory, endRecord.value);
+  if (!parsedDirectory.ok) {
+    throw new ProjectFileError("corrupt", parsedDirectory.reason);
   }
+  const centralEntries = parsedDirectory.value;
 
   // The local header's own name and extra fields are what fix where the data starts, and ZIP
   // permits them to differ from the central directory's — so they are read rather than assumed.
-  const dataRanges = new Map<string, { start: number; end: number }>();
+  const dataRanges = new Map<string, ZipDataRange>();
+  const entriesByName = new Map<string, ZipCentralEntry>();
   for (let from = 0; from < centralEntries.length; from += ZIP_HEADER_READ_BATCH) {
     const batch = centralEntries.slice(from, from + ZIP_HEADER_READ_BATCH);
     const headers = await Promise.all(
@@ -286,16 +279,15 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
     );
     headers.forEach((header, offsetInBatch) => {
       const entry = batch[offsetInBatch];
-      if (!entry || header.length < ZIP_LOCAL_HEADER_BYTES) {
-        throw new Error("Unsupported MUMBOX project file");
+      if (!entry) {
+        throw new ProjectFileError("corrupt", "bad-local-header");
       }
-      const headerView = viewOf(header);
-      const dataStart =
-        entry.localOffset +
-        ZIP_LOCAL_HEADER_BYTES +
-        headerView.getUint16(26, true) +
-        headerView.getUint16(28, true);
-      dataRanges.set(entry.name, { start: dataStart, end: dataStart + entry.compressedSize });
+      const range = resolveDataRange(entry, header, endRecord.value);
+      if (!range.ok) {
+        throw new ProjectFileError("corrupt", range.reason);
+      }
+      dataRanges.set(entry.name, range.value);
+      entriesByName.set(entry.name, entry);
     });
     onProgress?.({
       phase: "import",
@@ -306,32 +298,95 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
   }
 
   const manifestRange = dataRanges.get(PROJECT_MANIFEST_NAME);
-  if (!manifestRange) {
-    throw new Error("Unsupported MUMBOX project file");
+  const manifestEntry = entriesByName.get(PROJECT_MANIFEST_NAME);
+  if (!manifestRange || !manifestEntry) {
+    throw new ProjectFileError("not-a-project", "no-manifest");
   }
-  const parsed = JSON.parse(
-    await file.slice(manifestRange.start, manifestRange.end).text()
-  ) as unknown;
-  if (!isProjectFile(parsed)) {
-    throw new Error("Unsupported MUMBOX project file");
+  // The manifest is fully read anyway, so verifying it costs nothing and is always on. Media are a
+  // different matter — see `verifyProjectMedia`.
+  const manifestBytes = new Uint8Array(
+    await file.slice(manifestRange.start, manifestRange.end).arrayBuffer()
+  );
+  if (
+    !verifyCrc32Fold(foldCrc32Chunk(beginCrc32Fold(), manifestBytes), {
+      crc32: manifestEntry.crc32,
+      size: manifestEntry.compressedSize
+    })
+  ) {
+    throw new ProjectFileError("corrupt", "manifest-crc");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(manifestBytes));
+  } catch {
+    throw new ProjectFileError("corrupt", "manifest-json");
+  }
+  const manifest = parseProjectManifest(parsed);
+  if (!manifest.ok) {
+    throw new ProjectFileError(
+      manifest.reason === "wrong-kind" || manifest.reason === "not-an-object"
+        ? "not-a-project"
+        : "corrupt",
+      manifest.reason
+    );
   }
 
   return {
-    state: parsed.state,
-    meta: normalizeProjectMeta(parsed.meta),
-    mediaBlobs: parsed.mediaBlobs.map((media) => {
-      const range = dataRanges.get(`${PROJECT_MEDIA_DIR}${media.id}`);
-      if (!range) {
-        throw new Error(`Missing media blob: ${media.fileName}`);
+    state: manifest.value.state,
+    meta: normalizeProjectMeta(manifest.value.meta),
+    mediaBlobs: manifest.value.mediaBlobs.map((media) => {
+      const name = `${PROJECT_MEDIA_DIR}${media.id}`;
+      const range = dataRanges.get(name);
+      const entry = entriesByName.get(name);
+      if (!range || !entry) {
+        throw new ProjectFileError("corrupt", `missing-media:${media.fileName}`);
       }
       return {
         id: media.id,
         fileName: media.fileName,
         mimeType: media.mimeType,
+        // Carried so `verifyProjectMedia` can check the bytes without re-reading the directory.
+        crc32: entry.crc32,
         blob: file.slice(range.start, range.end, media.mimeType)
       };
     })
   };
+}
+
+/**
+ * Reads every media entry and checks it against the CRC the archive recorded.
+ *
+ * Deliberately NOT part of `readProjectFile`. That function is also called by
+ * `addProjectsToLibrary`, once per file the user picks, purely to read the project name and two
+ * counts for a bookmark row — verifying there would read every byte of every project just to build
+ * a list. Structural checks are O(entries) and always on; content verification is O(bytes) and
+ * asked for explicitly, on the one path that is about to overwrite the user's project.
+ *
+ * Sequential and chunked, so the peak is one 4 MiB slice rather than one media file.
+ */
+export async function verifyProjectMedia(
+  project: ImportedProject,
+  onProgress?: (progress: ProjectFileProgress) => void
+): Promise<void> {
+  const total = project.mediaBlobs.length;
+  for (const [index, media] of project.mediaBlobs.entries()) {
+    let fold = beginCrc32Fold();
+    for (let offset = 0; offset < media.blob.size; offset += ZIP_CRC_CHUNK_BYTES) {
+      const end = Math.min(media.blob.size, offset + ZIP_CRC_CHUNK_BYTES);
+      const chunk = new Uint8Array(await media.blob.slice(offset, end).arrayBuffer());
+      fold = foldCrc32Chunk(fold, chunk);
+    }
+    if (!verifyCrc32Fold(fold, { crc32: media.crc32, size: media.blob.size })) {
+      throw new ProjectFileError("corrupt", `media-crc:${media.fileName}`);
+    }
+    onProgress?.({
+      phase: "import",
+      completed: index + 1,
+      total,
+      label: `Проверка аудио ${String(index + 1)} из ${String(total)}`
+    });
+  }
 }
 
 export type MakeProjectBlobOptions = {
@@ -353,6 +408,15 @@ export async function makeProjectBlob(
   options: MakeProjectBlobOptions = {}
 ) {
   const { meta, onProgress, onHash } = options;
+  // Pre-flight from metadata alone, before the multi-minute CRC-and-hash pass. `media.size` is
+  // optional and can be stale, so this can only UNDER-estimate — the safe direction, with the
+  // authoritative check on real blob sizes still waiting in `makeZipBlob`.
+  assertWritableArchive(
+    state.media.map((media) => ({
+      name: `${PROJECT_MEDIA_DIR}${media.id}`,
+      blob: { size: media.size } as Blob
+    }))
+  );
   const mediaBlobs: ProjectMediaBlob[] = [];
   const entries: { name: string; blob: Blob }[] = [];
   const computedHashes: { mediaId: string; contentHash: string }[] = [];
@@ -419,14 +483,43 @@ export async function makeProjectBlob(
   return makeZipBlob(entries, onProgress);
 }
 
+/**
+ * How long a download URL is kept alive after the click.
+ *
+ * Revoking synchronously is the documented way to leak nothing, and it is also how the download
+ * gets cancelled on Safari and iOS — which is the ONLY save path there, since `showSaveFilePicker`
+ * does not exist. The cost of waiting is that the blob stays resident for the interval, up to a
+ * gigabyte on a large project; it is bounded and it is released.
+ *
+ * Not oversold: deferring the revoke removes one known cause of the iOS failure. It does not make a
+ * gigabyte-sized blob URL reliable there.
+ */
+const DOWNLOAD_URL_TTL_MS = 60_000;
+
 export function downloadProject(blob: Blob, requestedFileName?: string) {
   const fileName = toProjectFileName(requestedFileName ?? "");
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = fileName;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  // Firefox will not act on an anchor that is not in the document.
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+
+  let revoked = false;
+  const revoke = () => {
+    if (revoked) {
+      return;
+    }
+    revoked = true;
+    URL.revokeObjectURL(url);
+  };
+  window.setTimeout(revoke, DOWNLOAD_URL_TTL_MS);
+  // A navigation before the timer would otherwise carry the blob into the next document.
+  window.addEventListener("pagehide", revoke, { once: true });
 
   return fileName;
 }
@@ -451,20 +544,6 @@ export async function saveProjectBlob(
   }
 
   return { fileName: downloadProject(blob, fileName), completed: false };
-}
-
-function isProjectFile(value: unknown): value is ProjectFile {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as Partial<ProjectFile>;
-
-  return (
-    candidate.kind === "mumbox-project" &&
-    candidate.version === 2 &&
-    Boolean(candidate.state) &&
-    Array.isArray(candidate.mediaBlobs)
-  );
 }
 
 export async function readProjectFile(

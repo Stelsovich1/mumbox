@@ -35,7 +35,9 @@ separate config files rather than separate projects.
 | perf | `playwright.perf.config.ts` | `tests/perf/` — port 4174, `workers: 1`, `reuseExistingServer: false`, service workers blocked. Never part of `test:e2e`. |
 
 `tests/support/` holds the shared helpers: `audioFixtures.ts` (pure-JS WAV writer),
-`seedProject.ts` (seeds IndexedDB blobs plus the localStorage layout in one navigation),
+`seedProject.ts` (seeds the IndexedDB media blobs plus the IndexedDB layout record in one
+navigation — never the legacy localStorage key, or every seeded test would be exercising the
+migration path instead of the steady state),
 `audioMock.ts` (the opt-in Web Audio mock that exercises the buffer route), `diag.ts` (typed access
 to `window.__mumboxDiag`).
 
@@ -47,10 +49,15 @@ restart on a wall-clock timer either makes tests ten seconds slow or recurses sy
 `onended`.
 
 `tests/perf/baseline.json` is committed so a performance regression shows up as a reviewable diff.
-Record a new one with `PERF_UPDATE_BASELINE=1 npm run test:perf`. Time to first sound is gated on an
-**absolute** ceiling, not a ratio: the constraint is perceptual, and against a sub-millisecond
-baseline a ratio gate cries wolf. Everything else is a soft gate that fails only when a 30 % ratio
-**and** an absolute floor are both exceeded.
+Record a new one with `PERF_UPDATE_BASELINE=1 npm run test:perf`. There are four gate kinds
+(`tests/perf/support/baseline.ts`): `hard` is an absolute ceiling that needs no baseline — time to
+first sound is one, because the constraint is perceptual and against a sub-millisecond baseline a
+ratio gate cries wolf; `exact` asserts equality and is used for decoded byte counts and decode
+COUNTS, which are facts about the code rather than about the machine; `soft` fails only when a 30 %
+ratio **and** an absolute floor are both exceeded; `record` is stored and never asserted, for
+numbers whose spread is not known yet. The `exact` gates only hold because `perfGoto` pins
+`?rate=44100` — every fixture is a 44.1 kHz WAV, and at another rate they leave the byte-range path
+entirely.
 
 `tests/MUTATION-PROTOCOL.md` describes the manual mutation-testing round used to find holes in these
 tests. There is no mutation framework and none may be added.
@@ -63,7 +70,35 @@ Feature-Sliced Design: `app` → `pages` → `widgets` → `features` → `entit
 
 ### State and persistence — two separate stores
 
-`src/app/model/appState.ts` holds a `useReducer` store (`useAppStore`) that is the single source of truth for panels, cells, media metadata, and volume. It is serialized to **localStorage** under `mumbox:state:v1` on every state change (`serializeState` drops `editMode`).
+`src/app/model/appState.ts` holds a `useReducer` store (`useAppStore`) that is the single source of
+truth for panels, cells, media metadata, and volume.
+
+The layout lives in **IndexedDB**, in its own database `mumbox-app`/`state` under the key `state:v1`
+(`src/app/model/appStateStorage.ts`) — deliberately not idb-keyval's default store, which
+`clearStoredAppData` empties wholesale. `ProjectSession` sits beside it under `session:v1`, a
+separate key so the `.mumbox` payload stays byte-identical for an untouched project. Reading is
+therefore asynchronous and `BoardPage` is the boot gate; a FAILED read is not an empty one and
+suspends writing entirely, because writing over a project that is still there is the most
+destructive thing this layer can do.
+
+Writes are debounced (`createPersistence`): 400 ms trailing with a 2 s max wait for the six
+`DEFERRABLE_ACTIONS`, immediate for everything else, plus a flush on `visibilitychange`. `flush()`
+returns whether the write SUCCEEDED, and `useAppStore`'s `flushPendingState()` waits for the current
+state to reach persistence before flushing — a barrier that only awaited the flush wrote nothing at
+all, because React schedules the persistence effect on a macrotask while `await` resolves in a
+microtask. Any path that deletes blobs the old state names must go through it and must not delete
+when it returns false.
+
+`serializeState` (`src/app/model/serializeState.ts`) drops `editMode` **and every cell equal to
+`makeCell(id)`**. That is what keeps a 20-panel 12x12 project from materialising 2880 cells; every
+load path runs `ensurePanelCells`, which rebuilds them, so the omission is compatible in both
+directions and `version` stays 2.
+
+`mumbox:state:v1` and `mumbox:project-session:v1` survive in localStorage as a **rollback mirror
+only**, written for one release while the serialized layout is under 1.5 M characters and removed
+above it. IndexedDB always wins; edits made on an older build are lost on the way back. Two keys
+stay in localStorage on purpose: `mumbox:partial-decode:v1` (read synchronously on a hot path) and
+`mumbox:diag:session:v1` (written from `pagehide`, where an async write would never land).
 
 Audio blobs never enter that JSON. They live in **IndexedDB** via `idb-keyval` under `mumbox:media:<mediaId>` (`saveImportedMedia` / `getMediaBlob` / `deleteStoredMedia`). `MediaAsset` in state only carries metadata. Any code that adds or removes media must keep both stores in sync.
 
@@ -72,13 +107,16 @@ Audio blobs never enter that JSON. They live in **IndexedDB** via `idb-keyval` u
 Cell IDs are position-stable: `cell-${row * 12 + column}` (`getPanelCellIds`), so a cell keeps its coordinates when the grid grows or shrinks between 6/8/10/12. Older saves used flat `cell-${index}`; `normalizePanelCellIds` and `remapLegacyCells` migrate those on load and on project import. Do not change this scheme without keeping both migration paths working — e2e tests cover resize round-trips.
 
 Shrinking a grid **hides** cells, it never clears them: `panel/gridSize` regenerates `cellIds` and
-merges the cell record, so a cue placed at 12x12 still exists — and still fires from its hotkey —
-while a 6x6 grid is on screen. Nothing on the grid can show that, because the cell is not rendered,
+merges the cell record, so a cue placed at 12x12 still exists while a 6x6 grid is on screen. It
+does **not** fire from its hotkey there, and that is a defect rather than a design: `AppShell`
+builds the hotkey list from `activePanel.cellIds`, which is the visible lattice only. Recorded here
+because the claim used to read the other way round and a reader would rebuild the wrong invariant
+from it. Nothing on the grid can show that, because the cell is not rendered,
 so `entities/panel/model/hiddenCells.ts` derives it from the id lattice and the size control paints
 itself with a gradient (`data-hidden-media`) plus the smallest size that would show everything.
 
 `ensurePanelCells` builds a panel's record from `cellIds` alone, so every path that runs it —
-loading `mumbox:state:v1`, importing a `.mumbox`, merging one — would delete those hidden cues.
+loading the stored layout, importing a `.mumbox`, merging one — would delete those hidden cues.
 `preserveHiddenCells` re-attaches them, and legacy flat-id panels are deliberately excluded: their
 ids are flat for the panel's own size, so an out-of-grid id names a lattice position only when that
 size was 12, and guessing would move a cue somewhere it never was.
@@ -97,7 +135,13 @@ colours) are computed inside the cell, not in the parent's map, for the same rea
 `src/features/playback/model/useAudioEngine.ts` runs one `AudioRoute` per playing cell, keyed `${panelId}:${cellId}`:
 
 - Primary path decodes to an `AudioBuffer` (cached per media id in a ref) and plays through `AudioBufferSourceNode`; the `startMediaElementFallback` path (`HTMLAudioElement` + `createMediaElementSource`) exists for browsers without `createBufferSource`.
-- Each route has two gain nodes: `envelopeGain` (fade curves) and `volumeGain` (master × per-cell offset), so volume changes never disturb a scheduled envelope.
+- Each route has two gain nodes: `envelopeGain` (fade curves) and `volumeGain` (the per-cell offset
+  alone), so volume changes never disturb a scheduled envelope. Master volume and mute live on ONE
+  shared `masterGain` per context (`volume.ts` factors the product exactly, proven over the whole
+  reachable lattice by `tests/unit/volume.spec.ts`), so a master change is one `setValueAtTime` on
+  one node instead of a rewrite of every playing route on every frame. The media-element fallback
+  keeps the combined form: it builds its own context and its own destination, which nothing on this
+  context can reach.
 - Async starts are guarded by a per-cell monotonic play token (`bumpCellToken`); check the token again after every `await` before touching a route.
 - A single `requestAnimationFrame` loop drives progress, loop restarts for the media-element path, and volume sync; it stops itself when no routes remain.
 - iOS: `getPlayableContext` closes and recreates a stuck `AudioContext`, and `pageshow`/`focus`/`visibilitychange` resume it.
@@ -162,7 +206,7 @@ The warm-up measures its budget against `stats().protectedBytes` — the active 
 routes — never against everything cached; measuring against the total made the panel the user is
 looking at refuse to warm in order to protect one they had left.
 
-Cache keys are `${mediaId}|${trimStartMs ?? 0}|${trimEndMs ?? "e"}|${mono ? "m" : "s"}`, so the same
+Cache keys are `${mediaId}|${trimStartMs ?? 0}|${trimEndMs ?? "e"}|${loop ? "l" : "o"}|${mono ? "m" : "s"}`, so the same
 media with two different trims is two entries and one decode. Sharing that decode is reference
 counted, not time based: the warm-up counts how many targets want each media up front, stages only
 those wanted more than once, and releases the full buffer when the last one has been sliced.
@@ -186,6 +230,18 @@ IndexedDB-backed blob reads only that range. Measured — 64 reads of 256 KiB ou
 took 98 ms against 59 ms for one full read, i.e. 39x less work than materialising the file per read.
 So MP3 and WAV take a **fast path** that decodes only what a cell plays; every other container
 (m4a, ogg, flac, opus, webm) keeps the full decode, byte for byte.
+
+Everything decoded for playback now agrees on ONE sample rate — the live `AudioContext`'s
+(`playback/model/playbackRate.ts`), commonly 48 000 on Android rather than the 44 100 three separate
+call sites used to force. A buffer at another rate is resampled by the source node on the audio
+thread for the whole cue, so a 48 kHz file was resampled down at decode and back up at playback.
+**WAV is the exception, and deliberately so**: `decodeWavFrames` builds its buffer at the FILE's
+rate because it invokes no decoder at all, which is exactly why that path is exempt from the
+per-browser partial-decode verdict. Rather than resample there, a WAV whose rate differs from the
+engine's falls through to the full decode, where the browser owns the quality
+(`shouldUseNativeRateForWav`). `?rate=N` pins the rate: the perf tier uses it through `perfGoto` so
+the committed `exact` byte gates stay machine-independent, and it is the on-device A/B and the
+escape hatch, the same family of switch as `?partial=` and `?pcmBudgetMb=`.
 
 TWO ORTHOGONAL GATES, and conflating them was the first draft's bug. `shouldReadRange` asks whether
 the window is small enough relative to the file that reading only its bytes pays — the trimmed-cue
@@ -256,6 +312,20 @@ instantly"; caching a reassembled window would put the whole track's PCM back in
 silently, because `protectedBytes` would then include it and the warm-up would start skipping the
 panel on screen in order to protect it.
 
+Not being cached is not the same as being released, and for a long time only the first was true.
+A finished segment's `onended` disconnected its node but left the entry on the route, and an
+`AudioBufferSourceNode` keeps its `buffer` reachable — so a cue held every segment it had ever
+scheduled. `routeSegments.ts` is what enforces the release now: `dropSegment` on each non-last
+`onended`, plus `pruneFinishedSegments` before every push, because `onended` is not delivered
+reliably across an iOS audio interruption and that is exactly the session where a cue runs long
+enough to matter. Measured on a 60 s window: **21 273 848 bytes held before, 5 468 400 after**.
+
+The cache accounting could not have caught this and still cannot: `pcm.totalBytes` reports
+`playbackBufferCache`, and a route's segments are not cache entries. `__mumboxDiag` therefore
+reports `pcm.routeBytes` and `pcm.residentBytes` beside it, and `partial.segments.peakLive` as the
+discrete high-water mark — sampled where segments are pushed and dropped, never where diagnostics
+are read, because a counter sampled on read records when someone looked rather than what was held.
+
 Four switches, because iOS Safari cannot be reached from CI at all (CoreAudio, not ffmpeg):
 `?partial=0` / `?partial=1` per load; a verdict persisted per browser in `mumbox:partial-decode:v1`
 (a sidecar, like `mumbox:project-session:v1` — outside `SerializableAppState` and outside the
@@ -318,23 +388,49 @@ browser storage — that was the whole reason not to keep project snapshots.
   list-only text never claims a disk deletion. `readwrite` is requested lazily, at the click.
 - `ProjectSession` (`src/app/model/projectSession.ts`) is project identity: name, description, file
   name, saved and dirty. It is deliberately **not** in `SerializableAppState` — the `.mumbox`
-  payload and `mumbox:state:v1` stay byte-identical for an untouched project — and persists in the
-  sidecar key `mumbox:project-session:v1`. Dirty tracking wraps the reducer
+  payload and the stored layout stay byte-identical for an untouched project — and persists under
+  its own key `session:v1` in the same `mumbox-app`/`state` database, never merged into the layout
+  record. Dirty tracking wraps the reducer
   (`withDirtyTracking`) instead of touching any `case`; volume, mute, `stopOthers` and mono all
   count as edits because they are serialized into the file.
-- Import deletes the outgoing blobs **before** writing the incoming ones, so the storage peak is
-  `max(old, new)` rather than their sum. `readProjectFile` has already validated the whole zip by
-  then, so a corrupt file destroys nothing.
+- Import deletes the outgoing blobs **after** the incoming ones are written and the state has been
+  applied, and it verifies every media CRC before touching storage at all. It used to do the
+  opposite, justified by a claim that `readProjectFile` had "already validated the whole zip" — it
+  had not: the media blobs it returns are lazy `file.slice` views, so not one audio byte had been
+  read. A source file that vanished, or a quota reached mid-write, therefore left the old audio
+  deleted, the new audio half written, and the persisted state still naming the old ids: a full
+  layout where nothing plays, with nothing to recover. The storage peak is `old + new` now, which is
+  what `hasLikelyStorageForBytes` already required anyway — it compares against `quota - usage` with
+  the old project still resident.
+- `readProjectFile` validates STRUCTURE only, and that is a deliberate split: it is also called once
+  per file by `addProjectsToLibrary` just to read a name and two counts for a bookmark row, so
+  verifying content there would read every byte of every project the user adds. Content is checked
+  by `verifyProjectMedia`, explicitly, on the paths that are about to overwrite something.
+- The reader's acceptance rules live in `file-config/model/zipDirectory.ts` and
+  `file-config/model/projectManifest.ts` rather than in `index.ts`, because that file imports
+  `getMediaBlob` and therefore cannot be loaded by the unit tier at all. `checkZipWriteLimits`
+  refuses an archive past 4 GiB instead of writing one whose uint32 offsets have silently wrapped;
+  ZIP64 is deliberately not implemented, because a 4 GiB `.mumbox` is unusable on the paths that
+  matter even when written correctly.
 
 ### Merging projects
 
 `src/features/project-merge` appends one project's panels to another. Two rules carry the feature:
-audio is deduplicated by SHA-256 of the bytes (`contentHash`, an optional `MediaAsset` field, with
-`isDuplicateMediaFile`'s name+size rule as the fallback for projects saved before it existed), and
+audio is deduplicated by SHA-256 of the bytes (`contentHash`, an optional `MediaAsset` field), and
 **every incoming panel id is regenerated** — `sanitizeImportedState` keeps incoming ids, and a
 collision would silently overwrite a panel's cells. Names are resolved with the same
 `makeUniquePanelName` panel copy uses, against the accumulating list. Global settings always come
 from the current project.
+
+`isDuplicateMediaFile`'s name-and-size rule is still consulted, but only as a cheap NEGATIVE: it can
+say "different", never "same". Allowing it to assert identity was a silent data-substitution bug and
+the default path at that — the current project's assets only gain a hash as a side effect of saving,
+so a project that had never been saved deduplicated entirely on file name and byte length, and two
+different `bell.mp3` of equal length collapsed into one. `prepareMerge` now hashes BOTH sides
+(through an injected `loadBlob`, so the module stays unit-testable), bucketed by size so only assets
+that could possibly collide are hashed at all. A pair that cannot be decided is KEPT and counted in
+`undecidedCount`, and the user is told that duplicates were not checked rather than shown a number
+implying they were.
 
 ## Conventions that bite
 

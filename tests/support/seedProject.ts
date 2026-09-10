@@ -4,7 +4,7 @@ import { DECODE_SAMPLE_RATE, decodedByteLength, makeWavBytes, wavByteLength } fr
 import type { WavSpec } from "./audioFixtures";
 
 /**
- * Seeds a whole project — IndexedDB media blobs plus the localStorage layout — without a single
+ * Seeds a whole project — IndexedDB media blobs plus the IndexedDB layout record — without a single
  * UI interaction, so a 144-cell panel costs one navigation instead of 144 file imports.
  *
  * Two contracts are duplicated here rather than imported from `src`:
@@ -19,6 +19,13 @@ export const IDB_DATABASE_NAME = "keyval-store";
 export const IDB_STORE_NAME = "keyval";
 export const MEDIA_BLOB_PREFIX = "mumbox:media:";
 export const STATE_STORAGE_KEY = "mumbox:state:v1";
+/**
+ * The app-state store, duplicated from `src/app/model/appStateStorage.ts` on purpose — the same
+ * reason the media store names are duplicated. `storage-contract.spec.ts` is the drift guard.
+ */
+export const APP_DB_NAME = "mumbox-app";
+export const APP_STORE_NAME = "state";
+export const STATE_RECORD_KEY = "state:v1";
 export const MAX_GRID_SIZE = 12;
 
 export type GridSize = 6 | 8 | 10 | 12;
@@ -247,6 +254,23 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
           };
         });
 
+      const openNamed = (name: string, storeName: string, version?: number) =>
+        new Promise<IDBDatabase>((resolve, reject) => {
+          const request =
+            version === undefined ? indexedDB.open(name) : indexedDB.open(name, version);
+          request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(storeName)) {
+              request.result.createObjectStore(storeName);
+            }
+          };
+          request.onsuccess = () => {
+            resolve(request.result);
+          };
+          request.onerror = () => {
+            reject(request.error ?? new Error("indexedDB.open failed"));
+          };
+        });
+
       let db = await openDatabase();
       if (!db.objectStoreNames.contains(payload.storeName)) {
         const nextVersion = db.version + 1;
@@ -274,7 +298,32 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
       });
 
       db.close();
-      localStorage.setItem(payload.storageKey, JSON.stringify(payload.state));
+
+      // The layout lives in its own IndexedDB database now, not in localStorage.
+      //
+      // Seeding the OLD key and riding the migration would be the tempting shortcut, and it is the
+      // wrong one: every seed site would then exercise the migration path and none would exercise
+      // steady state — and all of them would break on the day the legacy mirror is removed.
+      let appDb = await openNamed(payload.appDbName, payload.appStoreName);
+      if (!appDb.objectStoreNames.contains(payload.appStoreName)) {
+        const nextVersion = appDb.version + 1;
+        appDb.close();
+        appDb = await openNamed(payload.appDbName, payload.appStoreName, nextVersion);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const tx = appDb.transaction(payload.appStoreName, "readwrite");
+        tx.objectStore(payload.appStoreName).put(payload.state, payload.stateRecordKey);
+        tx.oncomplete = () => {
+          resolve();
+        };
+        tx.onerror = () => {
+          reject(tx.error ?? new Error("app-state seed transaction failed"));
+        };
+        tx.onabort = () => {
+          reject(tx.error ?? new Error("app-state seed transaction aborted"));
+        };
+      });
+      appDb.close();
     },
     {
       wavSource: makeWavBytes.toString(),
@@ -282,6 +331,9 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
       storeName: IDB_STORE_NAME,
       blobPrefix: MEDIA_BLOB_PREFIX,
       storageKey: STATE_STORAGE_KEY,
+      appDbName: APP_DB_NAME,
+      appStoreName: APP_STORE_NAME,
+      stateRecordKey: STATE_RECORD_KEY,
       state: seed.state,
       media: seed.media.map((asset) => ({
         id: asset.id,
@@ -338,3 +390,64 @@ export async function readStorageEstimate(page: Page): Promise<StorageEstimate> 
 }
 
 export { DECODE_SAMPLE_RATE };
+
+/**
+ * Writes ONLY the layout record, for tests that build their own state object.
+ *
+ * Same navigate-then-write mechanism `seedProject` uses, and for the same reason spelled out there:
+ * the write is asynchronous and `addInitScript` would race the app's own asynchronous read. With
+ * localStorage that race did not exist, which is why the old helper could get away with it.
+ */
+export async function writeSeededAppState(page: Page, state: unknown): Promise<void> {
+  await page.goto("/mumbox/favicon.svg");
+  await page.evaluate(
+    async (payload) => {
+      const open = (version?: number) =>
+        new Promise<IDBDatabase>((resolve, reject) => {
+          const request =
+            version === undefined
+              ? indexedDB.open(payload.dbName)
+              : indexedDB.open(payload.dbName, version);
+          request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(payload.storeName)) {
+              request.result.createObjectStore(payload.storeName);
+            }
+          };
+          request.onsuccess = () => {
+            resolve(request.result);
+          };
+          request.onerror = () => {
+            reject(request.error ?? new Error("indexedDB.open failed"));
+          };
+        });
+
+      let db = await open();
+      if (!db.objectStoreNames.contains(payload.storeName)) {
+        const nextVersion = db.version + 1;
+        db.close();
+        db = await open(nextVersion);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(payload.storeName, "readwrite");
+        tx.objectStore(payload.storeName).put(payload.state, payload.recordKey);
+        // The session record has to go too: a stale one would keep a project name the seeded
+        // layout knows nothing about.
+        tx.objectStore(payload.storeName).delete(payload.sessionKey);
+        tx.oncomplete = () => {
+          resolve();
+        };
+        tx.onerror = () => {
+          reject(tx.error ?? new Error("app-state seed failed"));
+        };
+      });
+      db.close();
+    },
+    {
+      dbName: APP_DB_NAME,
+      storeName: APP_STORE_NAME,
+      recordKey: STATE_RECORD_KEY,
+      sessionKey: "session:v1",
+      state
+    }
+  );
+}

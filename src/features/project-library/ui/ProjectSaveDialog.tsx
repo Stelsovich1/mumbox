@@ -47,11 +47,26 @@ export function ProjectSaveDialog({
    * one-way and one-time: editing the file name never writes back, and never gets overwritten.
    */
   const fileNameEditedRef = useRef(false);
+  /**
+   * Seeded once per OPENING, never again while the dialog is up.
+   *
+   * `takenProjectNames` is read from IndexedDB, so it arrives after the dialog is already on
+   * screen. With it in the dependency list the effect re-ran on arrival and reset all three fields
+   * — silently discarding whatever the user had typed in the meantime, and doing it more often the
+   * slower the machine. It showed up as a saved project called "Новый проект" that the user had
+   * named something else moments earlier.
+   */
+  const seededForOpenRef = useRef(false);
 
   useEffect(() => {
     if (!open) {
+      seededForOpenRef.current = false;
       return;
     }
+    if (seededForOpenRef.current) {
+      return;
+    }
+    seededForOpenRef.current = true;
     // A project saved before keeps its own name; a fresh one gets a default that is not taken yet.
     const initialName =
       defaultName || makeUniqueName(takenProjectNames, DEFAULT_PROJECT_NAME, DEFAULT_PROJECT_NAME);

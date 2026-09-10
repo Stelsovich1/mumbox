@@ -49,6 +49,17 @@ export type PlaybackBufferKeyInput = {
   trimStartMs: number | null;
   trimEndMs: number | null;
   mono: boolean;
+  /**
+   * Whether the cell loops.
+   *
+   * Not a property of the audio, but it changes what may be STORED under the key. A looping cue is
+   * deliberately never streamed — one full decode is the right price for something heard over and
+   * over — so its entry must never be a streamed head. Without this in the key, a `once` cell
+   * sharing the same media, trim and mono would cache its head first and the loop cell would read
+   * it, take the streamed branch, and end from the chain's `onended`, which has no loop restart:
+   * the pad would play exactly once and go quiet.
+   */
+  loop: boolean;
 };
 
 export type AudioBufferCacheStats = {
@@ -82,6 +93,14 @@ export type AudioBufferCache = {
   setPriority: (keys: Iterable<string>) => void;
   keys: () => string[];
   bytes: () => number;
+  /**
+   * The budget alone, without walking the entries.
+   *
+   * `stats()` sums three key sets and allocates a `Set` for each, and the warm-up called it once
+   * per target purely to read this field — which is `null` by default on every device, so the walk
+   * was discarded unread every time.
+   */
+  budgetBytes: () => number | null;
   bytesFor: (keys: Iterable<string>) => number;
   size: () => number;
   stats: () => AudioBufferCacheStats;
@@ -104,7 +123,16 @@ const KEY_SEPARATOR = "|";
 export function makePlaybackBufferKey(input: PlaybackBufferKeyInput): string {
   const start = input.trimStartMs ?? 0;
   const end = input.trimEndMs ?? "e";
-  return [input.mediaId, String(start), String(end), input.mono ? "m" : "s"].join(KEY_SEPARATOR);
+  // The loop flag sits BEFORE the mono flag so the key still ends in the channel marker — several
+  // tests read the tail to tell a mono entry from a stereo one, and the trim pair is still a
+  // contiguous `|start|end|` run.
+  return [
+    input.mediaId,
+    String(start),
+    String(end),
+    input.loop ? "l" : "o",
+    input.mono ? "m" : "s"
+  ].join(KEY_SEPARATOR);
 }
 
 export function getMediaIdFromKey(key: string): string {
@@ -120,15 +148,25 @@ export function getAudioBufferBytes(buffer: {
 }
 
 /**
- * Pre-decode estimate from the only metadata a `MediaAsset` carries. The sample rate is exact —
- * decoding forces 44 100 Hz — but the channel count is unknown before the decode, so stereo is
- * assumed. Being wrong high costs a skipped warm-up; being wrong low costs a jetsam.
+ * Pre-decode estimate from the only metadata a `MediaAsset` carries.
+ *
+ * The rate is a REQUIRED argument with no default. A default of 44 100 is precisely the assumption
+ * this work removed — decoding follows the hardware now — and leaving it in place would have made
+ * every estimate on a 48 kHz device 8.8 % low, in the direction that costs a jetsam rather than a
+ * skipped warm-up. The channel count is still unknown before decoding, so stereo is assumed.
  */
-export function estimatePcmBytes(durationMs: number | null, mono: boolean): number | null {
+export function estimatePcmBytes(
+  durationMs: number | null,
+  mono: boolean,
+  sampleRate: number
+): number | null {
   if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) {
     return null;
   }
-  return Math.round((durationMs / 1000) * 44_100 * (mono ? 1 : 2) * 4);
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+    return null;
+  }
+  return Math.round((durationMs / 1000) * sampleRate * (mono ? 1 : 2) * 4);
 }
 
 export function createAudioBufferCache(budgetBytes: number | null): AudioBufferCache {
@@ -281,6 +319,9 @@ export function createAudioBufferCache(budgetBytes: number | null): AudioBufferC
     },
     bytes() {
       return totalBytes;
+    },
+    budgetBytes() {
+      return budget;
     },
     bytesFor(keys) {
       return sumDistinctBytes(keys);

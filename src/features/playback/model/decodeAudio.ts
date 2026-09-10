@@ -11,6 +11,8 @@
  * can be unit tested in Node, where Web Audio does not exist.
  */
 
+import { getEngineSampleRate } from "./playbackRate";
+
 export type ReadableAudioBuffer = {
   length: number;
   duration: number;
@@ -37,6 +39,13 @@ export type SliceOptions = {
 const MIN_SLICE_RATIO = 0.9;
 const MIN_SLICE_SAVING_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Fallback rate, used until a live `AudioContext` has reported its own.
+ *
+ * No longer "the rate everything decodes at" — that is `getEngineSampleRate()`, which follows the
+ * hardware. The identifier is kept so the many call sites that only need a sane default do not
+ * churn.
+ */
 export const DECODE_SAMPLE_RATE = 44_100;
 
 function getFrameRange(source: ReadableAudioBuffer, startSeconds: number, endSeconds: number) {
@@ -117,7 +126,7 @@ export function sliceToAudioBuffer(
 ): AudioBuffer {
   let context: OfflineAudioContext | null = null;
   const createBuffer: AudioBufferFactory = (channels, length, sampleRate) => {
-    context ??= new OfflineAudioContext(1, 1, DECODE_SAMPLE_RATE);
+    context ??= new OfflineAudioContext(1, 1, getEngineSampleRate());
     return context.createBuffer(channels, length, sampleRate);
   };
   return sliceAudioBuffer(source, { ...options, createBuffer }) as AudioBuffer;
@@ -125,6 +134,9 @@ export function sliceToAudioBuffer(
 
 export async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer> {
   const arrayBuffer = await blob.arrayBuffer();
-  const context = new OfflineAudioContext(1, 1, DECODE_SAMPLE_RATE);
+  // At the ENGINE's rate, not a constant. A buffer decoded at 44 100 and played on a 48 000 context
+  // is resampled again by `AudioBufferSourceNode`, on the audio thread, for every playing pad —
+  // having already been resampled once here. Decoding at the context rate removes both.
+  const context = new OfflineAudioContext(1, 1, getEngineSampleRate());
   return context.decodeAudioData(arrayBuffer);
 }

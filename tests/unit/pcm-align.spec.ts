@@ -95,7 +95,10 @@ test.describe("findAlignmentOffset", () => {
       reference,
       haystack,
       nominalOffset: 4000 + 2257,
-      searchRadius: 4096
+      searchRadius: 4096,
+      // `peakCorrelation` below is a survey-only statistic: production reads `lag` alone, so the
+      // default search stops at the first acceptance and never computes a correlation.
+      survey: true
     });
     expect(result.lag).toBe(-2257);
     expect(result.residual).toBe(0);
@@ -127,7 +130,9 @@ test.describe("findAlignmentOffset", () => {
       reference,
       haystack,
       nominalOffset: 4000,
-      searchRadius: 2048
+      searchRadius: 2048,
+      // Counting every match is what `survey` is for; the default stops at the first one.
+      survey: true
     });
     expect(result.acceptedCount).toBeGreaterThan(1);
     // And among all those matches the one closest to zero wins, so the measurement does not drift
@@ -145,7 +150,8 @@ test.describe("findAlignmentOffset", () => {
       // -800 all match. The nearest to zero is what a delay measurement must not return blindly,
       // which is exactly why the caller cross-checks windows.
       nominalOffset: 4600,
-      searchRadius: 2048
+      searchRadius: 2048,
+      survey: true
     });
     expect(result.acceptedCount).toBeGreaterThan(1);
     expect(result.lag).not.toBeNull();

@@ -207,6 +207,10 @@ test.describe("buffer route", () => {
     await installBufferAudioMock(page, { decodeDelayMs: 400 });
     await setup(page, { distinctMedia: 1, filledCellsPerPanel: 1 });
 
+    // The grid arrives after the layout has been read out of IndexedDB, so it has to be waited for
+    // — `evaluate` would otherwise find no element and click nothing.
+    await expect(cell(page, 1)).toBeVisible();
+
     // Both clicks are dispatched inside the page, back to back, so they land while the decode
     // is still in flight. Two awaited Playwright clicks are hundreds of ms apart and the second
     // would simply stop the first route instead of racing it.
@@ -242,6 +246,55 @@ test.describe("buffer route", () => {
     const middle = await readProgress();
     await advanceAudioClock(page, 1);
     await expect.poll(readProgress, { timeout: 5000 }).toBeGreaterThan(middle);
+  });
+
+  /**
+   * The marker's position used to be interpolated straight into `sx`, so every distinct progress
+   * value produced a distinct Emotion rule — and Emotion never removes what it inserts. Measured in
+   * the perf tier before the fix: 1011 new rules a minute with six playing cells, against exactly 0
+   * for `loop` mode, which drives its dot through SVG attributes. An hour of use was ~60 000
+   * permanent rules, each one participating in every subsequent style recalc.
+   *
+   * Two assertions, and both are needed: the sheet must not grow, AND the marker must still move.
+   * Either alone passes on a broken implementation — a marker pinned at 0% grows no stylesheet.
+   */
+  test("moves the progress marker without growing the stylesheet", async ({ page }) => {
+    await installBufferAudioMock(page);
+    await setup(page);
+    await waitForWarm(page, 3);
+
+    const countEmotionRules = () =>
+      page.evaluate(() => {
+        const nodes = document.querySelectorAll("style[data-emotion]");
+        let total = 0;
+        for (let index = 0; index < nodes.length; index += 1) {
+          const sheet = (nodes.item(index) as HTMLStyleElement | null)?.sheet;
+          if (sheet) {
+            total += sheet.cssRules.length;
+          }
+        }
+        return total;
+      });
+    const markerLeft = () =>
+      cell(page, 1)
+        .getByTestId("progress-marker")
+        .evaluate((node) => getComputedStyle(node).left);
+
+    await cell(page, 1).click();
+    await expect(cell(page, 1)).toHaveAttribute("data-playing", "true");
+    // After the press, so the rules the first render legitimately inserts are excluded.
+    const rulesBefore = await countEmotionRules();
+    const leftBefore = await markerLeft();
+
+    for (let step = 0; step < 3; step += 1) {
+      await advanceAudioClock(page, 1);
+      await page.waitForTimeout(120);
+    }
+
+    await expect
+      .poll(markerLeft, { timeout: 5000 })
+      .not.toBe(leftBefore);
+    expect(await countEmotionRules()).toBe(rulesBefore);
   });
 
   test("recovers from a context that is no longer running", async ({ page }) => {

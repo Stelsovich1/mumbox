@@ -93,6 +93,23 @@ body {
   -webkit-user-drag: none;
 }
 
+/* Same trap as the drag handle above, and it bit the grid cell for the same reason.
+   `manipulation` still permits panning, so the browser keeps the right to reclaim the gesture and
+   delays committing to the tap. Nothing inside the grid scrolls — `#root` is `overflow: hidden` —
+   so there is no pan to preserve.
+
+   This cannot live in the cell's `sx`: an Emotion class is (0,1,0) and loses to
+   `[data-noselect] button:not([draggable="true"])` at (0,2,1) for every cell the `:not()` does not
+   exclude — every empty cell, and every cell once edit mode is off. That is the whole playing
+   surface. `button[data-cell-id]` ties at (0,2,1) and wins on source order, so this block must stay
+   below that rule. */
+@media (hover: none), (pointer: coarse) {
+  [data-noselect] [data-cell-id],
+  [data-noselect] button[data-cell-id] {
+    touch-action: none;
+  }
+}
+
 @keyframes mumbox-cell-warm {
   0%,
   100% {

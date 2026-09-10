@@ -1,5 +1,5 @@
 import { Box, Typography } from "@mui/material";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
@@ -11,6 +11,7 @@ import {
   subscribeMediaDrag
 } from "../../../shared/lib/mediaDragSession";
 import { decodeMediaDragPayload, MEDIA_DRAG_MIME } from "../../../shared/lib/mediaDragTransfer";
+import { registerCell } from "../../../shared/lib/cellVisuals";
 
 type FileSystemEntryLike = {
   isFile: boolean;
@@ -31,7 +32,12 @@ type WorkspaceGridProps = {
   media: MediaAsset[];
   editMode: boolean;
   selectedCellId: string | null;
-  playingCells: { cellKey: string; progress: number }[];
+  /**
+   * Which cells are playing. Membership only — the continuous progress value is written straight to
+   * the DOM by the engine through `cellVisuals`, because pushing it through React re-rendered the
+   * whole shell twenty times a second.
+   */
+  playingCellKeys: string[];
   /** Warm state per cell id. Keyed by cell, not by media: two cells on one media can have
    * different trims, hence different cache entries, hence different warm states. */
   warmedCells: Record<string, "warming" | "ready">;
@@ -46,7 +52,6 @@ type WorkspaceGridProps = {
 
 type PlaybackIndicatorProps = {
   mode: PlaybackMode;
-  progress: number;
   active: boolean;
   color: string;
 };
@@ -78,17 +83,23 @@ function mixHexColor(hexColor: string, targetHexColor: string, amount: number) {
   return `#${channel(red, targetRed)}${channel(green, targetGreen)}${channel(blue, targetBlue)}`;
 }
 
-function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorProps) {
+/**
+ * Memoised, and it only pays off because of what the caller no longer passes.
+ *
+ * `progress` used to be a prop that changed twenty times a second for every playing cell, so this
+ * component re-rendered — and re-serialized five `sx` objects — at that rate. Both markers read
+ * `--cell-progress` now, the linear one through `calc()` and the loop one through a rotation, so
+ * nothing here depends on the number and the memo blocks the re-render outright.
+ */
+const PlaybackIndicator = memo(function PlaybackIndicator({
+  mode,
+  active,
+  color
+}: PlaybackIndicatorProps) {
   const guideColor = `color-mix(in srgb, ${color} ${active ? "40%" : "62%"}, transparent)`;
   const markerColor = `color-mix(in srgb, ${color} ${active ? "92%" : "86%"}, transparent)`;
 
   if (mode === "loop") {
-    const angle = progress * Math.PI * 2 - Math.PI / 2;
-    const radius = 14;
-    const center = 18;
-    const dotX = center + Math.cos(angle) * radius;
-    const dotY = center + Math.sin(angle) * radius;
-
     return (
       <Box
         component="svg"
@@ -104,7 +115,21 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
           stroke={guideColor}
           strokeWidth="3"
         />
-        <circle cx={dotX} cy={dotY} r="2.25" fill={color} />
+        {/*
+          The dot sits at the top of the ring and the GROUP is rotated, rather than the position
+          being recomputed in React. At progress 0 the old maths put it at angle -PI/2, which is
+          exactly (18, 4) — so one turn of rotation reproduces the same path, driven by the same
+          custom property the linear marker reads. That is what lets the whole indicator stop taking
+          `progress` as a prop, and with it the 20 Hz re-render.
+        */}
+        <g
+          style={{
+            transformOrigin: "18px 18px",
+            transform: "rotate(calc(var(--cell-progress, 0) * 1turn))"
+          }}
+        >
+          <circle cx="18" cy="4" r="2.25" fill={color} />
+        </g>
       </Box>
     );
   }
@@ -162,9 +187,21 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
         }}
       />
       <Box
+        data-testid="progress-marker"
         sx={{
           position: "absolute",
-          left: `${String(progress * 100)}%`,
+          // Read from a custom property the cell writes, NOT interpolated here.
+          //
+          // Interpolating the value made every distinct progress reading serialize to a distinct
+          // rule, and Emotion inserts each one and never removes it: `flush()` is only reachable
+          // from `cache.sheet.flush()`, which MUI never calls. Measured on this repo at 1x with six
+          // playing cells: 1011 new rules per minute, against exactly 0 for the `loop` arm, which
+          // moves its dot through SVG attributes instead. An hour of use is ~60 000 permanent rules,
+          // and the cost of an insertion grows with the sheet, so the damage is cumulative.
+          //
+          // `calc(<number> * <percentage>)` is valid per CSS Values 4 and resolves at
+          // computed-value time, so the marker still moves — through one static rule.
+          left: "calc(var(--cell-progress, 0) * 100%)",
           top: "50%",
           width: "clamp(3px, 5cqw, 5px)",
           height: "clamp(3px, 5cqw, 5px)",
@@ -175,7 +212,7 @@ function PlaybackIndicator({ mode, progress, active, color }: PlaybackIndicatorP
       />
     </Box>
   );
-}
+});
 
 function supportsPointerEvents() {
   return "PointerEvent" in window;
@@ -204,8 +241,9 @@ type WorkspaceGridCellProps = {
   cell: GridCell;
   index: number;
   mediaAsset: MediaAsset | null;
+  /** Panel-qualified, and the key the visuals registry writes under. */
+  cellKey: string;
   isPlaying: boolean;
-  progress: number;
   warmState: "idle" | "warming" | "ready";
   isSelected: boolean;
   isDragging: boolean;
@@ -244,8 +282,8 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
   cell,
   index,
   mediaAsset,
+  cellKey,
   isPlaying,
-  progress,
   warmState,
   isSelected,
   isDragging,
@@ -275,13 +313,30 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
   const textColor = mediaAsset ? getReadableTextColor(displayColor) : "#a9b7cf";
   const innerMutedColor = `color-mix(in srgb, ${textColor} 82%, transparent)`;
 
+  /**
+   * Hands the node to the visuals registry, which the audio engine writes progress into directly.
+   *
+   * Keyed on `cellKey`, so a cell that keeps its identity across a re-render is registered once. The
+   * cleanup is returned from the ref callback, which React 19 supports — no effect needed, and no
+   * window where a detached node is still registered.
+   */
+  const registerVisuals = useCallback(
+    (node: HTMLElement | null) => {
+      registerCell(cellKey, node);
+      return () => {
+        registerCell(cellKey, null);
+      };
+    },
+    [cellKey]
+  );
+
   return (
     <Box
         component="button"
         type="button"
         data-cell-id={cell.id}
         data-playing={isPlaying ? "true" : "false"}
-        data-progress={progress.toFixed(4)}
+        ref={registerVisuals}
         data-warm-state={warmState}
         data-playback-mode={cell.playbackMode}
         data-hotkey={cell.hotkey}
@@ -565,10 +620,12 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           },
           "@media (hover: none), (pointer: coarse)": {
             WebkitTapHighlightColor: "transparent",
-            // `manipulation` still permits panning, so the browser keeps the right to reclaim
-            // the gesture and delays committing to the tap. Nothing inside the grid scrolls —
-            // `#root` is `overflow: hidden` — so there is no pan to preserve.
-            touchAction: "none",
+            // `touch-action` is NOT set here. An Emotion class is (0,1,0) and loses to
+            // `[data-noselect] button:not([draggable="true"])` in `global.css`, which is (0,2,1)
+            // and matches every cell that is not draggable — i.e. every cell outside edit mode and
+            // every empty cell, which is exactly what a user taps during a show. The declaration
+            // sat here looking correct and never applied. It lives in `global.css` now, at a
+            // specificity that can win.
             "&:focus, &:focus-visible": {
               outline: "none"
             }
@@ -620,7 +677,6 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
             ) : null}
             <PlaybackIndicator
               mode={cell.playbackMode}
-              progress={progress}
               active={isPlaying}
               color={innerMutedColor}
             />
@@ -659,7 +715,7 @@ export function WorkspaceGrid({
   media,
   editMode,
   selectedCellId,
-  playingCells,
+  playingCellKeys,
   warmedCells,
   onCellClick,
   onGateStart,
@@ -678,10 +734,7 @@ export function WorkspaceGrid({
   const touchDragTimerRef = useRef<number | null>(null);
   const suppressClickTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
-  const playingByCellKey = useMemo(
-    () => new Map(playingCells.map((cell) => [cell.cellKey, cell.progress])),
-    [playingCells]
-  );
+  const playingKeySet = useMemo(() => new Set(playingCellKeys), [playingCellKeys]);
   // A linear scan per cell made this O(cells x media) on every repaint — 5 760 comparisons for a
   // 144-cell panel with 40 media, repeated on every frame of playback.
   const mediaById = useMemo(() => new Map(media.map((item) => [item.id, item])), [media]);
@@ -987,12 +1040,10 @@ export function WorkspaceGrid({
         {cells.map((cell, index) => {
           const cellKey = `${panelId}:${cell.id}`;
           const mediaAsset = cell.mediaId ? (mediaById.get(cell.mediaId) ?? null) : null;
-          const playingProgress = playingByCellKey.get(cellKey);
-          const isPlaying = playingProgress !== undefined;
+          const isPlaying = playingKeySet.has(cellKey);
           const isSelected = editMode && selectedCellId === cell.id;
           const isDragging =
             draggingCellId === cell.id || (touchDrag?.active && touchDrag.fromCellId === cell.id);
-          const progress = playingProgress ?? 0;
           const warmState = cell.mediaId ? (warmedCells[cell.id] ?? "idle") : "idle";
           const activeDragOverCellId = touchDrag?.overCellId ?? dragOverCellId;
 
@@ -1003,7 +1054,7 @@ export function WorkspaceGrid({
               index={index}
               mediaAsset={mediaAsset}
               isPlaying={isPlaying}
-              progress={progress}
+              cellKey={cellKey}
               warmState={warmState}
               isSelected={isSelected}
               isDragging={Boolean(isDragging)}

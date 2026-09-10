@@ -27,7 +27,7 @@ In scope (logic that is unit- or probe-testable):
 | `src/features/audio-editor/model/waveformCache.ts` | all |
 | `src/shared/lib/mediaCacheRegistry.ts` | all |
 | `src/shared/lib/diagnostics.ts` | `recordDecode`, `recordTimeToFirstSound`, `getBudgetOverrideFromQuery` |
-| `src/features/playback/model/useAudioEngine.ts` | `getEffectiveVolume`, `getHtmlAudioVolume`, `getClampedPlaybackRange`, `getTrimmedDurationMs`, `getEnvelopeSignature`, `arePlayingCellsEqual`, `setRouteVolume`, `stopRoute`, `startBufferRoute` including its `entry.partial` branch, the `playCell` token guards, the rAF `tick` including the streamed-route watchdog, the warm-up and panel-eviction effects, `isPartialPathLikely`, `tryDecodeRange`, `runSegmentChain`, `promoteToLast` |
+| `src/features/playback/model/useAudioEngine.ts` | `getHtmlAudioVolume`, `needsAlignmentMeasurement`, `getClampedPlaybackRange`, `getTrimmedDurationMs`, `getEnvelopeSignature`, `arePlayingCellsEqual`, `setRouteVolume`, `stopRoute`, `startBufferRoute` including its `entry.partial` branch, the `playCell` token guards, the rAF `tick` including the streamed-route watchdog, the warm-up and panel-eviction effects, `isPartialPathLikely`, `tryDecodeRange`, `runSegmentChain`, `promoteToLast` |
 | `src/app/model/appState.ts` | the `media/deleteMany` case, the `cell/assignMany` case, `remapImportedState`, `writeMergedProjectMedia` |
 | `src/entities/panel/model/panelCells.ts` | `getPanelCellIds`, `normalizePanelCellIds`, `remapLegacyCells`, `ensurePanelCells` |
 | `src/entities/panel/model/panelName.ts` | all |
@@ -47,10 +47,28 @@ In scope (logic that is unit- or probe-testable):
 | `src/features/project-library/model/projectRowState.ts` | all |
 | `src/features/project-merge/model/mediaDedup.ts` | all |
 | `src/features/project-merge/model/mergeProjects.ts` | all |
+| `src/features/project-merge/model/runMerge.ts` | `prepareMerge`, `selectMediaToHash` |
+| `src/features/file-config/model/zipDirectory.ts` | all |
+| `src/features/file-config/model/projectManifest.ts` | all |
+| `src/features/file-config/model/projectFileError.ts` | `classifyProjectFileError` |
+| `src/features/playback/model/routeSegments.ts` | all |
+| `src/features/playback/model/volume.ts` | all |
+| `src/features/playback/model/playbackRate.ts` | all |
+| `src/features/playback/model/mediaProbeCache.ts` | `createMediaProbeCache`, `indexBytesOf` |
+| `src/features/playback/model/mp3FrameIndex.ts` | `getIndexedDurationSeconds` (plus the existing entries) |
+| `src/features/playback/model/pcmAlign.ts` | `findAlignmentOffset`, `residualWithinTolerance` (plus the existing entries) |
+| `src/app/model/serializeState.ts` | all |
+| `src/shared/lib/cellVisuals.ts` | all |
 
-Out of scope: every `.tsx`, the hand-rolled ZIP writer in `src/features/file-config`, anything
-reachable only through a Russian UI string, and the whole `tests/perf` tier (too slow and too noisy
-for a binary verdict).
+Out of scope: every `.tsx`, the hand-rolled ZIP writer and reader in
+`src/features/file-config/index.ts` (its pure `model/` modules ARE in scope), anything reachable
+only through a Russian UI string, and the whole `tests/perf` tier (too slow and too noisy for a
+binary verdict).
+
+The `index.ts` exclusion is a consequence of the I/O boundary, not a preference: that file imports
+`getMediaBlob`, which reaches `react` and `idb-keyval`, so the unit tier cannot load it at all and a
+mutant there could only die by accident. Draw the line at "no I/O, no DOM, no runtime import of app
+state" — anything on the pure side of it belongs in the table above.
 
 ## Mutation classes
 

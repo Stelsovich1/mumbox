@@ -23,16 +23,26 @@ test("produces a digest matching the stored-hash pattern", async () => {
 });
 
 test("returns null when crypto.subtle is unavailable", async () => {
-  const original = Object.getOwnPropertyDescriptor(globalThis.crypto, "subtle");
+  // The stub SHADOWS an accessor that lives on the prototype, so it must be removed rather than
+  // written back. Reading `getOwnPropertyDescriptor` off the instance returns undefined here, and
+  // restoring only `if (original)` therefore restored nothing: `subtle` stayed undefined for the
+  // rest of the worker process, and every later spec in that worker silently lost hashing. That is
+  // what made `merge-prepare.spec.ts` fail in a full run and pass on its own.
+  const own = Object.getOwnPropertyDescriptor(globalThis.crypto, "subtle");
   Object.defineProperty(globalThis.crypto, "subtle", { value: undefined, configurable: true });
 
   try {
     expect(await computeContentHash(new Blob(["abc"]))).toBeNull();
   } finally {
-    if (original) {
-      Object.defineProperty(globalThis.crypto, "subtle", original);
+    if (own) {
+      Object.defineProperty(globalThis.crypto, "subtle", own);
+    } else {
+      delete (globalThis.crypto as unknown as Record<string, unknown>).subtle;
     }
   }
+
+  // The restore is asserted, not assumed - the whole failure above was a restore that did nothing.
+  expect(await computeContentHash(new Blob(["abc"]))).not.toBeNull();
 });
 
 test("toHex pads every byte to two characters", () => {

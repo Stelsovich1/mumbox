@@ -7,6 +7,7 @@ import {
   diagDecodeCount,
   diagPartial,
   diagPcmBytes,
+  diagRoutePcmBytes,
   diagSetPartialDecode
 } from "../support/diag";
 import { seedProject } from "../support/seedProject";
@@ -441,4 +442,59 @@ test("the range-decoded buffer plays the trimmed window from its own start", asy
   // The buffer already starts at the trim, so the offset into it is 0 rather than the trim
   // position — `sliceStartSeconds` absorbs the difference, exactly as it does for a sliced buffer.
   expect(probe.sources[0]?.startCalls).toEqual([{ when: 0, offset: 0, duration: 5 }]);
+});
+
+/**
+ * A streamed route must release each segment as it finishes.
+ *
+ * `partialPlan.ts` states the bound as "head plus about 32 s of resident PCM — roughly 11 MiB",
+ * and `SEGMENT_LOOKAHEAD` is what is supposed to enforce it. Nothing did: segments were pushed onto
+ * the route and never removed, so an `AudioBufferSourceNode` — and through it the PCM its `buffer`
+ * points at — stayed reachable for the whole cue. A 180 s window is 14 segments, ~63.8 MB; a
+ * 45-minute set is ~952 MB; six concurrent three-minute pads are ~383 MB, arriving gradually.
+ *
+ * Why no existing test saw it: every memory assertion in `playback-memory.spec.ts` reads
+ * `diagPcmBytes`, which reports `playbackBufferCache` — and segments are never cache entries. That
+ * file also never advances the audio clock, so no cue in it ever plays past its head. The one test
+ * that does play a streamed cue to its end asserts the watchdog, not memory.
+ *
+ * Both assertions are needed. `peakLive` alone would pass on an implementation that dropped the
+ * segments but leaked the buffers; `routePcmBytes` alone would pass on one that never streamed.
+ */
+test("a streamed cue releases each segment as it finishes", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: { seconds: 90, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 1,
+    trimStartMs: 0,
+    trimEndMs: 60_000
+  });
+  await page.goto("/");
+  await waitForWarm(page, 1);
+
+  const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
+  await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
+
+  // Stepped, for the reason spelled out in the test above: a single jump outruns the chain and the
+  // watchdog legitimately ends the cue, which would measure nothing.
+  for (let elapsed = 0; elapsed < 56; elapsed += 2) {
+    await advanceAudioClock(page, 2);
+    await page.waitForTimeout(120);
+  }
+
+  const partial = await diagPartial(page);
+  // The ladder gives a 60 s window head(0.5) + 4 + 8 + 16 + 16 + 15.5 = 6 segments. Retaining them
+  // all makes `peakLive` 6; releasing as they finish keeps it at the lookahead plus the one being
+  // scheduled.
+  expect(partial?.segments.peakLive).toBeLessThanOrEqual(3);
+  // Measured: 21 273 848 bytes before the fix — the whole 60 s window — against 5 468 400 after,
+  // which is 15.5 s of PCM, i.e. the head plus the lookahead. The ceiling is set above the measured
+  // value rather than at it, so an ordinary scheduling wobble does not fail the build.
+  expect(await diagRoutePcmBytes(page)).toBeLessThan(14 * 1024 * 1024);
+  // Ended by its own last segment, not by the safety net — pruning must not break `isLast`.
+  expect(partial?.segments.watchdog).toBe(0);
 });

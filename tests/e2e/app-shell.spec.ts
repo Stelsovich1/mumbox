@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+
+import { writeSeededAppState } from "../support/seedProject";
 import type { Page } from "@playwright/test";
 import { mkdir, readFile, truncate, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -272,12 +274,10 @@ function makeStoredCell(id: string, mediaId: string | null) {
 }
 
 async function seedStoredState(page: Page, state: unknown) {
-  await page.addInitScript(
-    ({ key, value }) => {
-      localStorage.setItem(key, JSON.stringify(value));
-    },
-    { key: "mumbox:state:v1", value: state }
-  );
+  // The layout lives in IndexedDB now, and the write has to complete before the app reads it — an
+  // `addInitScript` would race the app's own asynchronous read. `writeSeededAppState` navigates to
+  // a static asset to establish the origin, writes, and leaves the caller to load the app.
+  await writeSeededAppState(page, state);
   await page.goto("/");
 }
 
@@ -2095,6 +2095,28 @@ test("moves cells on touch after a short hold in edit mode", async ({ page }, te
   await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("aria-label", "Пустая ячейка 1");
   await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("aria-label", "Ячейка 4 Touch Move Pad");
   await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("data-selected", "true");
+});
+
+/**
+ * The cell above is `draggable="true"` — it holds media and edit mode is on — so it is excluded by
+ * the `:not([draggable="true"])` in `global.css`'s `[data-noselect] button` rule and never proved
+ * anything about the cells a user actually taps during a show. Those are empty cells and, outside
+ * edit mode, every cell: all `draggable="false"`, all matched by that rule at specificity (0,2,1),
+ * which outranks the cell's own (0,1,0) declaration.
+ */
+test("keeps touch-action off the browser for cells that are not draggable", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "touch-action is only emulated on mobile");
+  await page.goto("/");
+
+  // Never draggable: no media, so `draggable` is false whatever the mode.
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveCSS("touch-action", "none");
+
+  await importAudio(page, "Tap Pad");
+  await assignFirstCell(page);
+  // Leaving edit mode makes the filled cell non-draggable too — this is the normal playing state.
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-selected", "false");
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveCSS("touch-action", "none");
 });
 
 test("swaps configured cells when dragging onto an occupied cell", async ({ page }, testInfo) => {

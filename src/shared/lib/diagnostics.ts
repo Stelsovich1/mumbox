@@ -36,6 +36,16 @@ export type DiagPcmAccounting = {
   misses: number;
   evictions: number;
   overBudget: boolean;
+  /**
+   * PCM held by the buffers of live routes, which the cache does not account for at all.
+   *
+   * A streamed route owns its segments outright; they are never cache entries. Reporting only
+   * `totalBytes` therefore understates what the tab is holding by exactly the amount that grows
+   * while a long cue plays, which is the one number a memory investigation needs.
+   */
+  routeBytes: number;
+  /** `totalBytes + routeBytes` — what the tab is actually holding. */
+  residentBytes: number;
 };
 
 export type DiagDecodeEntry = {
@@ -107,7 +117,25 @@ export type DiagPartial = {
    * `isLast` bookkeeping is broken — the cue still ends, so nothing sounds wrong, which is exactly
    * why the mechanism has to be observable rather than inferred from timing.
    */
-  segments: { scheduled: number; late: number; missed: number; watchdog: number };
+  /**
+   * `live` is how many segments a streamed route is holding right now, `peakLive` the high-water
+   * mark of the session.
+   *
+   * They exist because the cache accounting structurally cannot see them: `pcm.totalBytes` reports
+   * `playbackBufferCache`, and a segment belongs to a live route. That blind spot let every
+   * segment of a cue accumulate for the cue's whole life — 14 of them on a 180 s window, ~63.8 MB
+   * — while every memory assertion in the suite read a number that stayed small and correct.
+   * `peakLive` is the discrete quantity that would have shown it: bounded by
+   * `SEGMENT_LOOKAHEAD + 1`, it was reaching the segment count of the window.
+   */
+  segments: {
+    scheduled: number;
+    late: number;
+    missed: number;
+    watchdog: number;
+    live: number;
+    peakLive: number;
+  };
   verifications: { pass: number; fail: number; skipped: number };
   /** Measured samples between an isolated mid-file decode and the full one, per media. */
   alignDeltaSamples: Record<string, number>;
@@ -139,6 +167,8 @@ export type MumboxDiag = {
   version: 1;
   snapshot: () => Promise<DiagSnapshot>;
   pcmBytes: () => number;
+  /** PCM held by live routes, which `pcmBytes` (the cache) does not see. */
+  routePcmBytes: () => number;
   pcmBytesForActivePanel: () => number;
   cacheKeys: () => string[];
   cacheStats: () => DiagPcmAccounting;
@@ -178,7 +208,7 @@ type SessionRecord = {
   storageUsage?: number;
 };
 
-const EMPTY_ACCOUNTING: DiagPcmAccounting = {
+const EMPTY_ACCOUNTING: DiagCacheAccounting = {
   totalBytes: 0,
   activePanelBytes: 0,
   pinnedBytes: 0,
@@ -215,14 +245,27 @@ const state = {
   partial: {
     probes: { mp3: 0, wav: 0, unsupported: 0 },
     served: { range: 0, streamed: 0, declined: 0 },
-    segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0 },
+    segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0, live: 0, peakLive: 0 },
     verifications: { pass: 0, fail: 0, skipped: 0 },
     alignDeltaSamples: new Map<string, number>(),
     rangeReads: { count: 0, bytes: 0 }
   }
 };
 
-let accountingSource: () => DiagPcmAccounting = () => EMPTY_ACCOUNTING;
+/**
+ * What the cache itself can report. Route-held PCM is composed in below, because the cache has no
+ * way of knowing about it — that separation is the whole reason the accumulation went unseen.
+ */
+export type DiagCacheAccounting = Omit<DiagPcmAccounting, "routeBytes" | "residentBytes">;
+
+let accountingSource: () => DiagCacheAccounting = () => EMPTY_ACCOUNTING;
+let routePcmSource: () => number = () => 0;
+
+function getAccounting(): DiagPcmAccounting {
+  const base = accountingSource();
+  const routeBytes = routePcmSource();
+  return { ...base, routeBytes, residentBytes: base.totalBytes + routeBytes };
+}
 let cacheKeysSource: () => string[] = () => [];
 let budgetSink: (bytes: number | null) => void = () => undefined;
 let monoSink: (mono: boolean) => void = () => undefined;
@@ -261,11 +304,23 @@ export function getBudgetOverrideFromQuery(): number | null {
 }
 
 export function setPcmAccountingSource(
-  accounting: () => DiagPcmAccounting,
+  accounting: () => DiagCacheAccounting,
   keys: () => string[]
 ): void {
   accountingSource = accounting;
   cacheKeysSource = keys;
+}
+
+/** Reports PCM held by live routes, which the cache cannot see. */
+export function setRoutePcmSource(bytes: () => number): void {
+  routePcmSource = bytes;
+}
+
+export function recordLiveSegments(count: number): void {
+  state.partial.segments.live = count;
+  if (count > state.partial.segments.peakLive) {
+    state.partial.segments.peakLive = count;
+  }
 }
 
 export function setDiagnosticsSinks(sinks: {
@@ -456,7 +511,7 @@ export async function getSnapshot(): Promise<DiagSnapshot> {
     version: 1,
     overlayEnabled: isDiagnosticsEnabled(),
     uptimeMs: performance.now() - state.startedAt,
-    pcm: accountingSource(),
+    pcm: getAccounting(),
     partial: getPartialDiag(),
     decodeMsByMediaId: Object.fromEntries(state.decodeMsByMediaId),
     decodeCount: state.decodeCount,
@@ -508,7 +563,7 @@ function markSessionClosed(clean: boolean): void {
   currentSession = {
     ...currentSession,
     closedCleanly: clean,
-    pcmBytesAtEnd: accountingSource().totalBytes,
+    pcmBytesAtEnd: getAccounting().residentBytes,
     panelId: state.activePanelId ?? undefined
   };
   writeSessionRecord(currentSession);
@@ -571,10 +626,11 @@ export function installDiagnostics(): void {
   const api: MumboxDiag = {
     version: 1,
     snapshot: getSnapshot,
-    pcmBytes: () => accountingSource().totalBytes,
-    pcmBytesForActivePanel: () => accountingSource().activePanelBytes,
+    pcmBytes: () => getAccounting().totalBytes,
+    routePcmBytes: () => getAccounting().routeBytes,
+    pcmBytesForActivePanel: () => getAccounting().activePanelBytes,
     cacheKeys: () => cacheKeysSource(),
-    cacheStats: () => accountingSource(),
+    cacheStats: () => getAccounting(),
     decodeCount: () => state.decodeCount,
     decodeMs: (mediaId) => {
       const entry = state.decodeMsByMediaId.get(mediaId);

@@ -15,7 +15,7 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { MouseEvent, useState } from "react";
+import { memo, MouseEvent, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { GRID_SIZES } from "../../../entities/panel/model/hiddenCells";
@@ -37,7 +37,12 @@ type RightToolbarProps = {
   onStopAll: () => void;
 };
 
-export function RightToolbar({
+/**
+ * Memoised. Its props change only when the panel layout or a mode does, but `AppShell`
+ * re-renders on every progress push while anything plays — 20 times a second — and each of those
+ * renders re-serialized every `sx` object in here for nothing.
+ */
+export const RightToolbar = memo(function RightToolbar({
   masterVolume,
   masterMuted,
   editMode,
@@ -308,4 +313,4 @@ export function RightToolbar({
       </Box>
     </Stack>
   );
-}
+});

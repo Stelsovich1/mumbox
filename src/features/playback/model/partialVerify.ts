@@ -23,7 +23,6 @@
  */
 import { recordPartialVerificationResult } from "../../../shared/lib/diagnostics";
 import { blockPartialDecode, recordPartialVerification } from "../../../shared/lib/partialDecodePolicy";
-import { DECODE_SAMPLE_RATE } from "./decodeAudio";
 import { MediaProbe } from "./mediaProbeCache";
 import {
   byteRangeForFrames,
@@ -59,7 +58,24 @@ async function decodeRange(
     return null;
   }
   const bytes = new Uint8Array(await blob.slice(range.start, range.end).arrayBuffer());
-  const context = new OfflineAudioContext(1, 1, DECODE_SAMPLE_RATE);
+  // Decoded at the FILE's rate, deliberately, and not at whatever rate the playback engine runs.
+  //
+  // `alignDeltaSamples` has a sample rate baked into its unit. The nominal positions this
+  // measurement searches for are computed as `frames * samplesPerFrame`, i.e. in file-rate samples,
+  // while the buffer they are searched inside is indexed in decode-rate samples. Today those
+  // coincide only because both happen to be 44 100 for a 44.1 kHz file.
+  //
+  // Decode this pair at 48 000 instead and `nominalStart` is off by 8.8 % before the search even
+  // starts — roughly 3 500 samples, with `firstProbeOffset` adding another ~4 400. Both land outside
+  // the +-4096 search radius, so `findAlignmentOffset` returns null, the media is disabled, and
+  // after three of them the browser verdict in `mumbox:partial-decode:v1` becomes "blocked"
+  // PERSISTENTLY — byte-range decoding silently off for good, on exactly the 48 kHz Android this
+  // work targets.
+  //
+  // Verification only ever compares a decode against a decode; it never feeds the playback graph.
+  // So the file's own rate is both correct and free. `decodeMp3Range`, one file over, DOES feed the
+  // graph and therefore uses the engine rate — the two adjacent decode sites disagree on purpose.
+  const context = new OfflineAudioContext(1, 1, index.info.sampleRate);
   return context.decodeAudioData(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   );
@@ -139,11 +155,27 @@ export async function verifyMp3Alignment(
       maxResidual: MAX_RESIDUAL
     });
     if (result.lag === null) {
+      // Only here, on the path that permanently disables this media, is the exhaustive survey worth
+      // its cost. `verifications.fail` carries no reason on its own, and on a device that cannot be
+      // attached to a debugger the peak correlation at the best lag is the only thing that
+      // separates "the offset is outside the search radius" from "this is not the same audio" from
+      // "the decoder is broken". Paid once per failure, never on the healthy path.
+      const survey = findAlignmentOffset({
+        reference: window,
+        haystack: referenceData,
+        nominalOffset: nominalStart + probeOffset,
+        searchRadius: SEARCH_SAMPLES,
+        maxResidual: MAX_RESIDUAL,
+        survey: true
+      });
       probe.partialDisabled = true;
       probe.verified = "fail";
       recordPartialVerification(false);
       recordPartialVerificationResult("fail");
-      return { status: "fail", reason: "no-alignment" };
+      return {
+        status: "fail",
+        reason: `no-alignment (peak ${survey.peakCorrelation.toFixed(4)})`
+      };
     }
     measured.push(-result.lag);
   }

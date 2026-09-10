@@ -16,7 +16,14 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import {
+  KeyboardEvent,
+  memo,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useRef,
+  useState
+} from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { Panel } from "../../../entities/panel/model/types";
@@ -30,7 +37,12 @@ type PanelTabsProps = {
   onDeletePanel: (panelId: string) => void;
 };
 
-export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeletePanel }: PanelTabsProps) {
+/**
+ * Memoised. Its props change only when the panel layout or a mode does, but `AppShell`
+ * re-renders on every progress push while anything plays — 20 times a second — and each of those
+ * renders re-serialized every `sx` object in here for nothing.
+ */
+export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeletePanel }: PanelTabsProps) {
   const [renamingPanelId, setRenamingPanelId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
@@ -415,4 +427,4 @@ export function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeleteP
       </Dialog>
     </>
   );
-}
+});

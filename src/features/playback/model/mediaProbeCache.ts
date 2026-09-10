@@ -28,6 +28,16 @@ export type MediaProbe = {
    */
   containerDurationSeconds: number | null;
   /**
+   * Stream shape, hoisted out of the frame table on purpose.
+   *
+   * `planMediaSegments` used to read the rate and the channel count off the frame table. Once that
+   * table became evictable those reads would silently fall back to the defaults and mis-gate
+   * `shouldSegmentWindow`, so it reads these two fields instead — `probe.channels ?? 2` and
+   * `probe.sampleRate ?? DECODE_SAMPLE_RATE`. Two numbers for a correctness guarantee.
+   */
+  sampleRate: number | null;
+  channels: number | null;
+  /**
    * Measured samples between where a mid-file decode's audio really sits and where the frame table
    * says it should. Null until measured.
    *
@@ -46,73 +56,158 @@ export type MediaProbe = {
 export type MediaProbeCache = {
   get: (mediaId: string) => MediaProbe | null;
   set: (probe: MediaProbe) => void;
+  /** Attaches (or replaces) the evictable frame table for a media whose facts are already stored. */
+  setIndex: (mediaId: string, index: Mp3FrameIndex) => void;
   delete: (mediaId: string) => boolean;
   clear: () => void;
+  /** Bytes held by frame tables — the only part that is bounded. */
   bytes: () => number;
   size: () => number;
+  /** How many frame tables are resident. Differs from `size` once one has been evicted. */
+  indexCount: () => number;
 };
 
-/** Roughly 32 three-minute tracks' worth of frame tables, but bounded honestly. */
-const DEFAULT_BUDGET_BYTES = 1024 * 1024;
-/** Charged to every probe so a cache of tiny WAV headers still has a bound. */
-const PROBE_OVERHEAD_BYTES = 256;
+/**
+ * Budget for the frame tables alone.
+ *
+ * The number is arbitrary and says so; what matters is that only the REBUILDABLE half is bounded.
+ * A 90-minute MPEG-1 track is 206 700 frames = 827 KB, so under the old shared 1 MiB budget two
+ * long tracks could not coexist — and evicting a probe took `alignDeltaSamples` with it, forcing
+ * `verifyMp3Alignment` (two 2 s decodes plus a cross-correlation) to run again on every panel
+ * switch. Rebuilding a table costs range reads and no decode; re-measuring the offset costs both.
+ */
+const DEFAULT_BUDGET_BYTES = 4 * 1024 * 1024;
+/**
+ * Facts are kept for every media, unbounded, and that is affordable: tens of bytes each, so a
+ * 500-media library is about 25 KB. Only the frame table is charged against the budget.
+ *
+ * An earlier draft exported a `probeBytes` that added a fixed per-probe overhead. Nothing ever
+ * called it and `totalBytes` never included it, so it read as a bound that existed when it did
+ * not. Removed rather than wired up: the facts really are meant to be unbounded.
+ */
 
-export function probeBytes(probe: MediaProbe): number {
-  return PROBE_OVERHEAD_BYTES + (probe.mp3 ? indexBytes(probe.mp3) : 0);
-}
-
+/**
+ * Split by LIFETIME, not by size.
+ *
+ * The facts — format, measured decoder offset, verdict, container duration, stream shape — are a
+ * few dozen bytes and are expensive to re-derive: `alignDeltaSamples` costs two decodes and a
+ * cross-correlation. The frame table is hundreds of kilobytes and costs only range reads to
+ * rebuild. Sharing one budget meant an eviction threw away the expensive half to reclaim the cheap
+ * one, and did it on every panel switch once two long tracks were in play.
+ *
+ * The probe object handed out IS the facts record with the table attached by reference, so
+ * `verifyMp3Alignment` mutating `probe.alignDeltaSamples` in place still writes where it must.
+ */
 export function createMediaProbeCache(budgetBytes: number = DEFAULT_BUDGET_BYTES): MediaProbeCache {
-  const entries = new Map<string, MediaProbe>();
+  const facts = new Map<string, MediaProbe>();
+  const indexOrder = new Map<string, number>();
   let totalBytes = 0;
+  let tick = 0;
+
+  /**
+   * What each resident table was CHARGED, refunded verbatim on detach.
+   *
+   * `indexBytes` reports the array's allocated capacity, and `pushOffset` doubles that capacity in
+   * place while a cue plays: a table charged at 4 KiB and detached at 1 MiB drove `totalBytes`
+   * negative, after which `evict` returned immediately on every call and the budget stopped
+   * existing for the rest of the session.
+   */
+  const chargedBytes = new Map<string, number>();
+
+  const detachIndex = (mediaId: string) => {
+    const probe = facts.get(mediaId);
+    if (!probe?.mp3) {
+      return;
+    }
+    totalBytes -= chargedBytes.get(mediaId) ?? indexBytes(probe.mp3);
+    chargedBytes.delete(mediaId);
+    delete probe.mp3;
+    indexOrder.delete(mediaId);
+  };
 
   const removeKey = (mediaId: string) => {
-    const existing = entries.get(mediaId);
+    const existing = facts.get(mediaId);
     if (!existing) {
       return false;
     }
-    entries.delete(mediaId);
-    totalBytes -= probeBytes(existing);
+    detachIndex(mediaId);
+    facts.delete(mediaId);
     return true;
   };
 
   const evict = (protectedKey: string) => {
-    for (const key of [...entries.keys()]) {
+    // Least recently touched table first; the facts it belonged to stay.
+    const byAge = [...indexOrder.entries()].sort((first, second) => first[1] - second[1]);
+    for (const [mediaId] of byAge) {
       if (totalBytes <= budgetBytes) {
         return;
       }
-      if (key !== protectedKey) {
-        removeKey(key);
+      if (mediaId !== protectedKey) {
+        detachIndex(mediaId);
       }
     }
   };
 
+  const attachIndex = (mediaId: string, index: Mp3FrameIndex) => {
+    const probe = facts.get(mediaId);
+    if (!probe) {
+      return;
+    }
+    detachIndex(mediaId);
+    probe.mp3 = index;
+    const charge = indexBytes(index);
+    chargedBytes.set(mediaId, charge);
+    totalBytes += charge;
+    tick += 1;
+    indexOrder.set(mediaId, tick);
+    evict(mediaId);
+  };
+
   return {
     get(mediaId) {
-      const probe = entries.get(mediaId);
+      const probe = facts.get(mediaId);
       if (!probe) {
         return null;
       }
-      // Reinsert to refresh recency.
-      entries.delete(mediaId);
-      entries.set(mediaId, probe);
+      if (probe.mp3) {
+        tick += 1;
+        indexOrder.set(mediaId, tick);
+      }
       return probe;
     },
     set(probe) {
       removeKey(probe.mediaId);
-      entries.set(probe.mediaId, probe);
-      totalBytes += probeBytes(probe);
-      evict(probe.mediaId);
+      const index = probe.mp3;
+      // IDENTITY, not a copy, and the whole feature depends on it. `verifyMp3Alignment` records
+      // its result by mutating the probe it was handed, and `getMediaProbe` hands back the object
+      // it passed to `set`. Storing a copy meant a measured `alignDeltaSamples` was written to an
+      // object the cache did not hold: the next read saw `null`, the media took a full decode, and
+      // the two-decode measurement ran again on every warm-up, forever. `partialDisabled` was lost
+      // the same way, so a media that failed verification was retried instead of being latched off.
+      //
+      // The table is detached first so `attachIndex` charges its bytes exactly once.
+      delete probe.mp3;
+      facts.set(probe.mediaId, probe);
+      if (index) {
+        attachIndex(probe.mediaId, index);
+      }
     },
+    setIndex: attachIndex,
     delete: removeKey,
     clear() {
-      entries.clear();
+      facts.clear();
+      indexOrder.clear();
+      chargedBytes.clear();
       totalBytes = 0;
     },
     bytes() {
       return totalBytes;
     },
     size() {
-      return entries.size;
+      return facts.size;
+    },
+    indexCount() {
+      return indexOrder.size;
     }
   };
 }

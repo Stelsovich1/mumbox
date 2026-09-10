@@ -1,5 +1,5 @@
 import { clear, del, get, set } from "idb-keyval";
-import { useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model/assignCells";
 import { makeCell } from "../../entities/cell/model/makeCell";
@@ -17,6 +17,9 @@ import { GridSize, Panel } from "../../entities/panel/model/types";
 import { ensureMedia } from "../../entities/media/model/normalizeMedia";
 import { CELL_COLORS } from "../../shared/config/colorPalette";
 import { readAudioDurationMs } from "../../shared/lib/duration";
+import { clearAppStateStorage, WRITE_DEBOUNCE_MS } from "./appStateStorage";
+import type { PersistenceHandle } from "./appStateStorage";
+import { serializeState as serializeStatePure } from "./serializeState";
 import { makeUnsavedSession, ProjectSession, withDirtyTracking } from "./projectSession";
 
 export type { ProjectSession };
@@ -139,6 +142,36 @@ export type AppAction =
   | { type: "state/import"; state: SerializableAppState; session?: ProjectSession }
   | { type: "state/merge"; state: SerializableAppState };
 
+/**
+ * Actions whose write may wait.
+ *
+ * The rule is what is LOST, not how often the action fires. Everything here changes a single field
+ * of session-shaped state — which panel is on screen, how loud, muted or not — so losing 400 ms of
+ * it to a crash costs nothing a user would notice. Everything else touches the layout or the media
+ * library, where a reload moments after an edit must show that edit; those are written immediately.
+ *
+ * `volume/master` is the one that made a delay necessary at all: the slider dispatches on every
+ * `pointermove`. `panel/select` joined it for a different reason found by measurement — an
+ * immediate write of the whole layout on every panel switch showed up as a 60 % regression in
+ * `panelSwitchRepeatMs`.
+ */
+/**
+ * How long a persist barrier waits for a dispatch to reach the persistence effect.
+ *
+ * Only a ceiling, not a delay: the effect normally runs within a frame. It exists because a
+ * dispatch is not guaranteed to change the state at all, and a barrier must never hang.
+ */
+const COMMIT_WAIT_TIMEOUT_MS = 2000;
+
+const DEFERRABLE_ACTIONS = new Set<AppAction["type"] | null>([
+  "volume/master",
+  "volume/muteToggle",
+  "panel/select",
+  "editMode/toggle",
+  "stopOthers/toggle",
+  "mono/set"
+]);
+
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
@@ -204,7 +237,13 @@ function sanitizeImportedState(state: SerializableAppState, session?: ProjectSes
     // State written by an older build, or a hand-edited manifest, reaches here as `unknown` shaped
     // data. `ensureMedia` never invents a `createdAt`.
     media: ensureMedia(state.media),
-    masterVolume: state.masterVolume,
+    // Clamped HERE, at the boundary, not only in the gain maths. The manifest predicate accepts
+    // any finite number by design - over-validating would break the frozen-version contract -
+    // and the reducer stores what it is handed, so a hand-edited file could otherwise carry a
+    // master volume of 400 straight into a gain node.
+    masterVolume: Number.isFinite(state.masterVolume)
+      ? Math.min(100, Math.max(0, state.masterVolume))
+      : fallback.masterVolume,
     masterMuted: state.masterMuted ?? false,
     editMode: false,
     stopOthers: state.stopOthers,
@@ -214,16 +253,7 @@ function sanitizeImportedState(state: SerializableAppState, session?: ProjectSes
 }
 
 export function serializeState(state: AppState): SerializableAppState {
-  return {
-    panels: state.panels,
-    activePanelId: state.activePanelId,
-    cellsByPanel: state.cellsByPanel,
-    media: state.media,
-    masterVolume: state.masterVolume,
-    masterMuted: state.masterMuted,
-    stopOthers: state.stopOthers,
-    monoPlayback: state.monoPlayback
-  };
+  return serializeStatePure(state);
 }
 
 function reducer(state: AppState, action: AppAction): AppState {
@@ -589,6 +619,23 @@ function loadStoredSession(): ProjectSession {
   }
 }
 
+/** Builds the live state from whatever storage returned, or a fresh project. */
+export function hydrateAppState(
+  state: SerializableAppState | null,
+  session: ProjectSession | null
+): AppState {
+  if (!state) {
+    return createInitialState();
+  }
+  try {
+    return sanitizeImportedState(state, session ?? undefined);
+  } catch {
+    // A stored payload that the sanitizer cannot survive. Starting fresh beats refusing to boot,
+    // and the record is left alone so it can still be inspected.
+    return createInitialState();
+  }
+}
+
 export function loadStoredState(): AppState {
   const rawState = localStorage.getItem(STORAGE_KEY);
   if (!rawState) {
@@ -607,33 +654,167 @@ export function loadStoredState(): AppState {
 
 const trackedReducer = withDirtyTracking(reducer);
 
-export function useAppStore() {
-  const [state, dispatch] = useReducer(trackedReducer, undefined, loadStoredState);
+export type AppStoreOptions = {
+  initialState: AppState;
+  /** Null suspends persistence entirely — see `LoadedAppState.failed`. */
+  persistence: PersistenceHandle | null;
+  /** True once a write has failed. Owned by `BoardPage`, which is where the handle lives. */
+  storageFailed?: boolean;
+};
+
+export function useAppStore({
+  initialState,
+  persistence,
+  storageFailed = false
+}: AppStoreOptions) {
+  const [state, dispatch] = useReducer(trackedReducer, initialState);
+  /**
+   * Sticky on purpose. A storage failure is not a transient hiccup — the state only grows, so once
+   * a write fails it fails on every subsequent one. Latching it means the user is told once instead
+   * of on every keystroke, and never un-told while the cause is still there.
+   *
+   * Two causes, one flag, because they are the same fact from the user's point of view: nothing is
+   * being saved. `persistence === null` means the initial READ failed and writing was never
+   * started; `storageFailed` means a write was attempted and rejected — the quota case, which used
+   * to reach a console line and no further.
+   */
+  const persistenceFailed = persistence === null || storageFailed;
+
+  /**
+   * The state as loaded. Writing it straight back would be pointless work on every boot, and on the
+   * degraded path — where the READ failed but the data may still be there — it would destroy a real
+   * project with an empty one. Exact identity, no heuristics.
+   */
+  const initialRef = useRef(initialState);
+
+  /**
+   * What produced the current state, so persistence can tell a repeated writer from a one-off edit.
+   *
+   * `DEFERRABLE_ACTIONS` is the list, and it is six entries rather than the one this comment used
+   * to claim. `volume/master` is the only one that fires continuously; the other five — mute,
+   * panel select, edit mode, stopOthers, mono — were added because each is cheap to redo and
+   * several fire in quick succession while a user is arranging a set. All of them are serialized
+   * fields, so the delay is a real exposure: the max-wait cap and the `visibilitychange` flush
+   * bound it, but an OS kill inside the window still reverts that one setting.
+   */
+  const lastActionRef = useRef<AppAction["type"] | null>(null);
+  const trackedDispatch = useCallback((action: AppAction) => {
+    lastActionRef.current = action.type;
+    dispatch(action);
+  }, []);
+
+  /**
+   * Resolvers waiting for the CURRENT state to have been handed to persistence.
+   *
+   * A caller cannot simply dispatch and then await a flush. React schedules the re-render on a
+   * macrotask and runs this effect after the commit, while an `await` resolves in a microtask -
+   * so the flush ran first, found nothing queued, wrote nothing, and resolved. The barrier that
+   * was supposed to guarantee the new state was durable before old audio was deleted did not
+   * touch storage at all.
+   */
+  const commitWaitersRef = useRef<(() => void)[]>([]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeState(state)));
-    localStorage.setItem(PROJECT_SESSION_KEY, JSON.stringify(state.projectSession));
-  }, [state]);
+    if (!persistence || state === initialRef.current) {
+      return;
+    }
+    const delayMs = DEFERRABLE_ACTIONS.has(lastActionRef.current) ? WRITE_DEBOUNCE_MS : 0;
+    // The STATE is queued, not its serialization. `serializeState` walks every cell of every panel
+    // and allocates a template object per cell, so running it here paid that walk on every
+    // dispatch — 60 times a second during a volume drag — while the debounce it feeds discarded
+    // all but the last result. A state object is immutable per dispatch, so serializing it when
+    // the write actually happens produces the same bytes.
+    persistence.schedule(state, state.projectSession, delayMs);
+    const waiters = commitWaitersRef.current;
+    commitWaitersRef.current = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }, [persistence, state]);
+
+  /**
+   * Waits for the most recent dispatch to reach storage, and reports whether it got there.
+   *
+   * Two halves, and both are load-bearing. The wait is what makes the barrier see the change at
+   * all; the boolean is what lets a caller refuse to delete anything when the write failed. The
+   * timeout exists so a caller can never hang on a dispatch that produced no state change -
+   * `cell/assignMany` returns the same object when nothing was assigned, and several reducer
+   * cases no-op outside edit mode.
+   */
+  const flushPendingState = useCallback(async () => {
+    if (!persistence) {
+      return false;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(() => {
+        commitWaitersRef.current = commitWaitersRef.current.filter(
+          (waiter) => waiter !== settle
+        );
+        resolve();
+      }, COMMIT_WAIT_TIMEOUT_MS);
+      const settle = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      commitWaitersRef.current.push(settle);
+    });
+    return persistence.flush();
+  }, [persistence]);
+
+  useEffect(() => {
+    if (!persistence) {
+      return;
+    }
+    // `visibilitychange` is the primary trigger on mobile: it fires reliably and well before
+    // teardown, where `pagehide` is best effort. `diagnostics.ts` already relies on the same pair
+    // for the same reason.
+    const flush = () => {
+      void persistence.flush();
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [persistence]);
 
   const activePanel = useMemo(
     () => state.panels.find((panel) => panel.id === state.activePanelId) ?? state.panels[0],
     [state.activePanelId, state.panels]
   );
 
-  return { state, activePanel, dispatch };
+  return {
+    state,
+    activePanel,
+    dispatch: trackedDispatch,
+    persistenceFailed,
+    flushPendingState
+  };
 }
 
 export async function saveImportedMedia(
   drafts: ImportMediaDraft[],
   onProgress?: (progress: MediaStorageProgress) => void
 ) {
-  for (const [index, draft] of drafts.entries()) {
-    await set(`${MEDIA_BLOB_PREFIX}${draft.id}`, draft.file);
-    onProgress?.({
-      completed: index + 1,
-      total: drafts.length,
-      label: `Сохранение аудио ${String(index + 1)} из ${String(drafts.length)}`
-    });
+  // All or nothing, the same rule the two project writers follow. Without it a failure part-way
+  // left every blob already written orphaned forever: `media/addMany` never runs, so nothing in
+  // the state names them, and no UI can reach them — only a full reset reclaims the quota.
+  const written: string[] = [];
+  try {
+    for (const [index, draft] of drafts.entries()) {
+      await set(`${MEDIA_BLOB_PREFIX}${draft.id}`, draft.file);
+      written.push(draft.id);
+      onProgress?.({
+        completed: index + 1,
+        total: drafts.length,
+        label: `Сохранение аудио ${String(index + 1)} из ${String(drafts.length)}`
+      });
+    }
+  } catch (error) {
+    await deleteStoredMedia(written).catch(() => undefined);
+    throw error;
   }
 
   return drafts.map<MediaAsset>((draft) => ({
@@ -697,16 +878,26 @@ export async function writeMergedProjectMedia(
   }
 
   const toWrite = blobs.filter((item) => kept.has(item.id));
-  for (const [index, item] of toWrite.entries()) {
-    const nextId = idByImportedId.get(item.id);
-    if (nextId) {
-      await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+  // All or nothing. A merge deletes nothing, but a write that fails halfway leaves every blob it
+  // did write orphaned forever — invisible in the UI and occupying quota with no way to reclaim it.
+  const written: string[] = [];
+  try {
+    for (const [index, item] of toWrite.entries()) {
+      const nextId = idByImportedId.get(item.id);
+      if (nextId) {
+        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+        written.push(nextId);
+      }
+      onProgress?.({
+        completed: index + 1,
+        total: toWrite.length,
+        label: `Запись аудио ${String(index + 1)} из ${String(toWrite.length)}`
+      });
     }
-    onProgress?.({
-      completed: index + 1,
-      total: toWrite.length,
-      label: `Запись аудио ${String(index + 1)} из ${String(toWrite.length)}`
-    });
+  } catch (error) {
+    // Best effort, and it must never mask the cause.
+    await deleteStoredMedia(written).catch(() => undefined);
+    throw error;
   }
 
   const remapped = remapImportedState(incoming, idByImportedId);
@@ -724,16 +915,26 @@ export async function writeImportedProjectMedia(
 ) {
   const idByImportedId = new Map(blobs.map((item) => [item.id, createId("media")]));
 
-  for (const [index, item] of blobs.entries()) {
-    const nextId = idByImportedId.get(item.id);
-    if (nextId) {
-      await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+  // All or nothing, so a failure part-way leaves storage exactly as it was found. Combined with
+  // deleting the OUTGOING blobs only after the import has been applied, that is what makes a failed
+  // import non-destructive rather than merely unlucky.
+  const written: string[] = [];
+  try {
+    for (const [index, item] of blobs.entries()) {
+      const nextId = idByImportedId.get(item.id);
+      if (nextId) {
+        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+        written.push(nextId);
+      }
+      onProgress?.({
+        completed: index + 1,
+        total: blobs.length,
+        label: `Запись аудио ${String(index + 1)} из ${String(blobs.length)}`
+      });
     }
-    onProgress?.({
-      completed: index + 1,
-      total: blobs.length,
-      label: `Запись аудио ${String(index + 1)} из ${String(blobs.length)}`
-    });
+  } catch (error) {
+    await deleteStoredMedia(written).catch(() => undefined);
+    throw error;
   }
 
   return remapImportedState(state, idByImportedId);
@@ -744,8 +945,10 @@ export async function deleteStoredMedia(mediaIds: string[]) {
 }
 
 export async function clearStoredAppData() {
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(PROJECT_SESSION_KEY);
+  // Three stores, and none of them reaches the others. idb-keyval's `clear()` empties only its
+  // DEFAULT store, where the media blobs live; the layout has its own database now, and the
+  // projects list has had one all along — `AppShell` clears that with an explicit second call.
+  await clearAppStateStorage();
   await clear();
 }
 

@@ -4,7 +4,10 @@ import type { Page } from "@playwright/test";
 import { diagSnapshot } from "../support/diag";
 import { seedProject } from "../support/seedProject";
 import { expectWithinBaseline, median } from "./support/baseline";
-import { installPerfInstrumentation } from "./support/instrument";
+import {
+  installPerfInstrumentation,
+  perfGoto
+} from "./support/instrument";
 
 /**
  * The hard gate. Instant start with no artifact at the beginning of playback is the constraint
@@ -43,7 +46,7 @@ test("time to first sound stays inside its ceilings", async ({ page }) => {
     spec: SPEC,
     filledCellsPerPanel: SAMPLES
   });
-  await page.goto("/");
+  await perfGoto(page, "/");
   await expect(page.locator('[data-warm-state="ready"]')).toHaveCount(SAMPLES, {
     timeout: 60_000
   });
@@ -106,9 +109,13 @@ test("a cold trigger still starts within the cold ceiling", async ({ page }) => 
   });
   // A budget this small makes the warm-up skip every media, so each tap pays a full decode —
   // a deterministic cold path rather than a race against the warm-up.
-  await page.goto("/?pcmBudgetMb=0.0001");
-
+  await perfGoto(page, "/?pcmBudgetMb=0.0001");
+  // Wait for the grid before the first tap. `tapCell` clicks through an optional chain, so a tap
+  // into a DOM that has not rendered yet does nothing at all and reports nothing - and the layout
+  // is read asynchronously now, so there IS a frame with no cells in it. The warm test never hit
+  // this because it waits for six cells to reach `ready` first.
   const cellIds = seed.filledCellIdsByPanel[seed.panelIds[0] ?? ""] ?? [];
+  await expect(page.locator("[data-cell-id]")).toHaveCount(36, { timeout: 30_000 });
   for (const cellId of cellIds) {
     await tapCell(page, cellId);
     await expect(page.locator(`[data-cell-id="${cellId}"]`)).toHaveAttribute(
