@@ -48,6 +48,42 @@ export function getMaxAbsStep(samples: Float32Array): number {
   return max;
 }
 
+/**
+ * Whether a window matches within tolerance, returning its residual, or null as soon as it cannot.
+ *
+ * `sqrt(sum / N) <= max` is exactly `sum <= max * max * N`, so the bound is checkable against the
+ * running sum with no approximation and no square root. With a tolerance of 1e-3 over 4096 samples
+ * the budget is 4.096e-3, which a single sample differing by 0.064 already blows — so a wrong lag
+ * on real audio exits after a handful of samples instead of all 4096.
+ *
+ * A separate function rather than a change to `residualRms`, whose contract — including
+ * `POSITIVE_INFINITY` for a window running past the end — is pinned by tests and used elsewhere.
+ */
+export function residualWithinTolerance(
+  reference: Float32Array,
+  haystack: Float32Array,
+  haystackOffset: number,
+  maxResidual: number
+): number | null {
+  if (reference.length === 0) {
+    return 0;
+  }
+  const budget = maxResidual * maxResidual * reference.length;
+  let sum = 0;
+  for (let index = 0; index < reference.length; index += 1) {
+    const want = haystack[haystackOffset + index];
+    if (want === undefined) {
+      return null;
+    }
+    const diff = (reference[index] ?? 0) - want;
+    sum += diff * diff;
+    if (sum > budget) {
+      return null;
+    }
+  }
+  return Math.sqrt(sum / reference.length);
+}
+
 /** Root-mean-square of the difference between a reference and a window of a haystack. */
 export function residualRms(
   reference: Float32Array,
@@ -91,6 +127,16 @@ export type FindAlignmentOptions = {
   searchRadius: number;
   /** Residual at or below this counts as a match. Identical bytes through one decoder give 0. */
   maxResidual?: number;
+  /**
+   * Scan every lag and report correlation statistics instead of stopping at the first accepted lag.
+   * Off by default, because production reads only `lag`.
+   *
+   * Kept rather than deleted: `verifications.fail` in `DiagPartial` carries no reason, and on a
+   * device that cannot be attached to a debugger the peak correlation at the best lag is the only
+   * thing separating "wrong offset" from "wrong file" from "broken decoder". It is re-run with this
+   * flag ONLY on the failure path, which is about to disable the media permanently anyway.
+   */
+  survey?: boolean;
 };
 
 /**
@@ -110,6 +156,39 @@ export function findAlignmentOffset(options: FindAlignmentOptions): AlignmentRes
     return { lag: null, peakCorrelation: 0, residual: Number.POSITIVE_INFINITY, acceptedCount: 0 };
   }
 
+  const fits = (offset: number) => offset >= 0 && offset + reference.length <= haystack.length;
+
+  if (!options.survey) {
+    // Outward from zero, stopping at the first acceptance.
+    //
+    // Equivalent to the exhaustive scan below, because that one picks the accepted lag CLOSEST TO
+    // ZERO — so the first acceptance found working outward is the same answer. Production reads
+    // only `lag`, and the measured offset on a real file is 2257 samples, so this visits about
+    // 4515 lags out of 8193 in the good case and rejects each wrong one after a few samples.
+    //
+    // THE ORDER IS PART OF THE CONTRACT: the exhaustive scan runs `-radius` upward and breaks ties
+    // with a strict `<` on the absolute lag, so on a symmetric double match at plus/minus k the
+    // NEGATIVE lag wins — it is visited first and the positive one never displaces it. Visiting
+    // `+1` before `-1` here would silently change the answer on periodic material, which is exactly
+    // what a music soundboard is full of.
+    for (let distance = 0; distance <= searchRadius; distance += 1) {
+      for (const lag of distance === 0 ? [0] : [-distance, distance]) {
+        const offset = nominalOffset + lag;
+        if (!fits(offset)) {
+          continue;
+        }
+        const residual = residualWithinTolerance(reference, haystack, offset, maxResidual);
+        if (residual !== null) {
+          // `acceptedCount` is 1 by construction: this mode deliberately does not learn whether the
+          // signal is periodic. `verifyMp3Alignment` answers that by requiring two windows to
+          // agree, which is a stronger test than one window's count.
+          return { lag, peakCorrelation: 0, residual, acceptedCount: 1 };
+        }
+      }
+    }
+    return { lag: null, peakCorrelation: 0, residual: Number.POSITIVE_INFINITY, acceptedCount: 0 };
+  }
+
   let referenceEnergy = 0;
   for (const value of reference) {
     referenceEnergy += value * value;
@@ -122,7 +201,7 @@ export function findAlignmentOffset(options: FindAlignmentOptions): AlignmentRes
 
   for (let lag = -searchRadius; lag <= searchRadius; lag += 1) {
     const offset = nominalOffset + lag;
-    if (offset < 0 || offset + reference.length > haystack.length) {
+    if (!fits(offset)) {
       continue;
     }
 

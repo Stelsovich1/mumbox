@@ -7,6 +7,7 @@ import {
   diagDecodeCount,
   diagPartial,
   diagPcmBytes,
+  diagRoutePcmBytes,
   diagSetPartialDecode
 } from "../support/diag";
 import { seedProject } from "../support/seedProject";
@@ -316,15 +317,20 @@ test("__mumboxDiag can turn the partial path off at runtime", async ({ page }) =
   expect(await diagDecodeCount(page)).toBeGreaterThan(0);
 });
 
-test("a chain that cannot fetch a segment ends the cue and leaves the pad usable", async ({
+test("a chain that cannot fetch a segment keeps the cue alive on the full decode", async ({
   page
 }) => {
-  // The give-up path and the watchdog behind it. Both exist for exactly this: a segment that never
-  // arrives. Without a failure injection neither can be exercised, and a mutation to either
-  // survives every other test — verified by a mutation round.
+  // The rule: a cue that has been STARTED must never be dropped. Its pair — a cue that cannot be
+  // continued must never be started — lives in `planMediaSegments`, and the two together are what
+  // stop a pad from playing 0.5 s and going silent.
   //
-  // The read that fails is chosen to land after the head has been read and warmed, so the failure
-  // hits a segment fetch rather than the warm-up itself.
+  // This test asserted the opposite until the recovery existed: "ends the cue". Ending it was the
+  // honest thing to do while there was nothing to continue WITH, but there always was — the full
+  // decode is the path every cue used before byte-range decoding, and it does not touch the range
+  // read that just failed. Silence is the one outcome worse than the memory.
+  //
+  // The failing read is chosen to land after the head has been read and warmed, so the failure hits
+  // a segment fetch rather than the warm-up.
   await installBufferAudioMock(page, { failNthRangeRead: 4 });
   await seedProject(page, {
     panels: 1,
@@ -340,24 +346,79 @@ test("a chain that cannot fetch a segment ends the cue and leaves the pad usable
 
   const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
   await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
 
-  // However the chain fails, the cue must not sit lit forever: either it ends on its own or the
-  // watchdog ends it once the window is past. What is not acceptable is a pad stuck playing.
-  await advanceAudioClock(page, 20);
+  // Past the head and past the segment whose read fails, in steps so the chain keeps up. A cue that
+  // gave up would already read `false` here — the head is 0.5 s of a 13 s window.
+  for (let elapsed = 0; elapsed < 8; elapsed += 2) {
+    await advanceAudioClock(page, 2);
+    await page.waitForTimeout(250);
+    await expect(cell).toHaveAttribute("data-playing", "true");
+  }
+
+  // It recovered rather than merely surviving: the counter is the mechanism, and without it a cue
+  // rescued by the full decode sounds nearly right, so a range path that had stopped working
+  // entirely would show up only as memory.
+  const recoveredPartial = await diagPartial(page);
+  expect(recoveredPartial?.segments.recovered).toBeGreaterThan(0);
+
+  // And it still ends by itself when the window runs out, rather than being mopped up by the
+  // watchdog: the recovery schedules a real last segment, not an orphan source.
+  await advanceAudioClock(page, 8);
   await expect(cell).toHaveAttribute("data-playing", "false", { timeout: 20_000 });
-
-  // And it ended through the give-up path, not by the watchdog having to mop up: when a chain
-  // cannot continue it is supposed to end the cue itself. If `promoteToLast` stopped marking the
-  // segment, the cue would still end — the watchdog would catch it minutes later on a long track —
-  // so the mechanism is asserted rather than the outcome.
   const partial = await diagPartial(page);
-  expect(partial?.segments.missed).toBeGreaterThan(0);
   expect(partial?.segments.watchdog).toBe(0);
 
   // And the pad still works. "Приходится перезапускать приложение" means the next press does
   // nothing, so the next press is the assertion.
   await cell.click();
   await expect(cell).toHaveAttribute("data-playing", "true");
+});
+
+test("a segment late by more than a quarter second is played, not used to end the cue", async ({
+  page
+}) => {
+  // The other half of the same defect, and the half nothing injected before.
+  //
+  // `resolveLateSegment` was called with the default 0.25 s limit, so the chain had the head's
+  // 0.5 s plus a quarter second to fetch, decode and schedule the first segment — and past that,
+  // `promoteToLast` ended the cue at the head. On a panel that is still warming, missing that
+  // budget is the ordinary case rather than the rare one, which is exactly what a user reports as
+  // "it plays half a second and stops". The limit is the segment's own length now: lateness inside
+  // it is played from the correct source position, so the audible result is a hole as long as the
+  // delay instead of a cue that stops.
+  //
+  // The read that is DELAYED rather than failed is what makes this a lateness test: it succeeds,
+  // just after the moment it was supposed to start.
+  await installBufferAudioMock(page, { slowNthRangeRead: { nth: 4, ms: 2_500 } });
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: { seconds: 30, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 1,
+    trimStartMs: 0,
+    trimEndMs: 13_000
+  });
+  await page.goto("/");
+  await waitForWarm(page, 1);
+
+  const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
+  await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
+
+  // Move the audio clock while that read is still in flight, so the segment resolves two and a half
+  // seconds after the time it was scheduled for — ten times the old limit, and well inside the
+  // segment's own four.
+  await advanceAudioClock(page, 3);
+  await page.waitForTimeout(3_500);
+
+  await expect(cell).toHaveAttribute("data-playing", "true");
+  const partial = await diagPartial(page);
+  // Scheduled late rather than dropped: the mechanism, not just the outcome. A cue that survived
+  // because the segment was skipped entirely would show `missed` here instead.
+  expect(partial?.segments.late).toBeGreaterThan(0);
+  expect(partial?.segments.watchdog).toBe(0);
 });
 
 test("a short untrimmed cue is neither streamed nor range-read", async ({ page }) => {
@@ -441,4 +502,59 @@ test("the range-decoded buffer plays the trimmed window from its own start", asy
   // The buffer already starts at the trim, so the offset into it is 0 rather than the trim
   // position — `sliceStartSeconds` absorbs the difference, exactly as it does for a sliced buffer.
   expect(probe.sources[0]?.startCalls).toEqual([{ when: 0, offset: 0, duration: 5 }]);
+});
+
+/**
+ * A streamed route must release each segment as it finishes.
+ *
+ * `partialPlan.ts` states the bound as "head plus about 32 s of resident PCM — roughly 11 MiB",
+ * and `SEGMENT_LOOKAHEAD` is what is supposed to enforce it. Nothing did: segments were pushed onto
+ * the route and never removed, so an `AudioBufferSourceNode` — and through it the PCM its `buffer`
+ * points at — stayed reachable for the whole cue. A 180 s window is 14 segments, ~63.8 MB; a
+ * 45-minute set is ~952 MB; six concurrent three-minute pads are ~383 MB, arriving gradually.
+ *
+ * Why no existing test saw it: every memory assertion in `playback-memory.spec.ts` reads
+ * `diagPcmBytes`, which reports `playbackBufferCache` — and segments are never cache entries. That
+ * file also never advances the audio clock, so no cue in it ever plays past its head. The one test
+ * that does play a streamed cue to its end asserts the watchdog, not memory.
+ *
+ * Both assertions are needed. `peakLive` alone would pass on an implementation that dropped the
+ * segments but leaked the buffers; `routePcmBytes` alone would pass on one that never streamed.
+ */
+test("a streamed cue releases each segment as it finishes", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: { seconds: 90, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 1,
+    trimStartMs: 0,
+    trimEndMs: 60_000
+  });
+  await page.goto("/");
+  await waitForWarm(page, 1);
+
+  const cell = page.getByRole("button", { name: "Ячейка 1 Seed 0" });
+  await cell.click();
+  await expect(cell).toHaveAttribute("data-playing", "true");
+
+  // Stepped, for the reason spelled out in the test above: a single jump outruns the chain and the
+  // watchdog legitimately ends the cue, which would measure nothing.
+  for (let elapsed = 0; elapsed < 56; elapsed += 2) {
+    await advanceAudioClock(page, 2);
+    await page.waitForTimeout(120);
+  }
+
+  const partial = await diagPartial(page);
+  // The ladder gives a 60 s window head(0.5) + 4 + 8 + 16 + 16 + 15.5 = 6 segments. Retaining them
+  // all makes `peakLive` 6; releasing as they finish keeps it at the lookahead plus the one being
+  // scheduled.
+  expect(partial?.segments.peakLive).toBeLessThanOrEqual(3);
+  // Measured: 21 273 848 bytes before the fix — the whole 60 s window — against 5 468 400 after,
+  // which is 15.5 s of PCM, i.e. the head plus the lookahead. The ceiling is set above the measured
+  // value rather than at it, so an ordinary scheduling wobble does not fail the build.
+  expect(await diagRoutePcmBytes(page)).toBeLessThan(14 * 1024 * 1024);
+  // Ended by its own last segment, not by the safety net — pruning must not break `isLast`.
+  expect(partial?.segments.watchdog).toBe(0);
 });

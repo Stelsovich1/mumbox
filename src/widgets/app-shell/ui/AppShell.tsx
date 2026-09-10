@@ -21,6 +21,7 @@ import {
   MenuItem,
   Snackbar,
   Stack,
+  TextField,
   Typography
 } from "@mui/material";
 import useMediaQuery from "@mui/material/useMediaQuery";
@@ -36,10 +37,13 @@ import {
 } from "react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
+import type { AppState } from "../../../app/model/appState";
+import type { PersistenceHandle } from "../../../app/model/appStateStorage";
 import {
   autoImportAudioFiles,
   clearStoredAppData,
   deleteStoredMedia,
+  getMediaBlob,
   MediaStorageProgress,
   serializeState,
   useAppStore,
@@ -47,8 +51,10 @@ import {
   writeMergedProjectMedia
 } from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
+import { SelectionActionBar } from "../../../features/bulk-selection";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
 import {
+  classifyProjectFileError,
   LARGE_PROJECT_IMPORT_BYTES,
   makeProjectBlob,
   PROJECT_FILE_ACCEPT_TYPES,
@@ -56,8 +62,11 @@ import {
   ProjectFileProgress,
   readProjectFile,
   saveProjectBlob,
-  toProjectFileName
+  toProjectFileName,
+  verifyProjectMedia
 } from "../../../features/file-config";
+import { getFreeCellIds } from "../../../entities/cell/model/copyCells";
+import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
 import { MediaLibraryDialog } from "../../../features/media-library";
 import {
   countHiddenMediaCells,
@@ -95,8 +104,11 @@ import {
   buildDistributionMessage,
   planMediaDistribution
 } from "../../../shared/lib/mediaDistribution";
+import { pruneSelection, setSelection, toggleSelection } from "../../../shared/lib/rowSelection";
+import { formatCountRu } from "../../../shared/lib/pluralizeRu";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
+import { installNativeFileDropGuard } from "../../../shared/lib/nativeFileDropGuard";
 import { RightToolbar } from "../../right-toolbar";
 import { WorkspaceGrid } from "../../workspace-grid";
 
@@ -152,36 +164,6 @@ function hasConfiguredLayout(
   );
 }
 
-function hasConfiguredCell(cell: {
-  mediaId: string | null;
-  aliasOverride: string;
-  colorOverride: string | null;
-  hotkey: string;
-  playbackMode: string;
-  volumeOffset: number;
-  trimStartMs: number | null;
-  trimEndMs: number | null;
-  fadeInEnabled: boolean;
-  fadeInMs: number;
-  fadeOutEnabled: boolean;
-  fadeOutMs: number;
-}) {
-  return (
-    Boolean(cell.mediaId) ||
-    cell.aliasOverride.length > 0 ||
-    cell.colorOverride !== null ||
-    cell.hotkey.length > 0 ||
-    cell.playbackMode !== "once" ||
-    cell.volumeOffset !== 0 ||
-    cell.trimStartMs !== null ||
-    cell.trimEndMs !== null ||
-    cell.fadeInEnabled ||
-    cell.fadeInMs !== 0 ||
-    cell.fadeOutEnabled ||
-    cell.fadeOutMs !== 0
-  );
-}
-
 function eventToHotkey(event: KeyboardEvent) {
   const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
   const parts = [
@@ -225,8 +207,20 @@ function getStableAppHeight() {
   return window.innerHeight;
 }
 
-export function AppShell() {
-  const { state, activePanel, dispatch } = useAppStore();
+export type AppShellProps = {
+  initialState: AppState;
+  /** Null when the initial read failed and writing has been suspended. */
+  persistence: PersistenceHandle | null;
+  /** True once a write has actually failed — see `BoardPage`. Sticky there, not here. */
+  storageFailed?: boolean;
+};
+
+export function AppShell({ initialState, persistence, storageFailed = false }: AppShellProps) {
+  const { state, activePanel, dispatch, persistenceFailed, flushPendingState } = useAppStore({
+    initialState,
+    persistence,
+    storageFailed
+  });
   const [fileAnchor, setFileAnchor] = useState<HTMLElement | null>(null);
   const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
   const [pendingAudioFiles, setPendingAudioFiles] = useState<File[]>([]);
@@ -245,6 +239,19 @@ export function AppShell() {
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [pendingDeletePanelId, setPendingDeletePanelId] = useState<string | null>(null);
   const [pendingClearCellId, setPendingClearCellId] = useState<string | null>(null);
+  /**
+   * Selection is deliberately NOT in `appState`: it is ephemeral UI, so putting it there would
+   * serialize it into the `.mumbox` payload and flip the project to dirty for a tap that changed
+   * nothing. Cell selection is scoped to the panel on screen — cell ids repeat across panels, so a
+   * set that outlived a panel switch would point at the wrong cells.
+   */
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedCellIds, setSelectedCellIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedPanelIds, setSelectedPanelIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [clearSelectionConfirmOpen, setClearSelectionConfirmOpen] = useState(false);
+  const [copySelectionOpen, setCopySelectionOpen] = useState(false);
+  const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
+  const [deletePanelsConfirmOpen, setDeletePanelsConfirmOpen] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
@@ -313,6 +320,17 @@ export function AppShell() {
     });
   }, [dispatch]);
 
+  /**
+   * The write is latched, not repeated, so this fires once. Silence here used to mean a blank page
+   * on the next dispatch; now it means the layout is live but nothing is being written down, which
+   * the user can only act on if they are told.
+   */
+  useEffect(() => {
+    if (persistenceFailed) {
+      setSaveMessage("Состояние не сохраняется. Сохраните проект в файл");
+    }
+  }, [persistenceFailed]);
+
   const activePanelId = activePanel?.id ?? null;
   useEffect(() => {
     setActivePanelId(activePanelId);
@@ -345,25 +363,35 @@ export function AppShell() {
     ? state.cellsByPanel[activePanel?.id ?? ""]?.[pendingClearCellId] ?? null
     : null;
 
-  const deletePanel = (panelId: string) => {
-    stopAll();
-    if (selectedCellId && state.activePanelId === panelId) {
-      setSelectedCellId(null);
-    }
-    dispatch({ type: "panel/delete", panelId });
-  };
+  const deletePanel = useCallback(
+    (panelId: string) => {
+      stopAll();
+      if (selectedCellId && state.activePanelId === panelId) {
+        setSelectedCellId(null);
+      }
+      dispatch({ type: "panel/delete", panelId });
+    },
+    [dispatch, selectedCellId, state.activePanelId, stopAll]
+  );
 
-  const requestDeletePanel = (panelId: string) => {
-    const cells = state.cellsByPanel[panelId] ?? {};
-    const hasFilledCells = Object.values(cells).some((cell) => Boolean(cell.mediaId));
+  /**
+   * Memoised because `PanelTabs` is memoised, and a fresh closure here would defeat that outright:
+   * `AppShell` re-renders on every progress push while anything plays.
+   */
+  const requestDeletePanel = useCallback(
+    (panelId: string) => {
+      const cells = state.cellsByPanel[panelId] ?? {};
+      const hasFilledCells = Object.values(cells).some((cell) => Boolean(cell.mediaId));
 
-    if (!hasFilledCells) {
-      deletePanel(panelId);
-      return;
-    }
+      if (!hasFilledCells) {
+        deletePanel(panelId);
+        return;
+      }
 
-    setPendingDeletePanelId(panelId);
-  };
+      setPendingDeletePanelId(panelId);
+    },
+    [deletePanel, state.cellsByPanel]
+  );
 
   const clearCell = (cellId: string) => {
     if (!activePanel) {
@@ -379,13 +407,185 @@ export function AppShell() {
       return;
     }
     const cell = state.cellsByPanel[activePanel.id]?.[cellId];
-    if (!cell || !hasConfiguredCell(cell)) {
+    if (!cell || !isConfiguredCell(cell)) {
       clearCell(cellId);
       return;
     }
 
     setPendingClearCellId(cellId);
   };
+
+  const activePanelCellIds = activePanel?.cellIds;
+  const panelIds = useMemo(() => state.panels.map((panel) => panel.id), [state.panels]);
+  const selectedCellIdList = useMemo(() => [...selectedCellIds], [selectedCellIds]);
+  const selectedPanelIdList = useMemo(() => [...selectedPanelIds], [selectedPanelIds]);
+  /**
+   * What the «Все» button sweeps in, and what the confirmation counts. Configured rather than
+   * merely media-holding: a cell with a hotkey and no audio is still something a user would miss.
+   */
+  const selectableCellIds = useMemo(
+    () => activeCells.filter((cell) => isConfiguredCell(cell)).map((cell) => cell.id),
+    [activeCells]
+  );
+
+  const resetSelection = useCallback(() => {
+    setSelectedCellIds(new Set());
+    setSelectedPanelIds(new Set());
+  }, []);
+
+  // Leaving edit mode leaves selection mode: every bulk action is an edit, and a selection that
+  // survived into playback mode would arm destructive buttons over a live set.
+  useEffect(() => {
+    if (!state.editMode) {
+      setSelectionMode(false);
+    }
+  }, [state.editMode]);
+
+  useEffect(() => {
+    if (selectionMode) {
+      return;
+    }
+    resetSelection();
+    setClearSelectionConfirmOpen(false);
+    setCopySelectionOpen(false);
+    setDeletePanelsConfirmOpen(false);
+  }, [resetSelection, selectionMode]);
+
+  // Cell ids repeat across panels, so a switch drops the cell selection outright rather than
+  // pruning it — pruning would silently retarget it at the new panel's cells.
+  useEffect(() => {
+    setSelectedCellIds(new Set());
+  }, [state.activePanelId]);
+
+  // Shrinking the grid hides cells rather than clearing them. A hidden cell must leave the
+  // selection: `clearPanelCells` would refuse it anyway, and the count would keep a ghost.
+  useEffect(() => {
+    if (!activePanelCellIds) {
+      return;
+    }
+    setSelectedCellIds((current) =>
+      current.size === 0 ? current : pruneSelection(current, activePanelCellIds)
+    );
+  }, [activePanelCellIds]);
+
+  useEffect(() => {
+    setSelectedPanelIds((current) =>
+      current.size === 0 ? current : pruneSelection(current, panelIds)
+    );
+  }, [panelIds]);
+
+  const toggleCellSelected = useCallback((cellId: string) => {
+    setSelectedCellIds((current) => toggleSelection(current, cellId));
+  }, []);
+
+  const togglePanelSelected = useCallback((panelId: string) => {
+    setSelectedPanelIds((current) => toggleSelection(current, panelId));
+  }, []);
+
+  const selectAllCells = useCallback(() => {
+    setSelectedCellIds((current) => setSelection(current, selectableCellIds, true));
+  }, [selectableCellIds]);
+
+  const clearSelectedCells = useCallback(() => {
+    if (!activePanel || selectedCellIdList.length === 0) {
+      return;
+    }
+    // Stop first: a route keeps playing the buffer of a cell that no longer names any media.
+    for (const cellId of selectedCellIdList) {
+      stopCell(cellId);
+    }
+    dispatch({ type: "cell/clearMany", panelId: activePanel.id, cellIds: selectedCellIdList });
+    if (selectedCellId && selectedCellIds.has(selectedCellId)) {
+      setSelectedCellId(null);
+    }
+    setSelectedCellIds(new Set());
+  }, [activePanel, dispatch, selectedCellId, selectedCellIdList, selectedCellIds, stopCell]);
+
+  const configuredSelectedCellCount = useMemo(() => {
+    const cells = state.cellsByPanel[activePanel?.id ?? ""] ?? {};
+    return selectedCellIdList.filter((cellId) => {
+      const cell = cells[cellId];
+      return cell !== undefined && isConfiguredCell(cell);
+    }).length;
+  }, [activePanel?.id, selectedCellIdList, state.cellsByPanel]);
+
+  const requestClearSelectedCells = useCallback(() => {
+    if (selectedCellIdList.length === 0) {
+      return;
+    }
+    if (configuredSelectedCellCount === 0) {
+      clearSelectedCells();
+      return;
+    }
+    setClearSelectionConfirmOpen(true);
+  }, [clearSelectedCells, configuredSelectedCellCount, selectedCellIdList.length]);
+
+  const selectedCellsWithMediaCount = useMemo(() => {
+    const cells = state.cellsByPanel[activePanel?.id ?? ""] ?? {};
+    return selectedCellIdList.filter((cellId) => Boolean(cells[cellId]?.mediaId)).length;
+  }, [activePanel?.id, selectedCellIdList, state.cellsByPanel]);
+
+  const copyTargetPanel = state.panels.find((panel) => panel.id === copyTargetPanelId) ?? null;
+  const copyTargetFreeCellCount = copyTargetPanel
+    ? getFreeCellIds(state.cellsByPanel[copyTargetPanel.id] ?? {}, copyTargetPanel.cellIds).length
+    : 0;
+
+  const openCopySelectionDialog = useCallback(() => {
+    if (selectedCellIdList.length === 0) {
+      return;
+    }
+    const target =
+      state.panels.find((panel) => panel.id !== state.activePanelId) ??
+      state.panels.find((panel) => panel.id === state.activePanelId);
+    setCopyTargetPanelId(target?.id ?? "");
+    setCopySelectionOpen(true);
+  }, [selectedCellIdList.length, state.activePanelId, state.panels]);
+
+  const copySelectedCells = useCallback(() => {
+    if (!activePanel || !copyTargetPanel) {
+      return;
+    }
+    dispatch({
+      type: "cell/copyMany",
+      fromPanelId: activePanel.id,
+      cellIds: selectedCellIdList,
+      toPanelId: copyTargetPanel.id
+    });
+    const copied = Math.min(selectedCellsWithMediaCount, copyTargetFreeCellCount);
+    const skipped = selectedCellsWithMediaCount - copied;
+    setSaveMessage(
+      skipped > 0
+        ? `Скопировано ${String(copied)} из ${String(selectedCellsWithMediaCount)} — на панели «${copyTargetPanel.name}» не хватило свободных ячеек`
+        : `Скопировано ${formatCountRu(copied, ["ячейка", "ячейки", "ячеек"])} на панель «${copyTargetPanel.name}»`
+    );
+    setCopySelectionOpen(false);
+    setSelectedCellIds(new Set());
+  }, [
+    activePanel,
+    copyTargetFreeCellCount,
+    copyTargetPanel,
+    dispatch,
+    selectedCellIdList,
+    selectedCellsWithMediaCount
+  ]);
+
+  /** The first panel is not deletable at any count, so the dialog says so instead of dropping it. */
+  const undeletablePanelCount = selectedPanelIds.has(panelIds[0] ?? "") ? 1 : 0;
+
+  const deleteSelectedPanels = useCallback(() => {
+    if (selectedPanelIdList.length === 0) {
+      return;
+    }
+    // Routes of a deleted panel outlive it — `stopOthers` is off by default, so a cue from another
+    // panel is normal — and their cells are about to stop existing.
+    stopAll();
+    if (selectedPanelIds.has(state.activePanelId)) {
+      setSelectedCellId(null);
+    }
+    dispatch({ type: "panel/deleteMany", panelIds: selectedPanelIdList });
+    setSelectedPanelIds(new Set());
+    setDeletePanelsConfirmOpen(false);
+  }, [dispatch, selectedPanelIdList, selectedPanelIds, state.activePanelId, stopAll]);
 
   const clampSettingsPanelWidth = useCallback((nextWidth: number) => {
     const viewportWidth = window.innerWidth;
@@ -466,6 +666,8 @@ export function AppShell() {
       }
     });
   }, [stopAll, updateServiceWorker]);
+
+  useEffect(() => installNativeFileDropGuard(), []);
 
   useEffect(() => {
     audioFolderInputRef.current?.setAttribute("webkitdirectory", "");
@@ -601,11 +803,20 @@ export function AppShell() {
       // The IndexedDB blob and the decoded PCM are two separate stores; deleting one without the
       // other left the decoded copy resident for the rest of the session.
       purgeMediaCaches(mediaIds);
-      void deleteStoredMedia(mediaIds).catch(() => {
-        setSaveMessage("Не удалось удалить аудио из хранилища браузера");
-      });
+      void (async () => {
+        // The same barrier the import path needs, and for the same reason: the state that stops
+        // naming this media is written asynchronously, so deleting the blobs first leaves a
+        // window where a reload shows library rows and filled pads with nothing behind them.
+        if (!(await flushPendingState())) {
+          setSaveMessage("Состояние не сохранено, аудио оставлено в хранилище");
+          return;
+        }
+        await deleteStoredMedia(mediaIds).catch(() => {
+          setSaveMessage("Не удалось удалить аудио из хранилища браузера");
+        });
+      })();
     },
-    [dispatch, stopAll]
+    [dispatch, flushPendingState, stopAll]
   );
 
   const handleAudioFiles = (event: ChangeEvent<HTMLInputElement>, source: "files" | "folder") => {
@@ -677,10 +888,19 @@ export function AppShell() {
           return;
         }
         stopAll();
-        const oldMediaIds = state.media.map((item) => item.id);
-        // Import regenerates every media id, so nothing in the caches can be reused.
+        // Through the ref, not the render closure: reading and verifying a large file can take
+        // minutes, and anything imported into the library meanwhile would otherwise be missing
+        // from this list and orphaned. The merge path already does exactly this.
+        const oldMediaIds = stateRef.current.media.map((item) => item.id);
+        // Neither of these destroys anything recoverable, and running them here preserves the
+        // memory head-room the original order was written for.
         clearMediaCaches();
-        await deleteStoredMedia(oldMediaIds);
+        // Every media range is read and checked against its recorded CRC BEFORE storage is touched.
+        // `readProjectFile` validated the archive's structure, but its media blobs are lazy
+        // `file.slice` views — not a single audio byte had been read at this point, so a file that
+        // was corrupt in the middle, or that had become unreadable since it was picked, was only
+        // discovered while writing.
+        await verifyProjectMedia(project, updateOperationProgress);
         const importedState = await writeImportedProjectMedia(
           project.state,
           project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
@@ -698,11 +918,45 @@ export function AppShell() {
             dirty: false
           }
         });
+        // The persist barrier: wait for the imported state to actually reach storage, and refuse
+        // to delete anything if it did not. Between the dispatch above and that write the new
+        // state lives only in React memory while the PERSISTED state still names exactly the
+        // blobs below — so a tab killed there, or a quota error, would reproduce the very failure
+        // the reordering exists to prevent. Keeping the old blobs costs quota; deleting them
+        // costs the project.
+        const persisted = await flushPendingState();
         setSelectedCellId(null);
+        if (!persisted) {
+          setSaveMessage("Проект импортирован, но не сохранён. Прежнее аудио оставлено");
+          return;
+        }
+        // ONLY NOW. This line used to run before the write, on the strength of a comment claiming
+        // the zip had been "materialised and validated" — it had not: the media blobs are lazy
+        // slices and their bytes are first read while writing. So a source file that vanished, or a
+        // storage quota reached mid-write, left the old audio deleted, the new audio half written,
+        // and the persisted state still naming the old ids. Every pad silent, nothing to recover.
+        //
+        // Its own catch: at this point the import has fully succeeded and is on screen. A failure
+        // to tidy up the previous project's blobs leaks quota; reporting it as a failed import
+        // would be a lie.
+        await deleteStoredMedia(oldMediaIds).catch(() => undefined);
         setSaveMessage(`Проект импортирован: ${file.name}`);
       })
-      .catch(() => {
-        setSaveMessage("Не удалось импортировать проект");
+      .catch((error: unknown) => {
+        const kind = classifyProjectFileError(error);
+        setSaveMessage(
+          kind === "corrupt"
+            ? `Файл проекта повреждён: ${file.name}`
+            : kind === "not-a-project"
+              ? `Это не файл проекта: ${file.name}`
+              : kind === "too-large"
+                ? "Проект слишком большой для файла .mumbox: предел 4 ГБ"
+                : kind === "no-space"
+                  ? "В браузерном хранилище не хватило места для проекта"
+                  : kind === "unreadable"
+                    ? "Не удалось прочитать файл проекта"
+                    : "Не удалось импортировать проект"
+        );
       })
       .finally(() => {
         setImportLoading(false);
@@ -899,8 +1153,28 @@ export function AppShell() {
         return;
       }
 
+      // Same hazard as an import, minus the deletion: a partial write orphans blobs forever.
+      await verifyProjectMedia(project, updateOperationProgress);
       const currentState = serializeState(stateRef.current);
-      const preparation = await prepareMerge(currentState, project);
+      // `loadBlob` is what lets the CURRENT project be hashed too. Without it a project that has
+      // never been saved carries no hashes, and the whole merge falls back to matching on file name
+      // and byte length — which is not evidence that two files are the same audio.
+      const preparation = await prepareMerge(currentState, project, {
+        loadBlob: getMediaBlob,
+        onProgress: updateOperationProgress
+      });
+      // Kept BEFORE the storage check, not only on the success path. Hashing both libraries reads
+      // every candidate byte and can take minutes on a large project; returning at the check below
+      // threw all of it away, so a user who freed some space and retried paid for the whole pass a
+      // second time. The current side is a live part of the state, so recording its hashes here is
+      // correct whether or not the merge goes ahead.
+      const currentHashes = preparation.computedHashes.filter((entry) =>
+        stateRef.current.media.some((asset) => asset.id === entry.mediaId)
+      );
+      if (currentHashes.length > 0) {
+        dispatch({ type: "media/setContentHash", hashes: currentHashes });
+      }
+
       // Nothing is deleted by a merge, so the storage cost is purely additive — but only for what
       // survives deduplication.
       const storage = await hasLikelyStorageForBytes(preparation.survivorBytes);
@@ -922,7 +1196,10 @@ export function AppShell() {
       // merged cell — visible only when the incoming audio is new, which a self-merge never is.
       const finalMediaIds = new Map([...idByImportedId.values()].map((id) => [id, id]));
       const merged = mergeProjectState({
-        current: currentState,
+        // The hash-backfilled state, so the work rides into the merged project and is persisted by
+        // `state/merge`. Dispatching `media/setContentHash` first would be pointless: the merge is
+        // built from a snapshot and `state/merge` replaces everything.
+        current: preparation.current,
         incoming: remappedIncoming,
         mediaIdMap: finalMediaIds,
         addedMedia,
@@ -932,12 +1209,31 @@ export function AppShell() {
       dispatch({ type: "state/merge", state: merged.state });
       setSelectedCellId(null);
       setSaveMessage(
-        preparation.reusedCount > 0
-          ? `Добавлено панелей: ${String(merged.addedPanelIds.length)}, дубликатов аудио пропущено: ${String(preparation.reusedCount)}`
-          : `Добавлено панелей: ${String(merged.addedPanelIds.length)}`
+        // The undecided count is reported ALONGSIDE the reused one, never instead of it. Reporting
+        // it only when nothing was deduplicated meant the common mixed case — one pair matched by
+        // hash, another impossible to compare — showed a bare number that implies every pair was
+        // checked, which is the claim `undecidedCount` exists to stop the app from making.
+        [
+          `Добавлено панелей: ${String(merged.addedPanelIds.length)}`,
+          preparation.reusedCount > 0
+            ? `дубликатов аудио пропущено: ${String(preparation.reusedCount)}`
+            : null,
+          preparation.undecidedCount > 0 ? "часть аудио не сравнивалась" : null
+        ]
+          .filter((part): part is string => part !== null)
+          .join(", ")
       );
-    } catch {
-      setSaveMessage("Не удалось объединить проекты");
+    } catch (error: unknown) {
+      const kind = classifyProjectFileError(error);
+      setSaveMessage(
+        kind === "corrupt"
+          ? `Файл проекта повреждён: ${file.name}`
+          : kind === "unreadable"
+            ? "Не удалось прочитать файл проекта"
+            : kind === "no-space"
+              ? "В браузерном хранилище не хватило места для проекта"
+              : "Не удалось объединить проекты"
+      );
     } finally {
       setImportLoading(false);
       updateOperationProgress(null);
@@ -1245,7 +1541,10 @@ export function AppShell() {
         pb: "var(--app-safe-area-bottom)",
         pl: "var(--app-safe-area-left)",
         "@media (orientation: landscape) and (max-height: 430px)": {
-          gridTemplateRows: "34px minmax(0, 1fr)",
+          // 38 rather than 34: four extra pixels of header, which is the whole point of the change
+          // — switching panels by thumb in a 430 px tall viewport. The tab minHeight in
+          // `PanelTabs` moved with it, and the two must stay in step or the tabs overflow the row.
+          gridTemplateRows: "38px minmax(0, 1fr)",
           pt: 0,
           pb: 0
         }
@@ -1430,8 +1729,11 @@ export function AppShell() {
             panels={state.panels}
             activePanelId={state.activePanelId}
             editMode={state.editMode}
+            selectionMode={selectionMode}
+            selectedPanelIds={selectedPanelIds}
             dispatch={dispatch}
             onDeletePanel={requestDeletePanel}
+            onTogglePanelSelected={togglePanelSelected}
           />
         </Stack>
 
@@ -1492,10 +1794,16 @@ export function AppShell() {
           cells={activeCells}
           media={state.media}
           editMode={state.editMode}
+          selectionMode={selectionMode}
           selectedCellId={selectedCellId}
-          playingCells={playingCells}
+          selectedCellIds={selectedCellIds}
+          playingCellKeys={playingCells}
           warmedCells={warmedCells}
           onCellClick={(cell) => {
+            if (selectionMode) {
+              toggleCellSelected(cell.id);
+              return;
+            }
             if (state.editMode) {
               setSelectedCellId(cell.id);
               return;
@@ -1534,6 +1842,7 @@ export function AppShell() {
           masterVolume={state.masterVolume}
           masterMuted={state.masterMuted}
           editMode={state.editMode}
+          selectionMode={selectionMode}
           stopOthers={state.stopOthers}
           gridSize={activePanel.gridSize}
           panelId={activePanel.id}
@@ -1541,6 +1850,9 @@ export function AppShell() {
           minGridSize={minGridSize}
           dispatch={dispatch}
           onStopAll={stopAll}
+          onToggleSelectionMode={() => {
+            setSelectionMode((current) => !current);
+          }}
         />
         {cellSettingsOpen ? (
           <Box
@@ -1610,6 +1922,7 @@ export function AppShell() {
         onReady={handleImportReady}
         onLoadingChange={handleImportLoadingChange}
         onProgress={updateOperationProgress}
+        onError={setSaveMessage}
         onCancel={() => {
           setPendingAudioFiles([]);
           setImportLoading(false);
@@ -1767,6 +2080,166 @@ export function AppShell() {
           </Button>
         </DialogActions>
       </Dialog>
+      {selectionMode ? (
+        <SelectionActionBar
+          selectedCellCount={selectedCellIdList.length}
+          selectedPanelCount={selectedPanelIdList.length}
+          selectableCellCount={selectableCellIds.length}
+          onSelectAllCells={selectAllCells}
+          onResetSelection={resetSelection}
+          onClearCells={requestClearSelectedCells}
+          onCopyCells={openCopySelectionDialog}
+          onDeletePanels={() => {
+            setDeletePanelsConfirmOpen(true);
+          }}
+        />
+      ) : null}
+      <Dialog
+        open={clearSelectionConfirmOpen}
+        onClose={() => {
+          setClearSelectionConfirmOpen(false);
+        }}
+        aria-labelledby="clear-selection-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="clear-selection-dialog-title">Очистить выбранные ячейки?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {`Будет очищено ${formatCountRu(selectedCellIdList.length, ["ячейка", "ячейки", "ячеек"])}, из них с настройками — ${String(configuredSelectedCellCount)}. Аудио останется в библиотеке.`}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setClearSelectionConfirmOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() => {
+              clearSelectedCells();
+              setClearSelectionConfirmOpen(false);
+            }}
+          >
+            Очистить
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={copySelectionOpen}
+        onClose={() => {
+          setCopySelectionOpen(false);
+        }}
+        aria-labelledby="copy-selection-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="copy-selection-dialog-title">Скопировать выбранные ячейки</DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: "grid", gap: 1.5, pt: 1 }}>
+            <TextField
+              select
+              label="Панель"
+              value={copyTargetPanel?.id ?? ""}
+              onChange={(event) => {
+                setCopyTargetPanelId(event.target.value);
+              }}
+              fullWidth
+              slotProps={{ htmlInput: { "aria-label": "Панель для копирования" } }}
+            >
+              {state.panels.map((panel) => (
+                <MenuItem key={panel.id} value={panel.id}>
+                  {panel.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Typography data-testid="copy-selection-hint" color="text.secondary">
+              {selectedCellsWithMediaCount > copyTargetFreeCellCount
+                ? `С аудио выбрано ${String(selectedCellsWithMediaCount)}, свободных ячеек — ${String(copyTargetFreeCellCount)}. Скопируется только ${String(copyTargetFreeCellCount)}.`
+                : `Копии займут первые свободные ячейки: ${String(selectedCellsWithMediaCount)} из ${String(copyTargetFreeCellCount)} свободных.`}
+            </Typography>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setCopySelectionOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!copyTargetPanel || copyTargetFreeCellCount === 0 || selectedCellsWithMediaCount === 0}
+            onClick={copySelectedCells}
+          >
+            Скопировать
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={deletePanelsConfirmOpen}
+        onClose={() => {
+          setDeletePanelsConfirmOpen(false);
+        }}
+        aria-labelledby="delete-panels-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="delete-panels-dialog-title">Удалить выбранные панели?</DialogTitle>
+        <DialogContent>
+          <Typography data-testid="delete-panels-hint">
+            {undeletablePanelCount > 0
+              ? `Будет удалено ${formatCountRu(selectedPanelIdList.length - undeletablePanelCount, ["панель", "панели", "панелей"])}. Первую панель удалить нельзя — она останется.`
+              : `Будет удалено ${formatCountRu(selectedPanelIdList.length, ["панель", "панели", "панелей"])} вместе с их ячейками.`}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setDeletePanelsConfirmOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={selectedPanelIdList.length - undeletablePanelCount === 0}
+            onClick={deleteSelectedPanels}
+          >
+            Удалить
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={Boolean(pendingClearCell)}
         onClose={() => {
@@ -1895,6 +2368,17 @@ export function AppShell() {
                   dispatch({ type: "state/reset" });
                   clearMediaCaches();
                   setSaveMessage("Все данные MUMBOX стерты");
+                })
+                .catch(() => {
+                  // Without this the whole `then` block was skipped on a failed erase: no reset,
+                  // no cache purge, no message — and React still held the full project, so the
+                  // next action re-persisted it, naming blobs that had already been deleted. A
+                  // complete-looking layout with missing audio, and nothing said.
+                  stopAll();
+                  setSelectedCellId(null);
+                  dispatch({ type: "state/reset" });
+                  clearMediaCaches();
+                  setSaveMessage("Данные стерты не полностью. Повторите или очистите данные сайта");
                 })
                 .finally(() => {
                   setResetConfirmOpen(false);

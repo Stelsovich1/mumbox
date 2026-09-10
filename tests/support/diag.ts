@@ -94,3 +94,11 @@ export async function diagReset(page: Page): Promise<void> {
     (window as DiagWindow).__mumboxDiag?.reset();
   });
 }
+
+/**
+ * PCM held by live routes. Zero unless something is playing, and the number that the cache-only
+ * accounting could never show — a streamed route owns its segments outright.
+ */
+export async function diagRoutePcmBytes(page: Page): Promise<number> {
+  return page.evaluate(() => window.__mumboxDiag?.routePcmBytes() ?? -1);
+}

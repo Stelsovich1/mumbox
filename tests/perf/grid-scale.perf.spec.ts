@@ -7,7 +7,13 @@ import type { GridSize, SeedResult } from "../support/seedProject";
 import { SIZES } from "../support/audioFixtures";
 import type { WavSpec } from "../support/audioFixtures";
 import { expectWithinBaseline, median } from "./support/baseline";
-import { installPerfInstrumentation, readJsHeapBytes, readPerfProbe, sampleFrames } from "./support/instrument";
+import {
+  installPerfInstrumentation,
+  perfGoto,
+  readJsHeapBytes,
+  readPerfProbe,
+  sampleFrames
+} from "./support/instrument";
 
 /**
  * Grid-scale matrix.
@@ -87,7 +93,7 @@ for (const scenario of scenarios) {
     });
 
     const loadStartedAt = Date.now();
-    await page.goto("/");
+    await perfGoto(page, "/");
     await expect(page.locator("[data-cell-id]")).toHaveCount(
       scenario.gridSize * scenario.gridSize
     );

@@ -9,9 +9,13 @@ export type CellPosition = { row: number; column: number };
 
 /**
  * Shrinking a grid hides cells, it does not clear them: `panel/gridSize` keeps the whole cell
- * record and only regenerates `cellIds`, so a cue placed at 12x12 still exists — and still plays
- * from its hotkey — while a 6x6 grid is on screen. Nothing on the grid can show that, because the
- * cell is not rendered at all. These helpers are what lets the size control say it instead.
+ * record and only regenerates `cellIds`, so a cue placed at 12x12 still exists while a 6x6 grid is on
+ * screen. Nothing on the grid can show that, because the cell is not rendered at all.
+ *
+ * It does NOT play from its hotkey there. `AppShell` builds the hotkey list from the visible
+ * `cellIds`, so a hidden cue is unreachable by any means. Said plainly because this comment used to
+ * claim the opposite, and a claim like that is how the next reader trusts an invariant nothing
+ * enforces. These helpers are what lets the size control say it instead.
  */
 
 /**

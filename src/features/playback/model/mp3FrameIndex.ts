@@ -524,3 +524,40 @@ export function preambleFrameCount(index: Mp3FrameIndex, frame: number): number 
 export function indexBytes(index: Mp3FrameIndex): number {
   return index.byteOffsets.byteLength;
 }
+
+/**
+ * Duration the frame table can vouch for, or null when it cannot.
+ *
+ * ORDER IS LOAD-BEARING, and getting it wrong disabled streaming for every MP3 in a real library.
+ * A freshly built index has `frameCount === 0` — the table is scanned lazily, and
+ * `fillConstantBitrateIndex` only runs for a stream whose opening frames share a size. At the most
+ * common encoder setting they do not: 192 kbps / 44.1 kHz gives a frame of 626.94 bytes, so the
+ * padding bit alternates 626/627 and `constantFrameBytes` resolves to null. A `frameCount === 0`
+ * check placed first therefore returned null for EVERY such file, shadowing the declared count
+ * below it — which is the only reason `declaredFrameCount` is parsed at all.
+ *
+ * Downstream, no duration means `planMediaSegments` bails, no head is built, and an untrimmed track
+ * — which `shouldReadRange` correctly declines, because its window IS the file — falls through to a
+ * full decode. 300 s of stereo is 105.8 MB resident and a panel of twelve is 1.27 GB, which is
+ * precisely the jetsam the byte-range work exists to prevent.
+ *
+ * Nothing failed, because the WAV probe reports `frameCount / sampleRate` from the container
+ * directly and every fixture in the suite is WAV.
+ */
+export function getIndexedDurationSeconds(index: Mp3FrameIndex): number | null {
+  const { samplesPerFrame, sampleRate, declaredFrameCount } = index.info;
+  if (sampleRate <= 0) {
+    return null;
+  }
+  // A completed scan is the only exact source; prefer it whenever it exists.
+  if (index.complete && index.frameCount > 0) {
+    return (index.frameCount * samplesPerFrame) / sampleRate;
+  }
+  // The encoder's own tally from a Xing/VBRI frame. Trusted for DURATION only, never for seeking —
+  // the accompanying TOC is about 1 % accurate, three orders of magnitude past a sample-accurate
+  // splice.
+  if (declaredFrameCount !== null && declaredFrameCount > 0) {
+    return (declaredFrameCount * samplesPerFrame) / sampleRate;
+  }
+  return null;
+}

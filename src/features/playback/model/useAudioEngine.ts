@@ -11,9 +11,12 @@ import {
   recordPartialServed,
   recordSegment,
   recordTimeToFirstSound,
+  recordLiveSegments,
   recordWarmup,
-  setMonoState
+  setMonoState,
+  setRoutePcmSource
 } from "../../../shared/lib/diagnostics";
+import { clearProgress, writeProgress } from "../../../shared/lib/cellVisuals";
 import { onMediaCachePurge } from "../../../shared/lib/mediaCacheRegistry";
 import {
   estimatePcmBytes,
@@ -23,7 +26,6 @@ import {
 } from "./audioBufferCache";
 import type { PlaybackBufferEntry } from "./audioBufferCache";
 import {
-  DECODE_SAMPLE_RATE,
   decodeAudioBlob,
   shouldSliceBuffer,
   sliceToAudioBuffer
@@ -34,8 +36,16 @@ import {
   shouldReadRange,
   shouldSegmentWindow
 } from "./partialPlan";
+import { DecodeLane } from "./decodeSemaphore";
 import { decodeMediaRange, ensureMp3Alignment, planMediaSegments } from "./partialSource";
+import {
+  getEngineSampleRate,
+  readRequestedSampleRate,
+  setEngineSampleRate
+} from "./playbackRate";
 import { playbackBufferCache, setActivePanelKeys } from "./playbackBufferCache";
+import { getCellGainValue, getEffectiveVolume, getMasterGainValue } from "./volume";
+import { dropSegment, listFinishedSegments, pruneFinishedSegments } from "./routeSegments";
 import {
   getEnvelopeValue,
   getTrimEndSeconds,
@@ -43,11 +53,15 @@ import {
   scheduleEnvelope
 } from "./audioEnvelope";
 
-type PlayingCell = {
-  cellKey: string;
-  mediaId: string;
-  progress: number;
-};
+/**
+ * Which cells are playing. Membership only.
+ *
+ * `progress` and `mediaId` used to live here. `progress` is now written straight to the DOM through
+ * `cellVisuals` — pushing it through React re-rendered the whole shell twenty times a second — and
+ * `mediaId` had no consumer at all: it survived only inside the equality check that compared these
+ * objects, which a set of keys does not need.
+ */
+type PlayingCell = string;
 
 export type WarmState = "warming" | "ready";
 
@@ -132,7 +146,6 @@ const SCHEDULE_LEAD_SECONDS = 128 / 44_100;
 const SEGMENT_PREFETCH_SECONDS = 6;
 /** Polling step while waiting for a segment's prefetch window to open. */
 const SEGMENT_WAIT_STEP_MS = 120;
-const PROGRESS_EPSILON = 0.001;
 /**
  * How often a progress change may reach React.
  *
@@ -220,11 +233,43 @@ function isPartialPathLikely(cell: GridCell, durationMs: number | null): boolean
     shouldReadRange({
       sourceSeconds,
       windowSeconds,
-      sampleRate: DECODE_SAMPLE_RATE,
+      sampleRate: getEngineSampleRate(),
       channels: 2
     }) ||
-    shouldSegmentWindow({ windowSeconds, sampleRate: DECODE_SAMPLE_RATE, channels: 2 })
+    shouldSegmentWindow({ windowSeconds, sampleRate: getEngineSampleRate(), channels: 2 })
   );
+}
+
+/**
+ * Whether the decoder offset has to be measured for this cell before its audio can be read.
+ *
+ * Any decode that does not start at the first frame needs it, and there are two ways to get there.
+ * A trimmed cue starts mid-file outright. An untrimmed long track starts at byte 0 but is STREAMED,
+ * and every segment after the head starts mid-file — so gating on the trim alone left those
+ * segments refused, the cue promoted to its head, and a three-minute track playing 0.5 seconds.
+ *
+ * Judged from the duration and the trim alone so it can be answered synchronously, the same way
+ * `isPartialPathLikely` is. A false positive costs one measurement that is then cached and unused;
+ * a false negative costs the cue.
+ */
+function needsAlignmentMeasurement(cell: GridCell, durationMs: number | null): boolean {
+  if ((cell.trimStartMs ?? 0) > 0) {
+    return true;
+  }
+  const sourceSeconds = (durationMs ?? 0) / 1000;
+  if (sourceSeconds <= 0) {
+    return false;
+  }
+  const { startSeconds, endSeconds } = getClampedPlaybackRange(cell, sourceSeconds);
+  const windowSeconds = endSeconds - startSeconds;
+  if (windowSeconds <= 0) {
+    return false;
+  }
+  return shouldSegmentWindow({
+    windowSeconds,
+    sampleRate: getEngineSampleRate(),
+    channels: 2
+  });
 }
 
 /**
@@ -242,12 +287,6 @@ function getEnvelopeSignature(cell: GridCell) {
   ].join("|");
 }
 
-function getEffectiveVolume(masterVolume: number, cellVolumeOffset: number) {
-  const normalizedMaster = masterVolume / 100;
-  const offsetMultiplier = 1 + cellVolumeOffset / 100;
-  return Math.min(4, Math.max(0, normalizedMaster * offsetMultiplier));
-}
-
 function getHtmlAudioVolume(volume: number) {
   return Math.min(1, Math.max(0, volume));
 }
@@ -257,18 +296,9 @@ function getAudioContextState(context: AudioContext) {
 }
 
 function arePlayingCellsEqual(previous: PlayingCell[], next: PlayingCell[]) {
-  if (previous.length !== next.length) {
-    return false;
-  }
-
-  return previous.every((cell, index) => {
-    const nextCell = next[index];
-    return (
-      cell.cellKey === nextCell?.cellKey &&
-      cell.mediaId === nextCell.mediaId &&
-      Math.abs(cell.progress - nextCell.progress) < PROGRESS_EPSILON
-    );
-  });
+  return (
+    previous.length === next.length && previous.every((cellKey, index) => cellKey === next[index])
+  );
 }
 
 function setRouteVolume(route: AudioRoute, volume: number) {
@@ -387,6 +417,51 @@ export function useAudioEngine(
    */
   const purgeGenerationRef = useRef(0);
   const frameRef = useRef<number | null>(null);
+
+  /**
+   * Reports PCM held by live routes to the diagnostics, and counts the segments holding it.
+   *
+   * The cache accounting is structurally blind here — a streamed route owns its segments and they
+   * are never cache entries — and that blindness is why segment accumulation went unnoticed while
+   * every memory assertion in the suite kept passing. Registered once; the closure reads the live
+   * map, so it needs no dependencies.
+   */
+  useEffect(() => {
+    setRoutePcmSource(() => {
+      let bytes = 0;
+      let live = 0;
+      for (const route of routeByCellRef.current.values()) {
+        for (const segment of route.segments) {
+          const buffer = segment.source.buffer;
+          if (buffer) {
+            bytes += buffer.length * buffer.numberOfChannels * 4;
+          }
+          live += 1;
+        }
+      }
+      void live;
+      return bytes;
+    });
+    return () => {
+      setRoutePcmSource(() => 0);
+    };
+  }, []);
+
+  /**
+   * Publishes how many segments are held right now.
+   *
+   * Called from every mutation point rather than from the accounting closure. Sampling it when
+   * diagnostics happen to be read makes `peakLive` a record of when someone looked, not of what the
+   * engine held — measured exactly that way: a route holding all six segments of a window reported
+   * a peak of 3, because nothing read the number until the cue was over.
+   */
+  const syncLiveSegments = useCallback(() => {
+    let live = 0;
+    for (const route of routeByCellRef.current.values()) {
+      live += route.segments.length;
+    }
+    recordLiveSegments(live);
+  }, []);
   const lastProgressPushRef = useRef(0);
   const playingCellsRef = useRef<PlayingCell[]>([]);
   const [playingCells, setPlayingCells] = useState<PlayingCell[]>([]);
@@ -397,11 +472,39 @@ export function useAudioEngine(
    * deliver.
    */
   const [warmedKeys, setWarmedKeys] = useState<Record<string, WarmState>>({});
+  /**
+   * The AUTHORITATIVE warm state, not a mirror of `warmedKeys`.
+   *
+   * It has to be the ref rather than the state, because `warmMedia` resumes after an `await` and
+   * asks whether its key is still tracked. Syncing the ref from an effect leaves a window between
+   * the flush that empties the queue and the commit that updates the state where the key is in
+   * neither — and in that window a finished decode looks untracked and its `ready` transition is
+   * dropped, leaving the cell on `warming` for good. Measured as exactly that: two cells sharing
+   * one media, one reaching `ready` and one not.
+   */
+  const warmedKeysRef = useRef(warmedKeys);
+
+  /**
+   * Lookup indexes for the hot paths, rebuilt only when their source changes.
+   *
+   * The rAF tick used to resolve a route's cell with `cellsRef.current.find(...)` and a template
+   * literal per candidate: 144 cells x 6 playing x 60 fps is about 52 000 string allocations a
+   * second, and the GC pause that buys is audible. The media scans are the same shape — the warm-up
+   * did one per target, so 144 targets against a 500-media library is 72 000 comparisons, twice.
+   *
+   * The cell key stays panel-qualified. A route survives a panel switch (`stopOthers` is off by
+   * default), so its key can name a panel that is not on screen; the lookup then correctly misses
+   * and the tick keeps the branch it already has for that.
+   */
+  const cellByKeyRef = useRef(new Map<string, GridCell>());
+  const mediaByIdRef = useRef(new Map<string, MediaAsset>());
 
   useEffect(() => {
     cellsRef.current = cells;
     mediaRef.current = media;
-  }, [cells, media]);
+    cellByKeyRef.current = new Map(cells.map((cell) => [getCellKey(panelId, cell.id), cell]));
+    mediaByIdRef.current = new Map(media.map((asset) => [asset.id, asset]));
+  }, [cells, media, panelId]);
 
   useEffect(() => {
     monoRef.current = monoPlayback;
@@ -414,15 +517,81 @@ export function useAudioEngine(
     masterMutedRef.current = masterMuted;
   }, [masterMuted, masterVolume, panelId]);
 
+  /**
+   * Set once the warm-state machinery below exists.
+   *
+   * `getContext` runs before that in source order but only ever after it at runtime, and a rate
+   * change can only happen when a context is built. The same mutated-ref idiom `WorkspaceGrid` uses
+   * for its cell controller, and for the same reason: the alternative is reordering a 1800-line
+   * hook around one call.
+   */
+  const dropWarmedKeysRef = useRef<(keys: readonly string[]) => void>(() => undefined);
+  /**
+   * The shared output node, one per context.
+   *
+   * Master volume used to be folded into every route's own gain, which meant the rAF loop rewrote
+   * that gain for every playing route on every frame just to keep them in sync. With a shared node
+   * a master change is one `setValueAtTime` on one node, and a route's gain only ever moves when
+   * that cell's own offset does.
+   *
+   * The media-element fallback cannot use it: that route builds its own `AudioContext` and its own
+   * `destination`, so nothing on this context can reach it. It keeps the combined form.
+   */
+  const masterGainRef = useRef<GainNode | null>(null);
+
   const getContext = useCallback(() => {
     const current = contextRef.current;
     if (current && current.state !== "closed") {
       return current;
     }
-    const context = new AudioContext();
+    // `?rate=N` asks for a specific rate; anything else takes the hardware's. The request is
+    // attempted inside a try because a device may reject a rate it cannot run — falling back to the
+    // default keeps the switch a debugging aid rather than a way to break playback.
+    const requested = readRequestedSampleRate(window.location.search);
+    let context: AudioContext | null = null;
+    if (requested !== null) {
+      try {
+        context = new AudioContext({ sampleRate: requested });
+      } catch {
+        context = null;
+      }
+    }
+    context ??= new AudioContext();
     contextRef.current = context;
+    masterGainRef.current = null;
+
+    // Everything in the buffer cache is decoded at the engine rate by construction. A context
+    // recreated at a different rate — the iOS recovery path builds a fresh one — would otherwise
+    // leave entries that quietly resample on every play, which is the cost this change removes.
+    if (setEngineSampleRate(context.sampleRate)) {
+      const stale = playbackBufferCache.keys();
+      playbackBufferCache.clear();
+      dropWarmedKeysRef.current(stale);
+    }
     return context;
   }, []);
+
+  /**
+   * Builds the context once, on mount, purely to learn the hardware's sample rate.
+   *
+   * It used to be built by the first pad press. On any device that does not run at 44 100 — 48 000
+   * is the common Android rate — that meant the whole panel was decoded at the DEFAULT rate, every
+   * pad went `ready`, and then the first tap constructed the context, saw a different rate, and
+   * cleared the cache and the warm state it had just filled. That tap paid a cold decode, and the
+   * panel was never re-warmed because `warmupSignature` had not changed.
+   *
+   * On mount rather than at the head of the warm-up so it cannot contend with the decode pool, and
+   * so a panel switch does not touch it at all. A context constructed without a user gesture starts
+   * suspended, which is all this needs — the first press still resumes it.
+   */
+  useEffect(() => {
+    try {
+      getContext();
+    } catch {
+      // A device that refuses to construct one here will construct it on the first press, which is
+      // the behaviour this replaces. Never a reason to fail the mount.
+    }
+  }, [getContext]);
 
   const resumeContext = useCallback(async (context: AudioContext) => {
     const state = getAudioContextState(context);
@@ -437,6 +606,21 @@ export function useAudioEngine(
     }
 
     return context;
+  }, []);
+
+  const getMasterGain = useCallback((context: AudioContext) => {
+    const existing = masterGainRef.current;
+    if (existing?.context === context) {
+      return existing;
+    }
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(
+      getMasterGainValue(masterVolumeRef.current, masterMutedRef.current),
+      context.currentTime
+    );
+    gain.connect(context.destination);
+    masterGainRef.current = gain;
+    return gain;
   }, []);
 
   const bumpCellToken = useCallback((cellKey: string) => {
@@ -458,10 +642,15 @@ export function useAudioEngine(
     routeByCellRef.current.forEach((route, cellKey) => {
       bumpCellToken(cellKey);
       stopRoute(route);
+      // Same duty `stopCellKey` has. This path is the iOS stuck-context recovery, so without it
+      // every cell that was playing keeps its marker frozen mid-track while `data-playing` is
+      // false — and the registry replays that stale value on the next remount.
+      clearProgress(cellKey);
     });
     routeByCellRef.current.clear();
+    syncLiveSegments();
     syncPlayingCells([]);
-  }, [bumpCellToken, syncPlayingCells]);
+  }, [bumpCellToken, syncLiveSegments, syncPlayingCells]);
 
   const getPlayableContext = useCallback(async () => {
     let context = await resumeContext(getContext());
@@ -517,8 +706,14 @@ export function useAudioEngine(
    * profitable case there is, and a length gate would have excluded it.
    */
   const tryDecodeRange = useCallback(
-    async (cell: GridCell, mediaId: string, mono: boolean): Promise<PlaybackBufferEntry | null> => {
-      const asset = mediaRef.current.find((candidate) => candidate.id === mediaId);
+    async (
+      cell: GridCell,
+      mediaId: string,
+      mono: boolean,
+      // Background by default, so only the press path has to name the deadline it is under.
+      lane: DecodeLane = "background"
+    ): Promise<PlaybackBufferEntry | null> => {
+      const asset = mediaByIdRef.current.get(mediaId);
       if (!isPartialPathLikely(cell, asset?.durationMs ?? null)) {
         return null;
       }
@@ -536,17 +731,28 @@ export function useAudioEngine(
         const plan =
           cell.playbackMode === "loop"
             ? null
-            : await planMediaSegments({ mediaId, startSeconds, endSeconds });
+            : await planMediaSegments({
+                mediaId,
+                startSeconds,
+                endSeconds,
+                // The same duration this window was clamped against two lines up, handed down so a
+                // file with no Xing/Info frame can still be streamed. Without it the container has
+                // no duration to offer and the whole track takes a full decode.
+                fallbackDurationSeconds: sourceSeconds
+              });
         const head = plan?.segments[0];
         if (plan && head) {
-          const result = await decodeMediaRange({
-            mediaId,
-            startSeconds: head.startSeconds,
-            // The margin is real audio past the nominal boundary, so the outgoing segment always
-            // has samples to play right up to the handoff.
-            endSeconds: head.bufferEndSeconds,
-            mono
-          });
+          const result = await decodeMediaRange(
+            {
+              mediaId,
+              startSeconds: head.startSeconds,
+              // The margin is real audio past the nominal boundary, so the outgoing segment always
+              // has samples to play right up to the handoff.
+              endSeconds: head.bufferEndSeconds,
+              mono
+            },
+            lane
+          );
           if (result) {
             recordPartialServed("streamed");
             return {
@@ -575,14 +781,14 @@ export function useAudioEngine(
           !shouldReadRange({
             sourceSeconds,
             windowSeconds: endSeconds - startSeconds,
-            sampleRate: DECODE_SAMPLE_RATE,
+            sampleRate: getEngineSampleRate(),
             channels: 2
           })
         ) {
           recordPartialServed("declined");
           return null;
         }
-        const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono });
+        const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono }, lane);
         recordPartialServed(result ? "range" : "declined");
         return result?.entry ?? null;
       } catch {
@@ -595,7 +801,12 @@ export function useAudioEngine(
   );
 
   const loadPlaybackEntry = useCallback(
-    async (cell: GridCell, mediaId: string, cacheKey: string): Promise<PlaybackBufferEntry | null> => {
+    async (
+      cell: GridCell,
+      mediaId: string,
+      cacheKey: string,
+      lane: DecodeLane = "background"
+    ): Promise<PlaybackBufferEntry | null> => {
       const cached = playbackBufferCache.get(cacheKey);
       if (cached) {
         return cached;
@@ -613,7 +824,7 @@ export function useAudioEngine(
         // never be able to fail a cue, only to decline it. Any decline — an unsupported container,
         // a mid-file MP3 window with no measured offset, a blocked browser, a throw from the
         // decoder — falls through to the full decode below, which is unchanged.
-        const rangeEntry = await tryDecodeRange(cell, mediaId, mono);
+        const rangeEntry = await tryDecodeRange(cell, mediaId, mono, lane);
         if (rangeEntry) {
           if (purgeGenerationRef.current === purgeGeneration) {
             playbackBufferCache.set(cacheKey, rangeEntry);
@@ -673,20 +884,109 @@ export function useAudioEngine(
         mediaId,
         trimStartMs: cell.trimStartMs,
         trimEndMs: cell.trimEndMs,
-        mono: monoRef.current
+        mono: monoRef.current,
+        loop: cell.playbackMode === "loop"
       }),
     []
   );
 
-  const dropWarmedKeys = useCallback((keys: readonly string[]) => {
-    const dropped = new Set(keys);
-    setWarmedKeys((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(([key]) => !dropped.has(key))
-      );
-      return Object.keys(next).length === Object.keys(current).length ? current : next;
-    });
+  /**
+   * Warm-state transitions, buffered and flushed once per frame.
+   *
+   * `warmMedia` writes twice per target — `warming` before the decode, `ready` after — with an
+   * `await` between them, so React cannot batch the pair: each landed in its own task and its own
+   * render of the whole shell. A cold 144-cell panel is up to 288 root renders, spread over the
+   * ~7.3 s the warm-up takes, which is ~39 renders a second — the same order as the 20 Hz progress
+   * push. Coalescing them into one render per frame bounds that at 60/s regardless of how wide the
+   * decode pool is.
+   *
+   * EVERY writer goes through this queue, including the drops. Mixing buffered writes with direct
+   * ones inverts their order: a queued `ready` landing after a synchronous eviction would resurrect
+   * a key whose PCM is gone, and a cell claiming to be warm without a buffer promises an instant
+   * start the engine cannot deliver and suppresses its own re-warm. The one exception is a purge,
+   * which clears the buffer before writing so nothing in flight can outlive it.
+   */
+  const pendingWarmRef = useRef(new Map<string, WarmState | null>());
+  const warmFlushFrameRef = useRef<number | null>(null);
+
+  const flushWarmedKeys = useCallback(() => {
+    warmFlushFrameRef.current = null;
+    const pending = pendingWarmRef.current;
+    if (pending.size === 0) {
+      return;
+    }
+    const queued = new Map(pending);
+    pending.clear();
+
+    const current = warmedKeysRef.current;
+    const next: Record<string, WarmState> = {};
+    let changed = false;
+    for (const [key, value] of Object.entries(current)) {
+      const update = queued.get(key);
+      if (update === null) {
+        changed = true;
+        continue;
+      }
+      const resolved = update ?? value;
+      next[key] = resolved;
+      if (resolved !== value) {
+        changed = true;
+      }
+    }
+    for (const [key, value] of queued) {
+      if (value !== null && !(key in current)) {
+        next[key] = value;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    // Ref first, synchronously: the very next `warmMedia` to resume reads it, and it must not see
+    // the pre-flush value.
+    warmedKeysRef.current = next;
+    setWarmedKeys(next);
   }, []);
+
+  const queueWarmedKeys = useCallback(
+    (updates: Iterable<readonly [string, WarmState | null]>) => {
+      for (const [key, state] of updates) {
+        pendingWarmRef.current.set(key, state);
+      }
+      if (pendingWarmRef.current.size > 0 && warmFlushFrameRef.current === null) {
+        warmFlushFrameRef.current = requestAnimationFrame(flushWarmedKeys);
+      }
+    },
+    [flushWarmedKeys]
+  );
+
+  const dropWarmedKeys = useCallback(
+    (keys: readonly string[]) => {
+      queueWarmedKeys(keys.map((key) => [key, null] as const));
+    },
+    [queueWarmedKeys]
+  );
+
+  useEffect(() => {
+    // A hidden tab stops firing `requestAnimationFrame`, so a transition queued just before the
+    // switch would sit there until the user came back. Invisible while hidden, but a dropped
+    // transition leaves a cell stuck on `warming` for good, which is the one failure mode here that
+    // a user would notice.
+    const flushNow = () => {
+      if (warmFlushFrameRef.current !== null) {
+        cancelAnimationFrame(warmFlushFrameRef.current);
+        warmFlushFrameRef.current = null;
+      }
+      flushWarmedKeys();
+    };
+    document.addEventListener("visibilitychange", flushNow);
+    return () => {
+      document.removeEventListener("visibilitychange", flushNow);
+      flushNow();
+    };
+  }, [flushWarmedKeys]);
+
+  dropWarmedKeysRef.current = dropWarmedKeys;
 
   const isCacheKeyInUse = useCallback(
     (cacheKey: string) =>
@@ -697,9 +997,11 @@ export function useAudioEngine(
   const warmMedia = useCallback(
     async (target: WarmupTarget, runId: number) => {
       const { mediaId, cacheKey } = target;
-      setWarmedKeys((current) =>
-        current[cacheKey] ? current : { ...current, [cacheKey]: "warming" }
-      );
+      // Queued, not written: the pair of transitions this function makes is separated by an
+      // `await`, so React cannot batch them and each one used to re-render the whole shell.
+      if (!warmedKeysRef.current[cacheKey] && !pendingWarmRef.current.has(cacheKey)) {
+        queueWarmedKeys([[cacheKey, "warming"]]);
+      }
       const entry = await loadPlaybackEntry(target.cell, mediaId, cacheKey);
       // A decode started before a panel switch resolves after it, and `decodeAudioData` cannot be
       // cancelled — so the buffer lands in a cache the switch has already emptied. It is kept only
@@ -715,17 +1017,16 @@ export function useAudioEngine(
         dropWarmedKeys([cacheKey]);
         return;
       }
-      setWarmedKeys((current) => {
-        if (!(cacheKey in current)) {
-          return current;
-        }
-        if (!entry) {
-          return Object.fromEntries(Object.entries(current).filter(([key]) => key !== cacheKey));
-        }
-        return current[cacheKey] === "ready" ? current : { ...current, [cacheKey]: "ready" };
-      });
+      // A key the queue no longer tracks and the state does not hold was dropped while this decode
+      // was in flight — by a panel switch or a purge — and must not be revived.
+      const tracked =
+        cacheKey in warmedKeysRef.current || pendingWarmRef.current.get(cacheKey) !== undefined;
+      if (!tracked) {
+        return;
+      }
+      queueWarmedKeys([[cacheKey, entry ? "ready" : null]]);
     },
-    [dropWarmedKeys, isCacheKeyInUse, loadPlaybackEntry]
+    [dropWarmedKeys, isCacheKeyInUse, loadPlaybackEntry, queueWarmedKeys]
   );
 
   const stopCellKey = useCallback(
@@ -735,10 +1036,13 @@ export function useAudioEngine(
       if (route) {
         stopRoute(route);
         routeByCellRef.current.delete(cellKey);
+        syncLiveSegments();
       }
-      syncPlayingCells(playingCellsRef.current.filter((cell) => cell.cellKey !== cellKey));
+      // A stopped pad must not keep the marker where it stopped.
+      clearProgress(cellKey);
+      syncPlayingCells(playingCellsRef.current.filter((key) => key !== cellKey));
     },
-    [bumpCellToken, syncPlayingCells]
+    [bumpCellToken, syncLiveSegments, syncPlayingCells]
   );
 
   const stopCell = useCallback(
@@ -772,33 +1076,41 @@ export function useAudioEngine(
       }
 
       const endedCellKeys: string[] = [];
-      const nextPlayingCells = current.flatMap((cell) => {
-        const route = routeByCellRef.current.get(cell.cellKey);
+      const now = performance.now();
+      // Progress reaches the DOM at the same 20 Hz it reached React at, deliberately: this is a
+      // pure performance change and the visible cadence must be identical, so any difference is a
+      // regression rather than a design decision. Raising it is a separate question with its own
+      // measurement.
+      const writeProgressNow = now - lastProgressPushRef.current >= PROGRESS_PUSH_INTERVAL_MS;
+      const nextPlayingCells = current.flatMap((cellKey) => {
+        const route = routeByCellRef.current.get(cellKey);
         if (!route) {
           return [];
         }
-        const gridCell = cellsRef.current.find(
-          (candidate) => getCellKey(panelIdRef.current, candidate.id) === cell.cellKey
-        );
+        const gridCell = cellByKeyRef.current.get(cellKey);
         if (!gridCell) {
-          return [cell];
+          return [cellKey];
         }
 
         const currentSeconds =
           route.mode === "media" && route.audio
             ? route.audio.currentTime
             : route.offsetSeconds + (route.context.currentTime - route.startedAtContextTime);
+        // The combined value, still needed by the media-element route below — it has its own
+        // context and destination, so the shared master bus cannot reach it.
         const baseVolume = masterMutedRef.current
           ? 0
           : getEffectiveVolume(masterVolumeRef.current, gridCell.volumeOffset);
-        setRouteVolume(route, baseVolume);
+        if (route.mode === "media") {
+          setRouteVolume(route, baseVolume);
+        }
 
         if (route.mode === "media" && route.audio && currentSeconds >= route.endSeconds) {
           if (gridCell.playbackMode === "loop") {
             route.audio.currentTime = getTrimStartSeconds(gridCell);
             scheduleEnvelope(route.envelopeGain, gridCell, route.audio.currentTime, route.endSeconds);
           } else {
-            endedCellKeys.push(cell.cellKey);
+            endedCellKeys.push(cellKey);
             return [];
           }
         }
@@ -823,30 +1135,25 @@ export function useAudioEngine(
           // a feature: the audible result is the same, so without a counter a broken `isLast` would
           // be silently covered up by its own safety net.
           recordSegment("watchdog");
-          endedCellKeys.push(cell.cellKey);
+          endedCellKeys.push(cellKey);
           return [];
         }
 
-        const range = Math.max(0.1, route.endSeconds - route.offsetSeconds);
-        return [
-          {
-            ...cell,
-            progress: Math.min(1, Math.max(0, (currentSeconds - route.offsetSeconds) / range))
-          }
-        ];
+        if (writeProgressNow) {
+          const range = Math.max(0.1, route.endSeconds - route.offsetSeconds);
+          writeProgress(
+            cellKey,
+            Math.min(1, Math.max(0, (currentSeconds - route.offsetSeconds) / range))
+          );
+        }
+        return [cellKey];
       });
 
-      const previous = playingCellsRef.current;
-      const membershipChanged =
-        previous.length !== nextPlayingCells.length ||
-        nextPlayingCells.some((cell, index) => previous[index]?.cellKey !== cell.cellKey);
-      const now = performance.now();
-      if (membershipChanged || now - lastProgressPushRef.current >= PROGRESS_PUSH_INTERVAL_MS) {
+      if (writeProgressNow) {
         lastProgressPushRef.current = now;
-        // A skipped push leaves a stale `progress` in the ref, which costs nothing: the next tick
-        // maps over the ref for identity only and recomputes progress from the route either way.
-        syncPlayingCells(nextPlayingCells);
       }
+      // Membership is the only thing React still hears about, and it changes on a press.
+      syncPlayingCells(nextPlayingCells);
       endedCellKeys.forEach((cellKey) => {
         stopCellKey(cellKey);
       });
@@ -867,7 +1174,7 @@ export function useAudioEngine(
    */
   // Keyed on which cells play, not on `playingCells` itself: that array is rebuilt on every
   // progress push, and pinning the same keys again 20 times a second is pure waste.
-  const playingCellKeySignature = playingCells.map((cell) => cell.cellKey).join("|");
+  const playingCellKeySignature = playingCells.join("|");
   useEffect(() => {
     playbackBufferCache.setPinned(
       Array.from(routeByCellRef.current.values()).map((route) => route.cacheKey)
@@ -875,11 +1182,10 @@ export function useAudioEngine(
   }, [playingCellKeySignature]);
 
   const addPlayingCell = useCallback(
-    (cell: PlayingCell) => {
-      syncPlayingCells([
-        ...playingCellsRef.current.filter((playing) => playing.cellKey !== cell.cellKey),
-        cell
-      ]);
+    (cellKey: string) => {
+      // Reset before the first frame, so a re-triggered pad never shows the previous cue's tail.
+      writeProgress(cellKey, 0);
+      syncPlayingCells([...playingCellsRef.current.filter((key) => key !== cellKey), cellKey]);
       startProgressLoop();
     },
     [startProgressLoop, syncPlayingCells]
@@ -949,7 +1255,7 @@ export function useAudioEngine(
       if (context.state === "suspended") {
         await context.resume();
       }
-      addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
+      addPlayingCell(cellKey);
       await audio.play();
     },
     [addPlayingCell, getCacheKey, masterMuted, masterVolume, stopCellKey]
@@ -984,6 +1290,102 @@ export function useAudioEngine(
       }
     },
     [stopCellKey]
+  );
+
+  /**
+   * Continues an audible cue whose next segment could not be decoded, using the full decode.
+   *
+   * The rule this enforces is the pair of the one `planMediaSegments` enforces. That one says a cue
+   * that cannot be continued must never be STARTED; this one says a cue that has been started must
+   * never be DROPPED. Before it, a single failed range read ended the cue at whatever had already
+   * been scheduled — most visibly the 0.5 s head, which is what a user reports as "the pad plays
+   * half a second and stops". Silence is the one outcome worse than any amount of memory.
+   *
+   * Cost, stated rather than hidden: the whole file is decoded, and the tail of the window is
+   * copied out of it — the same price the app paid for every cue before byte-range decoding
+   * existed. It is paid only on a path that would otherwise have produced silence, and
+   * `partial.segments.recovered` counts every time it happens, because a recovered cue sounds
+   * nearly right and would otherwise hide a range path that had stopped working.
+   *
+   * The resume position is derived from the clock AFTER the decode, and scheduled no earlier than
+   * the handoff the outgoing segment is already stopping at: earlier would overlap two sources on
+   * one gain, later would leave a hole longer than the failure itself.
+   */
+  const recoverRouteFromFullDecode = useCallback(
+    async (input: {
+      route: AudioRoute;
+      cellKey: string;
+      mediaId: string;
+      mono: boolean;
+      t0: number;
+      windowStartSeconds: number;
+      windowEndSeconds: number;
+      isStale: () => boolean;
+    }): Promise<boolean> => {
+      const { route, cellKey, isStale } = input;
+      const context = route.context;
+
+      const full = await getFullBuffer(input.mediaId);
+      if (!full || isStale()) {
+        return false;
+      }
+
+      let at = context.currentTime + SCHEDULE_LEAD_SECONDS;
+      for (const segment of route.segments) {
+        if (segment.stopAtContextTime !== null && segment.stopAtContextTime > at) {
+          at = segment.stopAtContextTime;
+        }
+      }
+      const resumeSeconds = input.windowStartSeconds + (at - input.t0);
+      if (resumeSeconds >= input.windowEndSeconds) {
+        // Nothing of the window is left to play, so there is nothing to recover: the cue is simply
+        // over, and the caller ends it the ordinary way.
+        return false;
+      }
+
+      // Sliced rather than played whole: the source must start at the resume position with the
+      // window's own end, and holding the entire track on the route would undo the bound the
+      // segments exist for. `mono` comes from the plan captured at press time, so the tail cannot
+      // change channel count mid-cue.
+      const tail = sliceToAudioBuffer(full, {
+        startSeconds: resumeSeconds,
+        endSeconds: input.windowEndSeconds,
+        mono: input.mono
+      });
+      if (isStale()) {
+        return false;
+      }
+
+      const source = context.createBufferSource();
+      source.buffer = tail;
+      source.connect(route.envelopeGain);
+      const segment: RouteSegment = {
+        source,
+        startSeconds: resumeSeconds,
+        endSeconds: input.windowEndSeconds,
+        atContextTime: at,
+        isLast: true,
+        stopAtContextTime: null
+      };
+      for (const finished of listFinishedSegments(route.segments, context.currentTime)) {
+        finished.source.disconnect();
+      }
+      pruneFinishedSegments(route.segments, context.currentTime);
+      route.segments.push(segment);
+      syncLiveSegments();
+
+      source.onended = () => {
+        if (isStale()) {
+          return;
+        }
+        stopCellKey(cellKey);
+      };
+      // Offset 0: the slice already begins at the resume position.
+      source.start(at, 0);
+      recordSegment("recovered");
+      return true;
+    },
+    [getFullBuffer, stopCellKey, syncLiveSegments]
   );
 
   /**
@@ -1050,12 +1452,17 @@ export function useAudioEngine(
 
           let result: Awaited<ReturnType<typeof decodeMediaRange>> = null;
           try {
-            result = await decodeMediaRange({
-              mediaId: partial.mediaId,
-              startSeconds: planned.startSeconds,
-              endSeconds: planned.bufferEndSeconds,
-              mono: partial.mono
-            });
+            result = await decodeMediaRange(
+              {
+                mediaId: partial.mediaId,
+                startSeconds: planned.startSeconds,
+                endSeconds: planned.bufferEndSeconds,
+                mono: partial.mono
+              },
+              // The cue is audible and the head is 0.5 s long: this decode has a deadline, and the
+              // background lane is where a whole-file warm-up decode sits for seconds.
+              "live"
+            );
           } catch {
             result = null;
           }
@@ -1063,19 +1470,49 @@ export function useAudioEngine(
             return;
           }
           if (!result) {
-            // Nothing to continue with. End the cue the way an ordinary cue ends rather than leaving
-            // a route with no live source.
-            recordSegment("missed");
-            promoteToLast(route, cellKey, token);
+            // A range read that failed is not a reason to stop audio the user is listening to. The
+            // full decode still works — it is what every cue used before this feature — so the cue
+            // continues from where the clock is now, with a dropout as long as the failure.
+            const recovered = await recoverRouteFromFullDecode({
+              route,
+              cellKey,
+              mediaId: partial.mediaId,
+              mono: partial.mono,
+              t0,
+              windowStartSeconds: input.windowStartSeconds,
+              windowEndSeconds: input.windowEndSeconds,
+              isStale
+            });
+            if (isStale()) {
+              return;
+            }
+            if (!recovered) {
+              // Even the full decode could not produce audio, or the window had already run out.
+              // End the cue the way an ordinary cue ends rather than leaving a route with no live
+              // source.
+              recordSegment("missed");
+              promoteToLast(route, cellKey, token);
+            }
             return;
           }
 
           const resolution = resolveLateSegment({
             scheduledAtSeconds: at,
-            nowSeconds: context.currentTime
+            nowSeconds: context.currentTime,
+            // The segment's OWN length, not a fixed 0.25 s. Lateness within it is played as a
+            // dropout — the segment resumes at its correct source position — and only a segment
+            // whose audio is entirely in the past has nothing left to schedule. The fixed limit
+            // meant a chain that lost a quarter of a second to a busy decoder ended the cue,
+            // which on a warming panel is the common case rather than the rare one.
+            maxLatenessSeconds: Math.max(0, planned.endSeconds - planned.startSeconds)
           });
           if (resolution.action === "give-up") {
             recordSegment("missed");
+            if (index < segments.length - 1) {
+              // Skip it and keep the chain: the hole is this segment, not the rest of the track.
+              continue;
+            }
+            // It was the last one, so nothing after it would ever fire `onended` and end the cue.
             promoteToLast(route, cellKey, token);
             return;
           }
@@ -1103,7 +1540,19 @@ export function useAudioEngine(
             isLast,
             stopAtContextTime: null
           };
+          // Structural half of the bound: `onended` is not guaranteed across an iOS audio
+          // interruption, which is the session where a cue runs long enough for this to matter.
+          //
+          // Disconnected as well as dropped. Removing the entry is not enough on its own: the node
+          // stays wired to `envelopeGain`, so the graph keeps it and its buffer reachable, and
+          // `route.segments` - the only list `stopRoute` walks - no longer names it. On the exact
+          // path this prune exists for, that put every segment of the cue back into memory.
+          for (const finished of listFinishedSegments(route.segments, context.currentTime)) {
+            finished.source.disconnect();
+          }
+          pruneFinishedSegments(route.segments, context.currentTime);
           route.segments.push(segment);
+          syncLiveSegments();
 
           source.onended = () => {
             if (isStale()) {
@@ -1111,6 +1560,10 @@ export function useAudioEngine(
             }
             if (!segment.isLast) {
               source.disconnect();
+              // Releases the segment's PCM. Disconnecting the node is not enough: the entry stayed
+              // in `route.segments`, and a source keeps its `buffer` reachable.
+              dropSegment(route.segments, segment);
+              syncLiveSegments();
               return;
             }
             stopCellKey(cellKey);
@@ -1134,7 +1587,7 @@ export function useAudioEngine(
         }
       }
     },
-    [promoteToLast, stopCellKey]
+    [promoteToLast, recoverRouteFromFullDecode, stopCellKey, syncLiveSegments]
   );
 
   const startBufferRoute = useCallback(
@@ -1167,12 +1620,17 @@ export function useAudioEngine(
       const source = context.createBufferSource();
       const envelopeGain = context.createGain();
       const volumeGain = context.createGain();
-      const baseVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, cell.volumeOffset);
+      // The cell term ONLY. Master volume and mute are carried by the shared bus this route
+      // connects into, and `volume.ts` pins that the split reproduces the combined value exactly —
+      // including a +300 % boost, which must keep working.
+      const baseVolume = getCellGainValue(cell.volumeOffset);
 
       source.buffer = buffer;
       source.connect(envelopeGain);
       envelopeGain.connect(volumeGain);
-      volumeGain.connect(context.destination);
+      // Into the shared master bus, not straight to the destination: master volume and mute live on
+      // one node now, so a change is one write instead of one per playing route per frame.
+      volumeGain.connect(getMasterGain(context));
       volumeGain.gain.setValueAtTime(baseVolume, context.currentTime);
       if (!entry.partial) {
         // A streamed route schedules its envelope below instead, anchored to the same explicit
@@ -1221,6 +1679,10 @@ export function useAudioEngine(
         // already playing, so its node is simply released.
         if (!segment.isLast) {
           source.disconnect();
+          // The head of a streamed route, finished and handed off. Same reason as in the chain:
+          // the node keeps its buffer reachable until the entry goes.
+          dropSegment(route.segments, segment);
+          syncLiveSegments();
           return;
         }
         if (cell.playbackMode === "loop") {
@@ -1277,15 +1739,19 @@ export function useAudioEngine(
           });
         }
 
-        addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
+        addPlayingCell(cellKey);
         return true;
       }
 
       source.start(0, startSeconds - entry.sliceStartSeconds, playDurationSeconds);
-      addPlayingCell({ cellKey, mediaId: mediaAsset.id, progress: 0 });
+      addPlayingCell(cellKey);
       return true;
     },
-    [addPlayingCell, getContext, masterMuted, masterVolume, runSegmentChain, stopCellKey]
+    // No `masterVolume` or `masterMuted` here any more: this route only ever writes the CELL term,
+    // and the shared master node carries the rest. Dropping them stops `startBufferRoute` — and
+    // through it `playCell` and the global hotkey listener — from being rebuilt on every tick of the
+    // volume slider.
+    [addPlayingCell, getContext, getMasterGain, runSegmentChain, stopCellKey, syncLiveSegments]
   );
 
   const playCell = useCallback(
@@ -1335,7 +1801,9 @@ export function useAudioEngine(
       const canUseBufferSource = typeof context.createBufferSource === "function";
       if (canUseBufferSource) {
         const cacheKey = warmCacheKey;
-        const entry = await loadPlaybackEntry(cell, cell.mediaId, cacheKey);
+        // The live lane: this decode is what the user is waiting to hear, and the background lane
+        // may be full of warm-up work for cells nobody has touched.
+        const entry = await loadPlaybackEntry(cell, cell.mediaId, cacheKey, "live");
         if (!entry || playTokenByCellRef.current.get(cellKey) !== token) {
           return;
         }
@@ -1418,7 +1886,8 @@ export function useAudioEngine(
                   mediaId: cell.mediaId,
                   trimStartMs: cell.trimStartMs,
                   trimEndMs: cell.trimEndMs,
-                  mono: monoPlayback
+                  mono: monoPlayback,
+                  loop: cell.playbackMode === "loop"
                 }),
                 cell
               }
@@ -1506,17 +1975,7 @@ export function useAudioEngine(
       .filter((target) => playbackBufferCache.has(target.cacheKey))
       .map((target) => target.cacheKey);
     if (readyKeys.length > 0) {
-      setWarmedKeys((current) => {
-        const missing = readyKeys.filter((key) => current[key] !== "ready");
-        if (missing.length === 0) {
-          return current;
-        }
-        const next = { ...current };
-        for (const key of missing) {
-          next[key] = "ready";
-        }
-        return next;
-      });
+      queueWarmedKeys(readyKeys.map((key) => [key, "ready"] as const));
     }
 
     // Media that more than one target needs is staged so its full decode is shared instead of
@@ -1533,7 +1992,7 @@ export function useAudioEngine(
     // one unshared decode, never a wrong buffer.
     const pendingByMedia = new Map<string, number>();
     for (const target of uniqueTargets) {
-      const asset = mediaRef.current.find((candidate) => candidate.id === target.mediaId);
+      const asset = mediaByIdRef.current.get(target.mediaId);
       if (isPartialPathLikely(target.cell, asset?.durationMs ?? null)) {
         continue;
       }
@@ -1581,13 +2040,17 @@ export function useAudioEngine(
 
           // Predictive skip: decoding something that would be evicted on arrival costs a full
           // decode plus a transient allocation spike, for nothing.
-          const asset = mediaRef.current.find((candidate) => candidate.id === target.mediaId);
+          const asset = mediaByIdRef.current.get(target.mediaId);
           const estimate = estimatePcmBytes(
             getTrimmedDurationMs(target.cell, asset?.durationMs ?? null),
-            monoRef.current
+            monoRef.current,
+            getEngineSampleRate()
           );
-          const stats = playbackBufferCache.stats();
-          const budgetBytes = stats.budgetBytes;
+          // `stats()` walks every entry three times and allocates a Set each time. The budget is
+          // null on every device by default, so this used to be pure waste on the warm-up hot path
+          // for every user — computed, then discarded by the very next line.
+          const budgetBytes = playbackBufferCache.budgetBytes();
+          const stats = budgetBytes === null ? null : playbackBufferCache.stats();
           // Measured against what eviction may NOT touch — the active panel plus anything a live
           // route is using — rather than against everything cached. Other panels' buffers are
           // evictable, so counting them here would make the panel the user is actually looking at
@@ -1595,7 +2058,7 @@ export function useAudioEngine(
           //
           // No margin below the budget: the estimate already errs high, because the channel count
           // is unknown before decoding and stereo is assumed.
-          const unavoidableBytes = stats.protectedBytes + reservedBytes;
+          const unavoidableBytes = (stats?.protectedBytes ?? 0) + reservedBytes;
           const affordable =
             budgetBytes === null ||
             (estimate === null
@@ -1615,11 +2078,17 @@ export function useAudioEngine(
             });
           }
 
-          // A cue starting mid-file needs the decoder offset measured before its window can be
-          // read as a range at all, and measuring costs two short decodes — so it happens here, in
-          // the warm-up, and only for the cells that actually need it. A cue starting at the head
-          // never does: a decode from byte 0 is already on the app's timeline.
-          if ((target.cell.trimStartMs ?? 0) > 0) {
+          // A cue that reads any frame other than the first needs the decoder offset measured
+          // before that range can be decoded at all, and measuring costs two short decodes — so it
+          // happens here, in the warm-up, and only for the cells that actually need it.
+          //
+          // Two ways to need it, and gating on the first alone broke the second. A TRIMMED cue
+          // starts mid-file, which is obvious. An UNTRIMMED long track starts at byte 0 and needs
+          // nothing for its head — but every segment after the head starts mid-file, so
+          // `decodeMp3Range` refused all of them, `promoteToLast` ended the cue at the head, and a
+          // three-minute track played 0.5 seconds and went silent. Invisible until the container
+          // duration fix made untrimmed MP3s reach the streaming path at all.
+          if (needsAlignmentMeasurement(target.cell, asset?.durationMs ?? null)) {
             await ensureMp3Alignment(target.mediaId).catch(() => false);
             if (warmupRunRef.current !== runId) {
               releaseStaged(target.mediaId);
@@ -1665,7 +2134,7 @@ export function useAudioEngine(
     return () => {
       window.clearTimeout(timer);
     };
-  }, [decodeFullBuffer, warmupSignature, warmMedia]);
+  }, [decodeFullBuffer, queueWarmedKeys, warmupSignature, warmMedia]);
 
   /**
    * A purge must also drop the matching warm state: a stale "ready" entry would suppress the
@@ -1676,16 +2145,33 @@ export function useAudioEngine(
       onMediaCachePurge((mediaIds) => {
         purgeGenerationRef.current += 1;
 
-        setWarmedKeys((current) => {
-          if (mediaIds === null) {
-            return Object.keys(current).length === 0 ? current : {};
+        // The queue is emptied first, and this write is direct rather than queued. A purge is the
+        // one case that must not be overtaken: a buffered `ready` for media that no longer exists
+        // would land a frame later and light up a cell whose PCM and blob are both gone.
+        if (mediaIds === null) {
+          pendingWarmRef.current.clear();
+        } else {
+          for (const key of [...pendingWarmRef.current.keys()]) {
+            if (mediaIds.includes(getMediaIdFromKey(key))) {
+              pendingWarmRef.current.delete(key);
+            }
           }
+        }
+
+        const current = warmedKeysRef.current;
+        let purged: Record<string, WarmState> = current;
+        if (mediaIds === null) {
+          purged = {};
+        } else {
           const dropped = new Set(mediaIds);
-          const next = Object.fromEntries(
+          purged = Object.fromEntries(
             Object.entries(current).filter(([key]) => !dropped.has(getMediaIdFromKey(key)))
           );
-          return Object.keys(next).length === Object.keys(current).length ? current : next;
-        });
+        }
+        if (Object.keys(purged).length !== Object.keys(current).length) {
+          warmedKeysRef.current = purged;
+          setWarmedKeys(purged);
+        }
 
         for (const key of [...inflightRef.current.keys()]) {
           if (mediaIds === null || mediaIds.includes(getMediaIdFromKey(key))) {
@@ -1705,16 +2191,28 @@ export function useAudioEngine(
   );
 
   useEffect(() => {
+    // One write for master and mute, on one node.
+    const master = masterGainRef.current;
+    if (master) {
+      master.gain.setValueAtTime(
+        getMasterGainValue(masterVolume, masterMuted),
+        master.context.currentTime
+      );
+    }
     routeByCellRef.current.forEach((route, cellId) => {
-      const cell = cellsRef.current.find((candidate) => getCellKey(panelId, candidate.id) === cellId);
-      const nextVolume = masterMuted ? 0 : getEffectiveVolume(masterVolume, cell?.volumeOffset ?? 0);
-      setRouteVolume(route, nextVolume);
+      const cell = cellByKeyRef.current.get(cellId);
+      if (route.mode === "media") {
+        // No shared bus on this path; it keeps the combined value.
+        setRouteVolume(route, masterMuted ? 0 : getEffectiveVolume(masterVolume, cell?.volumeOffset ?? 0));
+        return;
+      }
+      setRouteVolume(route, getCellGainValue(cell?.volumeOffset ?? 0));
     });
   }, [cells, masterMuted, masterVolume, panelId]);
 
   useEffect(() => {
     routeByCellRef.current.forEach((route, cellId) => {
-      const cell = cellsRef.current.find((candidate) => getCellKey(panelId, candidate.id) === cellId);
+      const cell = cellByKeyRef.current.get(cellId);
       if (!cell) {
         return;
       }

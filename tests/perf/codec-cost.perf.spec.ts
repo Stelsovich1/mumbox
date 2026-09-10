@@ -1,9 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join } from "node:path";
 
-import { installPerfInstrumentation, readPerfProbe } from "./support/instrument";
+import {
+  installPerfInstrumentation,
+  perfGoto,
+  readPerfProbe
+} from "./support/instrument";
 import { expectWithinBaseline, median } from "./support/baseline";
 
 /**
@@ -32,18 +36,15 @@ test("decode cost of a real audio corpus", async ({ page }) => {
   );
   test.skip(names.length === 0, "tests/fixtures/audio/ contains no supported audio files.");
 
-  const files = await Promise.all(
-    names.slice(0, 12).map(async (name) => ({
-      name,
-      mimeType: "audio/mpeg",
-      buffer: await readFile(join(FIXTURE_DIR, name))
-    }))
-  );
+  // PATHS, not buffers. `setInputFiles` refuses a payload over 50 MB, and a realistic corpus of
+  // twelve tracks is roughly twice that - so reading them into memory here made the spec fail as
+  // soon as it stopped being skipped, which is the one moment it was supposed to start working.
+  const files = names.slice(0, 12).map((name) => ({ name, path: join(FIXTURE_DIR, name) }));
 
   await installPerfInstrumentation(page);
-  await page.goto("/");
+  await perfGoto(page, "/");
 
-  await page.getByTestId("audio-file-input").setInputFiles(files);
+  await page.getByTestId("audio-file-input").setInputFiles(files.map((file) => file.path));
   const importDialog = page.getByRole("dialog", { name: "Импорт аудио" });
   await expect(importDialog).toBeVisible();
   await page.getByLabel("Выбрать все аудио").click();

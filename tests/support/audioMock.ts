@@ -35,6 +35,16 @@ export type AudioMockOptions = {
    * either of them survives every test.
    */
   failNthRangeRead?: number;
+  /**
+   * Delays the Nth `Blob.slice(...).arrayBuffer()` by `ms` (1-based); 0 disables it.
+   *
+   * Failing a read and DELAYING one are different defects with different answers. A delayed segment
+   * is the ordinary case on a device that is still warming a panel: the read succeeds, just after
+   * the moment it was supposed to start. Without this, the lateness policy in `runSegmentChain` has
+   * no test at all — the audio clock only moves when a test moves it, so by the time a jump lands
+   * every segment has long since been scheduled and nothing is ever late.
+   */
+  slowNthRangeRead?: { nth: number; ms: number };
 };
 
 export type MockCurveCall = { curve: number[]; startTime: number; duration: number };
@@ -631,7 +641,7 @@ const MOCK_SCRIPT = (options: Required<AudioMockOptions>) => {
     originalRevokeObjectURL(url);
   };
 
-  if (options.failNthRangeRead > 0) {
+  if (options.failNthRangeRead > 0 || options.slowNthRangeRead.nth > 0) {
     // Wraps `arrayBuffer` on slices only, by counting every call and rejecting the chosen one. The
     // byte-range reader is the only thing in the app that reads blobs this way, so this is a
     // targeted failure injection rather than a blanket outage.
@@ -647,6 +657,14 @@ const MOCK_SCRIPT = (options: Required<AudioMockOptions>) => {
       reads += 1;
       if (reads === options.failNthRangeRead) {
         return Promise.reject(new Error("injected range-read failure"));
+      }
+      if (reads === options.slowNthRangeRead.nth) {
+        const delayMs = options.slowNthRangeRead.ms;
+        return new Promise<ArrayBuffer>((resolve, reject) => {
+          setTimeout(() => {
+            original.call(this).then(resolve, reject);
+          }, delayMs);
+        });
       }
       return original.call(this);
     };
@@ -673,7 +691,8 @@ function resolveOptions(options: AudioMockOptions, bufferSource: boolean): Requi
     decodeDelayMs: options.decodeDelayMs ?? 0,
     contextState: options.contextState ?? "running",
     bufferSource,
-    failNthRangeRead: options.failNthRangeRead ?? 0
+    failNthRangeRead: options.failNthRangeRead ?? 0,
+    slowNthRangeRead: options.slowNthRangeRead ?? { nth: 0, ms: 0 }
   };
 }
 

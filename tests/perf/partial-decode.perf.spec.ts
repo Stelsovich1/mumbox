@@ -3,7 +3,12 @@ import { test } from "@playwright/test";
 import { diagPartial, diagPcmBytes } from "../support/diag";
 import { seedProject } from "../support/seedProject";
 import { expectWithinBaseline } from "./support/baseline";
-import { DecodeSample, installPerfInstrumentation, readPerfProbe } from "./support/instrument";
+import {
+  DecodeSample,
+  installPerfInstrumentation,
+  perfGoto,
+  readPerfProbe
+} from "./support/instrument";
 
 /**
  * The byte-range path against the real decoder.
@@ -43,7 +48,7 @@ test("a trimmed window of a long media never decodes the whole file", async ({ p
     trimStartMs: 0,
     trimEndMs: 5000
   });
-  await page.goto("/");
+  await perfGoto(page, "/");
   await waitForWarm(page, 12);
 
   const probe = await readPerfProbe(page);
@@ -99,7 +104,7 @@ test("a panel of whole long tracks warms to heads, not to tracks", async ({ page
     spec: { seconds: 180, channels: 2, freqHz: 220 },
     filledCellsPerPanel: 12
   });
-  await page.goto("/");
+  await perfGoto(page, "/");
   await waitForWarm(page, 12);
 
   const probe = await readPerfProbe(page);
@@ -156,7 +161,7 @@ test("the same panel with the partial path off records the pre-change numbers", 
     spec: { seconds: 180, channels: 2, freqHz: 220 },
     filledCellsPerPanel: 12
   });
-  await page.goto("/?partial=0");
+  await perfGoto(page, "/?partial=0");
   await waitForWarm(page, 12);
 
   const probe = await readPerfProbe(page);
@@ -195,7 +200,7 @@ test("a streamed cell answers a press as fast as a fully decoded one", async ({ 
     spec: { seconds: 60, channels: 2, freqHz: 220 },
     filledCellsPerPanel: 6
   });
-  await page.goto("/");
+  await perfGoto(page, "/");
   await waitForWarm(page, 6);
 
   const panelId = seed.panelIds[0] ?? "";
@@ -245,7 +250,7 @@ test("144 cells of long tracks warm without decoding any of them whole", async (
     spec: { seconds: 60, channels: 2, freqHz: 220 },
     filledCellsPerPanel: 144
   });
-  await page.goto("/");
+  await perfGoto(page, "/");
   await waitForWarm(page, 144);
 
   const probe = await readPerfProbe(page);

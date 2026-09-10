@@ -4,6 +4,7 @@ import type { Page } from "@playwright/test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { makeWavBuffer } from "../support/audioFixtures";
 import { installFilePickerMock, readPickerCalls } from "../support/fileSystemAccessMock";
 import { readProjectRowIds, seedProjectRows } from "../support/seedProjects";
 import type { SeededProjectRow } from "../support/seedProjects";
@@ -462,4 +463,61 @@ test("a default project name avoids one that is already taken", async ({ page })
   await page.getByRole("menuitem", { name: "Сохранить проект" }).click();
 
   await expect(page.getByLabel("Имя проекта")).toHaveValue("Новый проект_2");
+});
+
+/**
+ * Deduplication must be proven by the bytes, never guessed from the file name.
+ *
+ * The fallback rule — same name, same byte length — was allowed to assert IDENTITY, and it was the
+ * DEFAULT path, not an edge case: the current project's assets only gain a content hash as a side
+ * effect of saving, so a project that has never been saved carried none and the whole merge ran on
+ * name and size. Two different `bell.wav` of the same length is routine for jingles exported from
+ * one preset, and the failure is silent: the incoming cell points at the other project's audio and
+ * its own blob is never written.
+ */
+test("merging two same-length files with different audio keeps both", async ({ page }) => {
+  await installFilePickerMock(page, { mode: "unsupported" });
+  await installAudioMock(page);
+  await page.goto("/");
+
+  // Identical byte length by construction — same duration, same channels, same rate — and audibly
+  // different: 220 Hz against 440 Hz.
+  const lowBell = { name: "bell.wav", mimeType: "audio/wav", buffer: makeWavBuffer({ seconds: 1, channels: 1, freqHz: 220 }) };
+  const highBell = { name: "bell.wav", mimeType: "audio/wav", buffer: makeWavBuffer({ seconds: 1, channels: 1, freqHz: 440 }) };
+  expect(lowBell.buffer.length).toBe(highBell.buffer.length);
+
+  await page.getByTestId("audio-file-input").setInputFiles(lowBell);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await page.getByRole("button", { name: "Пустая ячейка 1", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать bell.wav" }).click();
+  await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
+
+  const download = await saveProjectAs(page, "Низкий", "low-bell");
+  const projectPath = join(tmpdir(), `dedup-${Date.now().toString()}.mumbox`);
+  await download.saveAs(projectPath);
+
+  // Start over with the OTHER bell, so the two projects hold different audio under one name.
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByText("Стереть все данные").click();
+  await page.getByRole("button", { name: "Да, стереть" }).click();
+  await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
+
+  await page.getByTestId("audio-file-input").setInputFiles(highBell);
+  await page.getByLabel("Выбрать все аудио").click();
+  await page.getByRole("button", { name: "Сохранить" }).click();
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Объединить с проектом" }).click();
+  await page.getByTestId("project-file-input").setInputFiles(projectPath);
+
+  await expect(page.getByText(/Добавлено панелей: 1/)).toBeVisible();
+  // The current project was never saved, so it carries no hashes of its own — which is exactly the
+  // case that used to fall back to name and size. `prepareMerge` now hashes both sides.
+  await expect(page.getByText(/дубликатов аудио пропущено/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Проект" }).click();
+  await page.getByRole("menuitem", { name: "Медиатека" }).click();
+  await expect(page.getByRole("checkbox", { name: "Выбрать запись bell.wav" })).toHaveCount(2);
 });

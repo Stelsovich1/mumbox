@@ -24,19 +24,27 @@ test.describe("keys", () => {
       mediaId: "media-1",
       trimStartMs: null,
       trimEndMs: null,
-      mono: false
+      mono: false,
+      loop: false
     });
     const withZero = makePlaybackBufferKey({
       mediaId: "media-1",
       trimStartMs: 0,
       trimEndMs: null,
-      mono: false
+      mono: false,
+      loop: false
     });
     expect(withNull).toBe(withZero);
   });
 
-  test("different trims and different channel modes produce different keys", () => {
-    const base = { mediaId: "media-1", trimStartMs: 0, trimEndMs: null, mono: false };
+  test("different trims, channel modes and playback modes produce different keys", () => {
+    const base = {
+      mediaId: "media-1",
+      trimStartMs: 0,
+      trimEndMs: null,
+      mono: false,
+      loop: false
+    };
     expect(makePlaybackBufferKey({ ...base, trimStartMs: 1000 })).not.toBe(
       makePlaybackBufferKey(base)
     );
@@ -44,6 +52,24 @@ test.describe("keys", () => {
       makePlaybackBufferKey(base)
     );
     expect(makePlaybackBufferKey({ ...base, mono: true })).not.toBe(makePlaybackBufferKey(base));
+    // A looping cell is never streamed, so it must not share an entry with a `once` cell on the
+    // same media and trim — that cell caches a streamed HEAD, and a loop reading it plays once and
+    // stops, because the chain's `onended` has no loop restart.
+    expect(makePlaybackBufferKey({ ...base, loop: true })).not.toBe(makePlaybackBufferKey(base));
+  });
+
+  test("the key still ends in the channel marker and keeps the trim pair contiguous", () => {
+    // Both are read by e2e assertions: the tail tells a mono entry from a stereo one, and the trim
+    // pair is matched as a run. The loop flag was inserted before the channel marker for that.
+    const key = makePlaybackBufferKey({
+      mediaId: "media-1",
+      trimStartMs: 1200,
+      trimEndMs: 7400,
+      mono: true,
+      loop: true
+    });
+    expect(key.endsWith("|m")).toBe(true);
+    expect(key.includes("|1200|7400|")).toBe(true);
   });
 
   test("the media id round-trips out of the key", () => {
@@ -51,7 +77,8 @@ test.describe("keys", () => {
       mediaId: "media-abc-123",
       trimStartMs: 500,
       trimEndMs: 900,
-      mono: true
+      mono: true,
+      loop: false
     });
     expect(getMediaIdFromKey(key)).toBe("media-abc-123");
     expect(getMediaIdFromKey("no-separator")).toBe("no-separator");
@@ -62,13 +89,15 @@ test.describe("keys", () => {
       mediaId: "m",
       trimStartMs: 0,
       trimEndMs: null,
-      mono: false
+      mono: false,
+      loop: false
     });
     const zero = makePlaybackBufferKey({
       mediaId: "m",
       trimStartMs: 0,
       trimEndMs: 0,
-      mono: false
+      mono: false,
+      loop: false
     });
     expect(absent).not.toBe(zero);
   });
@@ -81,11 +110,17 @@ test.describe("byte math", () => {
   });
 
   test("estimates decoded size from duration, assuming stereo", () => {
-    expect(estimatePcmBytes(1000, false)).toBe(352_800);
-    expect(estimatePcmBytes(1000, true)).toBe(176_400);
-    expect(estimatePcmBytes(null, false)).toBeNull();
-    expect(estimatePcmBytes(Number.NaN, false)).toBeNull();
-    expect(estimatePcmBytes(-1, false)).toBeNull();
+    // The rate is explicit now. It used to be hardcoded to 44 100, which stopped being a fact once
+    // decoding started following the hardware — and on a 48 kHz device that default would have
+    // under-estimated every buffer by 8.8 %, in the direction that costs a jetsam rather than a
+    // skipped warm-up.
+    expect(estimatePcmBytes(1000, false, 44_100)).toBe(352_800);
+    expect(estimatePcmBytes(1000, true, 44_100)).toBe(176_400);
+    expect(estimatePcmBytes(1000, false, 48_000)).toBe(384_000);
+    expect(estimatePcmBytes(null, false, 44_100)).toBeNull();
+    expect(estimatePcmBytes(Number.NaN, false, 44_100)).toBeNull();
+    expect(estimatePcmBytes(-1, false, 44_100)).toBeNull();
+    expect(estimatePcmBytes(1000, false, 0)).toBeNull();
   });
 });
 
@@ -285,19 +320,22 @@ test.describe("invalidation", () => {
       mediaId: "m1",
       trimStartMs: 0,
       trimEndMs: null,
-      mono: false
+      mono: false,
+      loop: false
     });
     const keyB = makePlaybackBufferKey({
       mediaId: "m1",
       trimStartMs: 1000,
       trimEndMs: 2000,
-      mono: true
+      mono: true,
+      loop: false
     });
     const keyOther = makePlaybackBufferKey({
       mediaId: "m2",
       trimStartMs: 0,
       trimEndMs: null,
-      mono: false
+      mono: false,
+      loop: false
     });
     cache.set(keyA, entry(400));
     cache.set(keyB, entry(200));
@@ -353,4 +391,21 @@ test.describe("invalidation", () => {
     expect(stats.hits).toBe(2);
     expect(stats.misses).toBe(1);
   });
+});
+
+test("reports the budget without walking the entries", () => {
+  // Read on the warm-up hot path once per target, where `stats()` — three passes plus a Set each —
+  // was being computed and then discarded, because the budget is null by default on every device.
+  const cache = createAudioBufferCache(null);
+  expect(cache.budgetBytes()).toBeNull();
+
+  cache.setBudgetBytes(4096);
+  expect(cache.budgetBytes()).toBe(4096);
+  expect(cache.budgetBytes()).toBe(cache.stats().budgetBytes);
+
+  // Normalisation has to agree with `stats()`, or the two readings disagree about whether a budget
+  // exists at all and the warm-up takes the wrong branch.
+  cache.setBudgetBytes(0);
+  expect(cache.budgetBytes()).toBeNull();
+  expect(cache.stats().budgetBytes).toBeNull();
 });

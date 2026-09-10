@@ -8,6 +8,7 @@ import {
   findFirstFrame,
   findTrailerOffset,
   frameForSample,
+  getIndexedDurationSeconds,
   indexBytes,
   MP3_BIT_RESERVOIR_BYTES,
   parseId3v2Size,
@@ -544,4 +545,90 @@ test("indexBytes reports the table's real cost", () => {
   // because an hour-long set is 137 800 frames and 32 of those would be 17 MB, not 1 MB.
   expect(indexBytes(index)).toBe(index.byteOffsets.byteLength);
   expect(indexBytes(index)).toBe(4096);
+});
+
+/**
+ * `getIndexedDurationSeconds` decides whether a media can be streamed at all: `planMediaSegments`
+ * bails on a null duration, and an untrimmed track that cannot be streamed pays a full decode.
+ *
+ * The branch ORDER is the whole subject here. A freshly built index always has `frameCount === 0`,
+ * so a guard on that placed before the declared-count fallback returns null for every file whose
+ * opening frames are not uniform — which is every 192 kbps / 44.1 kHz file, because the frame is
+ * 626.94 bytes and the padding bit alternates 626/627. Measured on a real 16-file corpus:
+ * `constantFrameBytes` was null for all sixteen.
+ */
+test.describe("indexed duration", () => {
+  function makeIndex(overrides: {
+    declaredFrameCount?: number | null;
+    sampleRate?: number;
+    samplesPerFrame?: number;
+  }) {
+    return createMp3FrameIndex({
+      version: "mpeg1",
+      sampleRate: overrides.sampleRate ?? 44100,
+      channels: 2,
+      samplesPerFrame: overrides.samplesPerFrame ?? 1152,
+      firstFrameOffset: 0,
+      audioEndOffset: 100_000,
+      constantFrameBytes: null,
+      hasXingHeader: overrides.declaredFrameCount != null,
+      declaredFrameCount: overrides.declaredFrameCount ?? null
+    });
+  }
+
+  test("uses the declared frame count while the table is still empty", () => {
+    // The case that was broken: nothing has been scanned yet, but the encoder already told us.
+    const index = makeIndex({ declaredFrameCount: 11_628 });
+    expect(index.frameCount).toBe(0);
+    expect(getIndexedDurationSeconds(index)).toBeCloseTo((11_628 * 1152) / 44100, 6);
+  });
+
+  test("prefers a completed scan over the declared count", () => {
+    // A scan is exact; a Xing tally can disagree with the stream by a frame or two.
+    const index = makeIndex({ declaredFrameCount: 11_628 });
+    index.byteOffsets[0] = 0;
+    index.frameCount = 10;
+    index.complete = true;
+    expect(getIndexedDurationSeconds(index)).toBeCloseTo((10 * 1152) / 44100, 6);
+  });
+
+  test("ignores a partial scan in favour of the declared count", () => {
+    // Mid-scan the table covers only what playback has needed so far, so its count is not a
+    // duration. Reading it as one would shorten every cue whose trim end is "to the end".
+    const index = makeIndex({ declaredFrameCount: 11_628 });
+    index.byteOffsets[0] = 0;
+    index.frameCount = 10;
+    index.complete = false;
+    expect(getIndexedDurationSeconds(index)).toBeCloseTo((11_628 * 1152) / 44100, 6);
+  });
+
+  test("a completed scan with no frames defers to the declared count", () => {
+    // The boundary between the scan being authoritative and the scan saying nothing. Relaxing it
+    // survived a mutation round: an empty completed index would report 0 s, planMediaSegments
+    // would bail on a zero duration, and that media would pay a full decode.
+    const index = makeIndex({ declaredFrameCount: 11_628 });
+    index.complete = true;
+    expect(index.frameCount).toBe(0);
+    expect(getIndexedDurationSeconds(index)).toBeCloseTo((11_628 * 1152) / 44100, 6);
+  });
+
+  test("returns null when neither a completed scan nor a declared count exists", () => {
+    // Nine of sixteen files in the real corpus land here — no Xing, no Info, no VBRI. They are
+    // streamable only because the caller passes the duration it measured at import.
+    expect(getIndexedDurationSeconds(makeIndex({ declaredFrameCount: null }))).toBeNull();
+  });
+
+  test("treats a zero or negative declared count as no answer", () => {
+    expect(getIndexedDurationSeconds(makeIndex({ declaredFrameCount: 0 }))).toBeNull();
+  });
+
+  test("reports null rather than dividing by a zero sample rate", () => {
+    expect(getIndexedDurationSeconds(makeIndex({ declaredFrameCount: 100, sampleRate: 0 }))).toBeNull();
+  });
+
+  test("scales with samplesPerFrame, which is 576 on MPEG-2", () => {
+    // A hardcoded 1152 would double the reported duration of a 24 kHz file.
+    const index = makeIndex({ declaredFrameCount: 1000, samplesPerFrame: 576, sampleRate: 24000 });
+    expect(getIndexedDurationSeconds(index)).toBeCloseTo((1000 * 576) / 24000, 6);
+  });
 });

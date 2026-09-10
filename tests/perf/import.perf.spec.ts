@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { makeWavBuffer } from "../support/audioFixtures";
 import { readStorageEstimate } from "../support/seedProject";
 import { expectWithinBaseline } from "./support/baseline";
-import { installPerfInstrumentation } from "./support/instrument";
+import {
+  installPerfInstrumentation,
+  perfGoto
+} from "./support/instrument";
 
 /**
  * Import cost through the real file input, which is the only path that exercises duration reading
@@ -27,7 +30,7 @@ test("importing a folder of files stays within its baseline", async ({ page }) =
   }
 
   await installPerfInstrumentation(page);
-  await page.goto("/");
+  await perfGoto(page, "/");
 
   const dialogStartedAt = Date.now();
   await page.getByTestId("audio-file-input").setInputFiles(paths);

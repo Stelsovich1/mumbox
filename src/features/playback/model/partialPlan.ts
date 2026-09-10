@@ -55,8 +55,14 @@ export const SEGMENT_MARGIN_SECONDS = 0.06;
  */
 export const SEGMENT_SECONDS_LADDER = [4, 8, 16] as const;
 /**
- * How many segments ahead to fetch. With a 16 s ceiling this bounds a playing cue to head plus
- * about 32 s of resident PCM — roughly 11 MiB — instead of the whole track.
+ * How many segments ahead to fetch.
+ *
+ * The bound it expresses is enforced by `routeSegments.ts`, not by this constant: a route releases
+ * each non-last segment as its `onended` fires, and prunes defensively before every push because
+ * `onended` is not guaranteed across an iOS audio interruption. Until that existed the comment here
+ * described an intention nothing implemented — every segment stayed on the route for the life of
+ * the cue, so a 60 s window held 21 273 848 bytes rather than the ~11 MiB claimed. Measured after
+ * the fix: 5 468 400 bytes, i.e. the head plus the lookahead.
  */
 export const SEGMENT_LOOKAHEAD = 2;
 /**

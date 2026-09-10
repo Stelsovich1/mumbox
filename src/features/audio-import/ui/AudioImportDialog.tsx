@@ -38,6 +38,8 @@ type AudioImportDialogProps = {
   onReady: () => void;
   onLoadingChange: (loading: boolean) => void;
   onProgress?: (progress: MediaStorageProgress | null) => void;
+  /** Reported when saving to storage fails, so the dialog does not have to own the wording. */
+  onError?: (message: string) => void;
 };
 
 const IMPORT_ROW_HEIGHT = 74;
@@ -59,7 +61,8 @@ export function AudioImportDialog({
   onSave,
   onReady,
   onLoadingChange,
-  onProgress
+  onProgress,
+  onError
 }: AudioImportDialogProps) {
   const [drafts, setDrafts] = useState<MediaDraft[]>([]);
   const { selectedIds, toggle: toggleDraftSelection, setMany, clear: clearSelection } = useRowSelection();
@@ -194,13 +197,21 @@ export function AudioImportDialog({
   const handleSave = async () => {
     stopPreview();
     onLoadingChange(true);
-    const media = await saveImportedMedia(
-      drafts.filter((draft) => selectedIds.has(draft.id)),
-      onProgress
-    );
-    onProgress?.(null);
-    onLoadingChange(false);
-    onSave(media);
+    try {
+      const media = await saveImportedMedia(
+        drafts.filter((draft) => selectedIds.has(draft.id)),
+        onProgress
+      );
+      onSave(media);
+    } catch {
+      // The writer rolled its own blobs back; what must not happen here is the backdrop staying
+      // up. An unhandled rejection left `onLoadingChange(false)` unreached and the app unusable
+      // until a reload.
+      onError?.("Не удалось сохранить аудио в хранилище браузера");
+    } finally {
+      onProgress?.(null);
+      onLoadingChange(false);
+    }
   };
 
   useEffect(() => stopPreview, []);

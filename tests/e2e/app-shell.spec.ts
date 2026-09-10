@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+
+import { writeSeededAppState } from "../support/seedProject";
 import type { Page } from "@playwright/test";
 import { mkdir, readFile, truncate, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -272,12 +274,10 @@ function makeStoredCell(id: string, mediaId: string | null) {
 }
 
 async function seedStoredState(page: Page, state: unknown) {
-  await page.addInitScript(
-    ({ key, value }) => {
-      localStorage.setItem(key, JSON.stringify(value));
-    },
-    { key: "mumbox:state:v1", value: state }
-  );
+  // The layout lives in IndexedDB now, and the write has to complete before the app reads it — an
+  // `addInitScript` would race the app's own asynchronous read. `writeSeededAppState` navigates to
+  // a static asset to establish the origin, writes, and leaves the caller to load the app.
+  await writeSeededAppState(page, state);
   await page.goto("/");
 }
 
@@ -2097,6 +2097,28 @@ test("moves cells on touch after a short hold in edit mode", async ({ page }, te
   await expect(page.locator('[data-cell-id="cell-3"]')).toHaveAttribute("data-selected", "true");
 });
 
+/**
+ * The cell above is `draggable="true"` — it holds media and edit mode is on — so it is excluded by
+ * the `:not([draggable="true"])` in `global.css`'s `[data-noselect] button` rule and never proved
+ * anything about the cells a user actually taps during a show. Those are empty cells and, outside
+ * edit mode, every cell: all `draggable="false"`, all matched by that rule at specificity (0,2,1),
+ * which outranks the cell's own (0,1,0) declaration.
+ */
+test("keeps touch-action off the browser for cells that are not draggable", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-landscape", "touch-action is only emulated on mobile");
+  await page.goto("/");
+
+  // Never draggable: no media, so `draggable` is false whatever the mode.
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveCSS("touch-action", "none");
+
+  await importAudio(page, "Tap Pad");
+  await assignFirstCell(page);
+  // Leaving edit mode makes the filled cell non-draggable too — this is the normal playing state.
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute("data-selected", "false");
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveCSS("touch-action", "none");
+});
+
 test("swaps configured cells when dragging onto an occupied cell", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "native drag behavior is desktop-specific");
   await installAudioMock(page);
@@ -2143,6 +2165,63 @@ async function dropAudioFilesOnGrid(page: Page, fileNames: string[]) {
     }
   }, fileNames);
 }
+
+async function probeFileDropPrevention(page: Page) {
+  return await page.locator('[aria-label^="Рабочая сетка"]').evaluate((grid) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([82, 73, 70, 70])], "stray.wav", { type: "audio/wav" })
+    );
+    const prevented: Record<string, boolean> = {};
+    for (const type of ["dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      grid.dispatchEvent(event);
+      prevented[type] = event.defaultPrevented;
+    }
+    return prevented;
+  });
+}
+
+test("swallows native file drops outside edit mode instead of letting the browser open them", async ({
+  page
+}) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const prevented = await probeFileDropPrevention(page);
+
+  expect(prevented.dragover).toBe(true);
+  expect(prevented.drop).toBe(true);
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+});
+
+test("swallows a native file drop landing outside the grid in edit mode", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+  const prevented = await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([82, 73, 70, 70])], "stray.wav", { type: "audio/wav" })
+    );
+    const results: Record<string, boolean> = {};
+    for (const type of ["dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      document.body.dispatchEvent(event);
+      results[type] = event.defaultPrevented;
+    }
+    return results;
+  });
+
+  expect(prevented.dragover).toBe(true);
+  expect(prevented.drop).toBe(true);
+});
 
 test("assigns free cells when audio files are dropped on the grid", async ({ page }) => {
   await installAudioMock(page);

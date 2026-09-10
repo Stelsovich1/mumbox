@@ -24,7 +24,8 @@ import { recordProbe, recordRangeRead } from "../../../shared/lib/diagnostics";
 import { isPartialDecodeAllowed } from "../../../shared/lib/partialDecodePolicy";
 import { PlaybackBufferEntry } from "./audioBufferCache";
 import { DECODE_SAMPLE_RATE } from "./decodeAudio";
-import { getDecodeSemaphore } from "./decodeSemaphore";
+import { getEngineSampleRate, shouldUseNativeRateForWav } from "./playbackRate";
+import { DecodeLane, getDecodeSemaphore } from "./decodeSemaphore";
 import { PlannedSegment, planSegments, shouldSegmentWindow } from "./partialPlan";
 import { FORMAT_PROBE_BYTES, PartialMediaFormat, sniffMediaFormat } from "./mediaFormat";
 import { MediaProbe, mediaProbeCache } from "./mediaProbeCache";
@@ -34,13 +35,14 @@ import {
   createMp3FrameIndex,
   fillConstantBitrateIndex,
   findTrailerOffset,
+  getIndexedDurationSeconds,
   Mp3FrameIndex,
   parseId3v2Size,
   parseMp3StreamInfo,
   preambleFrameCount,
   readFrameHeader
 } from "./mp3FrameIndex";
-import { verifyMp3Alignment } from "./partialVerify";
+import { REQUIRED_INDEX_FRAMES, verifyMp3Alignment } from "./partialVerify";
 import { decodeWavFrames, parseWavStreamInfo, wavByteRangeForFrames } from "./wavPartial";
 
 /** Enough of the tail to hold an ID3v1 (128 B), APE or Lyrics3 trailer. */
@@ -141,24 +143,13 @@ async function buildMp3Probe(mediaId: string, blob: Blob): Promise<MediaProbe | 
     format: "mp3",
     mp3: index,
     containerDurationSeconds: getIndexedDurationSeconds(index),
+    sampleRate: index.info.sampleRate,
+    channels: index.info.channels,
     alignDeltaSamples: null,
     verified: "unknown",
     partialDisabled: false,
     failures: 0
   };
-}
-
-function getIndexedDurationSeconds(index: Mp3FrameIndex): number | null {
-  if (index.frameCount === 0) {
-    return null;
-  }
-  if (index.complete) {
-    return (index.frameCount * index.info.samplesPerFrame) / index.info.sampleRate;
-  }
-  const declared = index.info.declaredFrameCount;
-  return declared === null
-    ? null
-    : (declared * index.info.samplesPerFrame) / index.info.sampleRate;
 }
 
 /**
@@ -201,6 +192,8 @@ async function buildWavProbe(mediaId: string, blob: Blob): Promise<MediaProbe | 
     format: "wav",
     wav: info,
     containerDurationSeconds: info.frameCount / info.sampleRate,
+    sampleRate: info.sampleRate,
+    channels: info.channels,
     // No decoder is involved, so there is nothing to be offset from.
     alignDeltaSamples: 0,
     verified: "pass",
@@ -210,6 +203,32 @@ async function buildWavProbe(mediaId: string, blob: Blob): Promise<MediaProbe | 
 }
 
 /** Builds (or returns) the per-media probe. Null means this media has no partial path. */
+/**
+ * Re-derives an evicted frame table, keeping everything expensive that was measured around it.
+ *
+ * Rebuilding costs a handful of range reads and no decode. The facts it hangs off — above all
+ * `alignDeltaSamples`, which costs two decodes and a cross-correlation — are never evicted, so a
+ * table coming back does NOT drag a re-verification with it. That was the whole point of splitting
+ * the cache: under one shared budget, two long tracks could not both keep a table, and each eviction
+ * re-triggered the measurement on the next panel switch.
+ */
+async function ensureMp3Index(probe: MediaProbe, blob: Blob): Promise<Mp3FrameIndex | null> {
+  if (probe.mp3) {
+    return probe.mp3;
+  }
+  if (probe.format !== "mp3") {
+    return null;
+  }
+  const rebuilt = await buildMp3Probe(probe.mediaId, blob);
+  if (!rebuilt?.mp3) {
+    return null;
+  }
+  // `setIndex` attaches it to the STORED facts record, which is the object `probe` already points
+  // at whenever it came from `getMediaProbe` — so the caller's `probe.mp3` is populated too.
+  mediaProbeCache.setIndex(probe.mediaId, rebuilt.mp3);
+  return rebuilt.mp3;
+}
+
 export async function getMediaProbe(mediaId: string): Promise<MediaProbe | null> {
   const cached = mediaProbeCache.get(mediaId);
   if (cached) {
@@ -229,6 +248,8 @@ export async function getMediaProbe(mediaId: string): Promise<MediaProbe | null>
       mediaId,
       format: "unsupported",
       containerDurationSeconds: null,
+      sampleRate: null,
+      channels: null,
       alignDeltaSamples: null,
       verified: "unknown",
       partialDisabled: true,
@@ -243,6 +264,8 @@ export async function getMediaProbe(mediaId: string): Promise<MediaProbe | null>
       mediaId,
       format: "unsupported",
       containerDurationSeconds: null,
+      sampleRate: null,
+      channels: null,
       alignDeltaSamples: null,
       verified: "unknown",
       partialDisabled: true,
@@ -284,6 +307,13 @@ async function decodeWavRange(
   if (!info) {
     return null;
   }
+  // A WAV whose rate is not the engine's falls through to the full decode, which resamples inside
+  // `decodeAudioData`. Resampling here instead would mean writing a resampler onto the one path
+  // that never invokes the browser's decoder — the very property that exempts WAV from the
+  // per-browser partial-decode verdict. Two lines beat a resampler to get wrong.
+  if (!shouldUseNativeRateForWav(info.sampleRate)) {
+    return null;
+  }
   const startFrame = Math.floor(request.startSeconds * info.sampleRate);
   const endFrame = Math.ceil(request.endSeconds * info.sampleRate);
   const range = wavByteRangeForFrames(info, startFrame, endFrame);
@@ -319,7 +349,7 @@ async function decodeMp3Range(
   probe: MediaProbe,
   request: RangeDecodeRequest
 ): Promise<RangeDecodeResult | null> {
-  const index = probe.mp3;
+  const index = await ensureMp3Index(probe, blob);
   if (!index) {
     return null;
   }
@@ -359,7 +389,9 @@ async function decodeMp3Range(
   }
 
   const bytes = await readRange(blob, range.start, range.end);
-  const context = new OfflineAudioContext(1, 1, DECODE_SAMPLE_RATE);
+  // Feeds the playback graph, so it decodes at the ENGINE rate. The verification decode in
+  // `partialVerify.ts` deliberately does not — see the comment there.
+  const context = new OfflineAudioContext(1, 1, getEngineSampleRate());
   const decoded = await context.decodeAudioData(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   );
@@ -390,12 +422,18 @@ async function decodeMp3Range(
  * media, a mid-file MP3 window with no measured offset yet, a range the index cannot resolve. The
  * caller treats null as "use the existing full decode", so this function can never fail a cue.
  *
- * Every decode goes through the shared semaphore, including a segment fetched mid-playback: the
- * whole point of bounding concurrency is that simultaneous decodes multiply the transient, and a
- * chain that bypassed the bound would reintroduce exactly that.
+ * Every decode goes through the shared gate, including a segment fetched mid-playback: the whole
+ * point of bounding concurrency is that simultaneous decodes multiply the transient, and a chain
+ * that bypassed the bound would reintroduce exactly that.
+ *
+ * `lane` picks WHICH bound. A cue that is already audible has a deadline measured in hundreds of
+ * milliseconds and must not queue behind speculative warm-up work — see `decodeSemaphore.ts`. It
+ * defaults to the background lane so that only the two call sites that really are on a deadline,
+ * the press path and the live segment chain, have to say so.
  */
 export async function decodeMediaRange(
-  request: RangeDecodeRequest
+  request: RangeDecodeRequest,
+  lane: DecodeLane = "background"
 ): Promise<RangeDecodeResult | null> {
   const probe = await getMediaProbe(request.mediaId);
   if (!probe || probe.partialDisabled || !isPartialDecodeAllowed(probe.format)) {
@@ -406,10 +444,12 @@ export async function decodeMediaRange(
     return null;
   }
 
-  return getDecodeSemaphore().run(async () =>
-    probe.format === "wav"
-      ? decodeWavRange(blob, probe, request)
-      : decodeMp3Range(blob, probe, request)
+  return getDecodeSemaphore().run(
+    async () =>
+      probe.format === "wav"
+        ? decodeWavRange(blob, probe, request)
+        : decodeMp3Range(blob, probe, request),
+    lane
   );
 }
 
@@ -439,6 +479,30 @@ export async function ensureMp3Alignment(mediaId: string): Promise<boolean> {
   if (!blob) {
     return false;
   }
+  // The verification reads the frame table; make sure one is attached before handing the probe over.
+  const index = await ensureMp3Index(probe, blob);
+  if (!index) {
+    return false;
+  }
+  // Attached is not the same as scanned, and that gap is what made this whole feature inert.
+  // `createMp3FrameIndex` returns `frameCount === 0` and fills lazily; `fillConstantBitrateIndex`
+  // would fill it up front but never runs on real material, because a 192 kbps 44.1 kHz frame is
+  // 626.94 bytes and the alternating padding bit leaves `constantFrameBytes` null. So the
+  // verification saw an empty table, answered "too-short", and returned `skipped` — which is not
+  // `fail`, so no counter moved and no verdict was blocked. `alignDeltaSamples` simply stayed null,
+  // and with it every mid-file window was refused for the life of the session.
+  //
+  // The byte bound is the same shape `decodeMp3Range` uses: 2048 is an upper bound on an MPEG-1
+  // Layer III frame, so this covers the frames the measurement needs plus a margin for the range
+  // that ends it.
+  await ensureScannedTo(
+    blob,
+    index,
+    Math.min(
+      index.info.audioEndOffset,
+      index.info.firstFrameOffset + (REQUIRED_INDEX_FRAMES + 8) * 2048
+    )
+  );
   const outcome = await getDecodeSemaphore().run(() => verifyMp3Alignment(blob, probe));
   return outcome.status === "pass";
 }
@@ -454,15 +518,42 @@ export async function planMediaSegments(request: {
   mediaId: string;
   startSeconds: number;
   endSeconds: number;
+  /**
+   * Duration the caller already knows, used when the container will not say.
+   *
+   * Nine of sixteen files in a real corpus carry no Xing, Info or VBRI frame at all, so even with
+   * the branch order in `getIndexedDurationSeconds` fixed their `declaredFrameCount` is null and
+   * the only exact answer would be a full header scan of the file. That is the wrong price for a
+   * number the app already measured at import (`readAudioDurationMs` → `MediaAsset.durationMs`),
+   * and it is the SAME number the window was computed against one frame up the stack, so using it
+   * here cannot disagree with the trim.
+   *
+   * It only ever bounds the margin of the last segment: `planSegments` clamps `bufferEndSeconds` to
+   * it, and the engine already takes `Math.max` of this and the decoder's own duration for exactly
+   * the "container short by one frame" case.
+   */
+  fallbackDurationSeconds?: number;
 }): Promise<{ segments: PlannedSegment[]; sourceDurationSeconds: number } | null> {
   const probe = await getMediaProbe(request.mediaId);
   if (!probe || probe.partialDisabled || !isPartialDecodeAllowed(probe.format)) {
     return null;
   }
-  if (probe.format === "mp3" && request.startSeconds > 0 && probe.alignDeltaSamples === null) {
+  // An MP3 with no measured offset cannot be streamed AT ALL, whatever the window's start.
+  //
+  // Gating this on `startSeconds > 0` was right for a plain range read and wrong here: a plan is
+  // only ever returned with more than one segment, and every segment after the head starts
+  // mid-file by construction. So an untrimmed track was allowed onto the streaming path, played
+  // its 0.5 s head, had each following segment refused by `decodeMp3Range` for the missing offset,
+  // and was ended by `promoteToLast` — a three-minute cue audible for half a second. Refusing the
+  // plan sends the media to the full decode instead: more memory, but the audio the user asked
+  // for. A cue that cannot be continued must never be started.
+  if (probe.format === "mp3" && probe.alignDeltaSamples === null) {
     return null;
   }
-  const sourceDurationSeconds = probe.containerDurationSeconds;
+  const fallback = request.fallbackDurationSeconds;
+  const sourceDurationSeconds =
+    probe.containerDurationSeconds ??
+    (fallback !== undefined && Number.isFinite(fallback) ? fallback : null);
   if (sourceDurationSeconds === null || sourceDurationSeconds <= 0) {
     return null;
   }
@@ -471,8 +562,10 @@ export async function planMediaSegments(request: {
   // window into a head plus one segment, and that is exactly the case where a seam buys nothing —
   // 1.7 MB decodes in one piece. Without this check every trimmed window would be streamed and the
   // range path would never run.
-  const channels = probe.wav?.channels ?? probe.mp3?.info.channels ?? 2;
-  const sampleRate = probe.wav?.sampleRate ?? probe.mp3?.info.sampleRate ?? DECODE_SAMPLE_RATE;
+  // From the facts, which survive eviction. Reading them off `probe.mp3` meant that once the frame
+  // table was evicted these silently became the defaults and mis-gated `shouldSegmentWindow`.
+  const channels = probe.channels ?? 2;
+  const sampleRate = probe.sampleRate ?? DECODE_SAMPLE_RATE;
   if (
     !shouldSegmentWindow({
       windowSeconds: request.endSeconds - request.startSeconds,
