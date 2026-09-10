@@ -102,6 +102,7 @@ import {
 } from "../../../shared/lib/mediaDistribution";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
+import { installNativeFileDropGuard } from "../../../shared/lib/nativeFileDropGuard";
 import { RightToolbar } from "../../right-toolbar";
 import { WorkspaceGrid } from "../../workspace-grid";
 
@@ -504,6 +505,8 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
       }
     });
   }, [stopAll, updateServiceWorker]);
+
+  useEffect(() => installNativeFileDropGuard(), []);
 
   useEffect(() => {
     audioFolderInputRef.current?.setAttribute("webkitdirectory", "");

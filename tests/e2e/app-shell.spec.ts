@@ -2166,6 +2166,63 @@ async function dropAudioFilesOnGrid(page: Page, fileNames: string[]) {
   }, fileNames);
 }
 
+async function probeFileDropPrevention(page: Page) {
+  return await page.locator('[aria-label^="Рабочая сетка"]').evaluate((grid) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([82, 73, 70, 70])], "stray.wav", { type: "audio/wav" })
+    );
+    const prevented: Record<string, boolean> = {};
+    for (const type of ["dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      grid.dispatchEvent(event);
+      prevented[type] = event.defaultPrevented;
+    }
+    return prevented;
+  });
+}
+
+test("swallows native file drops outside edit mode instead of letting the browser open them", async ({
+  page
+}) => {
+  await installAudioMock(page);
+  await page.goto("/");
+
+  const prevented = await probeFileDropPrevention(page);
+
+  expect(prevented.dragover).toBe(true);
+  expect(prevented.drop).toBe(true);
+  await expect(page.locator('[data-cell-id="cell-0"]')).toHaveAttribute(
+    "aria-label",
+    "Пустая ячейка 1"
+  );
+});
+
+test("swallows a native file drop landing outside the grid in edit mode", async ({ page }) => {
+  await installAudioMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Режим редактирования" }).click();
+
+  const prevented = await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([82, 73, 70, 70])], "stray.wav", { type: "audio/wav" })
+    );
+    const results: Record<string, boolean> = {};
+    for (const type of ["dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: transfer });
+      document.body.dispatchEvent(event);
+      results[type] = event.defaultPrevented;
+    }
+    return results;
+  });
+
+  expect(prevented.dragover).toBe(true);
+  expect(prevented.drop).toBe(true);
+});
+
 test("assigns free cells when audio files are dropped on the grid", async ({ page }) => {
   await installAudioMock(page);
   await page.goto("/");
