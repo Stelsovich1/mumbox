@@ -42,7 +42,7 @@ import {
   preambleFrameCount,
   readFrameHeader
 } from "./mp3FrameIndex";
-import { verifyMp3Alignment } from "./partialVerify";
+import { REQUIRED_INDEX_FRAMES, verifyMp3Alignment } from "./partialVerify";
 import { decodeWavFrames, parseWavStreamInfo, wavByteRangeForFrames } from "./wavPartial";
 
 /** Enough of the tail to hold an ID3v1 (128 B), APE or Lyrics3 trailer. */
@@ -472,9 +472,29 @@ export async function ensureMp3Alignment(mediaId: string): Promise<boolean> {
     return false;
   }
   // The verification reads the frame table; make sure one is attached before handing the probe over.
-  if (!(await ensureMp3Index(probe, blob))) {
+  const index = await ensureMp3Index(probe, blob);
+  if (!index) {
     return false;
   }
+  // Attached is not the same as scanned, and that gap is what made this whole feature inert.
+  // `createMp3FrameIndex` returns `frameCount === 0` and fills lazily; `fillConstantBitrateIndex`
+  // would fill it up front but never runs on real material, because a 192 kbps 44.1 kHz frame is
+  // 626.94 bytes and the alternating padding bit leaves `constantFrameBytes` null. So the
+  // verification saw an empty table, answered "too-short", and returned `skipped` — which is not
+  // `fail`, so no counter moved and no verdict was blocked. `alignDeltaSamples` simply stayed null,
+  // and with it every mid-file window was refused for the life of the session.
+  //
+  // The byte bound is the same shape `decodeMp3Range` uses: 2048 is an upper bound on an MPEG-1
+  // Layer III frame, so this covers the frames the measurement needs plus a margin for the range
+  // that ends it.
+  await ensureScannedTo(
+    blob,
+    index,
+    Math.min(
+      index.info.audioEndOffset,
+      index.info.firstFrameOffset + (REQUIRED_INDEX_FRAMES + 8) * 2048
+    )
+  );
   const outcome = await getDecodeSemaphore().run(() => verifyMp3Alignment(blob, probe));
   return outcome.status === "pass";
 }
@@ -510,7 +530,16 @@ export async function planMediaSegments(request: {
   if (!probe || probe.partialDisabled || !isPartialDecodeAllowed(probe.format)) {
     return null;
   }
-  if (probe.format === "mp3" && request.startSeconds > 0 && probe.alignDeltaSamples === null) {
+  // An MP3 with no measured offset cannot be streamed AT ALL, whatever the window's start.
+  //
+  // Gating this on `startSeconds > 0` was right for a plain range read and wrong here: a plan is
+  // only ever returned with more than one segment, and every segment after the head starts
+  // mid-file by construction. So an untrimmed track was allowed onto the streaming path, played
+  // its 0.5 s head, had each following segment refused by `decodeMp3Range` for the missing offset,
+  // and was ended by `promoteToLast` — a three-minute cue audible for half a second. Refusing the
+  // plan sends the media to the full decode instead: more memory, but the audio the user asked
+  // for. A cue that cannot be continued must never be started.
+  if (probe.format === "mp3" && probe.alignDeltaSamples === null) {
     return null;
   }
   const fallback = request.fallbackDurationSeconds;

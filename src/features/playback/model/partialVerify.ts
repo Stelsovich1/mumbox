@@ -33,6 +33,15 @@ import { findAlignmentOffset, rms } from "./pcmAlign";
 
 /** Frames decoded as the anchored reference: about 2 s at 44.1 kHz. */
 const REFERENCE_FRAMES = 80;
+/**
+ * Frames the index must already hold before this measurement can run.
+ *
+ * Exported because the caller has to SCAN that far first, and a VBR table is scanned lazily: a
+ * freshly built index has `frameCount === 0`, so handing it straight over made the guard below
+ * report "too-short" for every real file, leave `alignDeltaSamples` null, and take every mid-file
+ * MP3 window off the range path with no failure recorded anywhere — `skipped` is not `fail`.
+ */
+export const REQUIRED_INDEX_FRAMES = REFERENCE_FRAMES + 8;
 /** Window compared, in samples. */
 const COMPARE_SAMPLES = 4096;
 /** How far either side of the nominal position to search. */
@@ -93,7 +102,7 @@ export async function verifyMp3Alignment(
   probe: MediaProbe
 ): Promise<VerificationOutcome> {
   const index = probe.mp3;
-  if (!index || index.frameCount < REFERENCE_FRAMES + 8) {
+  if (!index || index.frameCount < REQUIRED_INDEX_FRAMES) {
     const outcome: VerificationOutcome = { status: "skipped", reason: "too-short" };
     recordPartialVerificationResult("skipped");
     return outcome;
