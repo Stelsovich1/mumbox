@@ -544,3 +544,48 @@ test("a multi-cell drop decodes each media exactly once", async ({ page }) => {
   expect(await diagDecodeCount(page)).toBe(6);
   expect(await diagCacheKeys(page)).toHaveLength(6);
 });
+
+/**
+ * The coarse-pointer default budget.
+ *
+ * There was no default budget on any device, on the argument that a cap smaller than the project
+ * turns every pad into a cold decode. That argument still holds for the desktop, and it stopped
+ * holding for a phone once a legitimate decline was measured: byte-range decoding off, one 18-cell
+ * panel, 1 539 MiB of resident PCM and the previous session reported killed. Declining is normal
+ * and sometimes permanent — a loop is excluded from streaming by design, a file whose alignment
+ * cannot be measured is off the path for good — so a handful of full decodes must not be able to
+ * end the session.
+ *
+ * Written to run in BOTH projects and to assert both branches from the media query, rather than as
+ * two tests keyed by project name: the thing being pinned is that the budget follows the pointer,
+ * and a test that hard-codes one answer per project would still pass if that link were cut.
+ */
+test("a coarse pointer gets a default PCM budget and a fine pointer does not", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, { panels: 1, gridSize: 6, distinctMedia: 1, spec: SPEC, filledCellsPerPanel: 1 });
+  await page.goto("/");
+  await waitForWarm(page, 1);
+
+  const coarse = await page.evaluate(
+    () => window.matchMedia("(hover: none) and (pointer: coarse)").matches
+  );
+  const stats = await diagCacheStats(page);
+  expect(stats?.budgetBytes).toBe(coarse ? 384 * 1024 * 1024 : null);
+});
+
+/**
+ * `?pcmBudgetMb=0` still means "no budget", including where a default would otherwise apply.
+ *
+ * The flag used to be read as `number | null`, which cannot tell "no flag" from "flag asking for no
+ * cap" — harmless while the default was null everywhere, and a silent loss of the escape hatch the
+ * moment it was not. The escape hatch is the only way to measure a device against the uncapped
+ * behaviour, which is exactly what setting the default required.
+ */
+test("an explicit zero budget clears the default", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, { panels: 1, gridSize: 6, distinctMedia: 1, spec: SPEC, filledCellsPerPanel: 1 });
+  await page.goto("/?pcmBudgetMb=0");
+  await waitForWarm(page, 1);
+
+  expect((await diagCacheStats(page))?.budgetBytes).toBeNull();
+});

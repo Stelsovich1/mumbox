@@ -55,15 +55,17 @@ import { SelectionActionBar } from "../../../features/bulk-selection";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
 import {
   classifyProjectFileError,
+  createCrc32Folder,
   LARGE_PROJECT_IMPORT_BYTES,
   makeProjectBlob,
   PROJECT_FILE_ACCEPT_TYPES,
   PROJECT_FILE_ACCEPT_TYPES_MOBILE,
+  ProjectFileError,
   ProjectFileProgress,
   readProjectFile,
+  readVerifiedMediaBlob,
   saveProjectBlob,
-  toProjectFileName,
-  verifyProjectMedia
+  toProjectFileName
 } from "../../../features/file-config";
 import { getFreeCellIds } from "../../../entities/cell/model/copyCells";
 import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
@@ -895,17 +897,33 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
         // Neither of these destroys anything recoverable, and running them here preserves the
         // memory head-room the original order was written for.
         clearMediaCaches();
-        // Every media range is read and checked against its recorded CRC BEFORE storage is touched.
-        // `readProjectFile` validated the archive's structure, but its media blobs are lazy
-        // `file.slice` views — not a single audio byte had been read at this point, so a file that
-        // was corrupt in the middle, or that had become unreadable since it was picked, was only
-        // discovered while writing.
-        await verifyProjectMedia(project, updateOperationProgress);
-        const importedState = await writeImportedProjectMedia(
-          project.state,
-          project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
-          updateOperationProgress
-        );
+        // Every media entry is read ONCE: its CRC is folded and the same bytes are handed to the
+        // write. `readProjectFile` validated the archive's structure, but its media blobs are lazy
+        // `file.slice` views, so a separate verification pass and the write each pulled the whole
+        // source file through — the second time from inside `set()`, where IndexedDB reads the
+        // picked file itself. A media entry that fails its checksum throws before it is stored, and
+        // the writer's rollback removes whatever it had written; the outgoing audio is still
+        // untouched, because that deletion waits for the persist barrier below.
+        const mediaById = new Map(project.mediaBlobs.map((item) => [item.id, item]));
+        const crcFolder = createCrc32Folder();
+        const importedState = await (async () => {
+          try {
+            return await writeImportedProjectMedia(
+              project.state,
+              project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
+              updateOperationProgress,
+              async (item) => {
+                const media = mediaById.get(item.id);
+                if (!media) {
+                  throw new ProjectFileError("corrupt", `missing-media:${item.id}`);
+                }
+                return readVerifiedMediaBlob(media, crcFolder);
+              }
+            );
+          } finally {
+            crcFolder.dispose();
+          }
+        })();
         dispatch({
           type: "state/import",
           state: importedState,
@@ -1153,8 +1171,6 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
         return;
       }
 
-      // Same hazard as an import, minus the deletion: a partial write orphans blobs forever.
-      await verifyProjectMedia(project, updateOperationProgress);
       const currentState = serializeState(stateRef.current);
       // `loadBlob` is what lets the CURRENT project be hashed too. Without it a project that has
       // never been saved carries no hashes, and the whole merge falls back to matching on file name
@@ -1183,13 +1199,36 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
         return;
       }
 
-      const { state: remappedIncoming, addedMedia, idByImportedId } = await writeMergedProjectMedia(
-        preparation.incoming,
-        project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
-        preparation.mediaIdMap,
-        preparation.keptIncomingIds,
-        updateOperationProgress
-      );
+      // Same hazard as an import, minus the deletion: a partial write orphans blobs forever. The
+      // checksum rides on the write's own read, so only the media that is actually STORED is
+      // verified — a discarded duplicate contributes no bytes to storage, and deduplication already
+      // compared it by SHA-256, which a corrupt copy would fail.
+      const mergeMediaById = new Map(project.mediaBlobs.map((item) => [item.id, item]));
+      const mergeCrcFolder = createCrc32Folder();
+      const {
+        state: remappedIncoming,
+        addedMedia,
+        idByImportedId
+      } = await (async () => {
+        try {
+          return await writeMergedProjectMedia(
+            preparation.incoming,
+            project.mediaBlobs.map((item) => ({ id: item.id, blob: item.blob })),
+            preparation.mediaIdMap,
+            preparation.keptIncomingIds,
+            updateOperationProgress,
+            async (item) => {
+              const media = mergeMediaById.get(item.id);
+              if (!media) {
+                throw new ProjectFileError("corrupt", `missing-media:${item.id}`);
+              }
+              return readVerifiedMediaBlob(media, mergeCrcFolder);
+            }
+          );
+        } finally {
+          mergeCrcFolder.dispose();
+        }
+      })();
 
       // `writeMergedProjectMedia` has already rewritten every id in `remappedIncoming` to its final
       // value. Remapping again through the incoming-keyed map would find no key and empty every
@@ -2410,7 +2449,12 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
             }
           />
           {operationProgress ? (
-            <Typography sx={{ maxWidth: 360, color: "text.primary" }}>{operationProgress.label}</Typography>
+            <Typography
+              data-testid="operation-progress"
+              sx={{ maxWidth: 360, color: "text.primary" }}
+            >
+              {operationProgress.label}
+            </Typography>
           ) : null}
         </Box>
       </Backdrop>

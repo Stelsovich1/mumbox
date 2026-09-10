@@ -42,20 +42,27 @@ export function BoardPage() {
       if (cancelled) {
         return;
       }
+      const state = hydrateAppState(loaded.state, loaded.session);
       // A FAILED read is not an empty one. If the data is there and only the read failed, the first
       // debounced write would overwrite a real project with a fresh one — the single most
       // destructive thing this change could do — so persistence is suspended rather than started.
       handle = loaded.failed
         ? null
-        : createPersistence((error) => {
-            console.error("mumbox: could not persist app state", error);
-            if (!cancelled) {
-              setWriteFailed(true);
-            }
-          });
+        : createPersistence(
+            (error) => {
+              console.error("mumbox: could not persist app state", error);
+              if (!cancelled) {
+                setWriteFailed(true);
+              }
+            },
+            // What is already on disk, so the first panel switch of a session writes the sidecar
+            // instead of the whole layout. Null when there was nothing to read: then the layout
+            // record does not exist yet and the first write has to create it.
+            loaded.state ? { state, session: state.projectSession } : null
+          );
       setBoot({
         status: "ready",
-        state: hydrateAppState(loaded.state, loaded.session),
+        state,
         persistence: handle
       });
     });

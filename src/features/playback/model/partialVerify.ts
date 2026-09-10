@@ -96,45 +96,67 @@ async function decodeRange(
  * Called from the warm-up, never from the press path: it costs two decodes of about two seconds
  * each. On success the probe gains `alignDeltaSamples`, which is what unlocks mid-file MP3 windows;
  * on failure the media is disabled and the browser's tally is incremented.
+ *
+ * The reference window grows on a LADDER when every comparison window turns out to be silent.
+ * Measured on a real library: one track in sixteen answered `skipped: silent` and was therefore off
+ * the byte-range path for good — its whole PCM resident, about 38 MiB — for no reason other than a
+ * quiet intro. Both comparison windows live inside the first `REFERENCE_FRAMES`, roughly the first
+ * two seconds, so a fade-in is enough to silence both.
+ *
+ * The reference must still START at frame 0 — that is the entire basis of the anchoring, since only
+ * a decode from the first frame shares the full decode's gapless decision — so the retry cannot
+ * move the window, only LENGTHEN it. Which means the frame index has to be scanned further, and
+ * that scan is injected: paying it up front for every file would spend a header read on the fifteen
+ * files in sixteen that never need it.
  */
-export async function verifyMp3Alignment(
-  blob: Blob,
-  probe: MediaProbe
-): Promise<VerificationOutcome> {
-  const index = probe.mp3;
-  if (!index || index.frameCount < REQUIRED_INDEX_FRAMES) {
-    const outcome: VerificationOutcome = { status: "skipped", reason: "too-short" };
-    recordPartialVerificationResult("skipped");
-    return outcome;
-  }
-  const { samplesPerFrame } = index.info;
+type AlignmentAttempt =
+  | { status: "pass"; alignDeltaSamples: number }
+  | { status: "fail"; reason: string }
+  | { status: "skipped"; reason: string }
+  /** Internal, and the only retry-able outcome: every window was below the silence floor. */
+  | { status: "silent" };
 
-  let reference: AudioBuffer | null = null;
-  let isolated: AudioBuffer | null = null;
+/**
+ * Reference lengths tried in order, in frames.
+ *
+ * Three times the base is about 6.3 s at 44.1 kHz, which clears an ordinary fade-in without turning
+ * the measurement into a long decode. There is no third rung: a file whose first six seconds are
+ * silent is not the case this ladder was measured against, and every rung is paid twice over by the
+ * file that ends up failing anyway.
+ */
+const REFERENCE_FRAME_LADDER = [REFERENCE_FRAMES, REFERENCE_FRAMES * 3] as const;
+
+/** Frames the index must hold for a given reference length; the +8 covers the range that ends it. */
+export function framesNeededForReference(referenceFrames: number): number {
+  return referenceFrames + 8;
+}
+
+async function attemptAlignment(
+  blob: Blob,
+  index: Mp3FrameIndex,
+  referenceFrames: number
+): Promise<AlignmentAttempt> {
+  const { samplesPerFrame } = index.info;
   // The mid-file slice starts far enough in that its own preamble is available, and ends where the
   // reference ends so both cover the same audio.
-  const midFrame = Math.floor(REFERENCE_FRAMES / 2);
+  const midFrame = Math.floor(referenceFrames / 2);
   const preamble = preambleFrameCount(index, midFrame);
   if (preamble === null) {
-    recordPartialVerificationResult("skipped");
     return { status: "skipped", reason: "no-preamble" };
   }
 
+  let reference: AudioBuffer | null = null;
+  let isolated: AudioBuffer | null = null;
   try {
-    reference = await decodeRange(blob, index, 0, REFERENCE_FRAMES);
-    isolated = await decodeRange(blob, index, midFrame - preamble, REFERENCE_FRAMES);
+    reference = await decodeRange(blob, index, 0, referenceFrames);
+    isolated = await decodeRange(blob, index, midFrame - preamble, referenceFrames);
   } catch {
-    // A rejected slice that the full decode would have accepted is an immediate block: it means
-    // this browser cannot do byte-range MP3 at all, and no tally is needed to establish that.
-    probe.partialDisabled = true;
-    probe.verified = "fail";
-    blockPartialDecode();
-    recordPartialVerificationResult("fail");
+    // A rejected slice that the full decode would have accepted means this browser cannot do
+    // byte-range MP3 at all. The caller turns this one into an immediate block.
     return { status: "fail", reason: "decode-rejected" };
   }
 
   if (!reference || !isolated) {
-    recordPartialVerificationResult("skipped");
     return { status: "skipped", reason: "no-range" };
   }
 
@@ -177,10 +199,6 @@ export async function verifyMp3Alignment(
         maxResidual: MAX_RESIDUAL,
         survey: true
       });
-      probe.partialDisabled = true;
-      probe.verified = "fail";
-      recordPartialVerification(false);
-      recordPartialVerificationResult("fail");
       return {
         status: "fail",
         reason: `no-alignment (peak ${survey.peakCorrelation.toFixed(4)})`
@@ -189,29 +207,86 @@ export async function verifyMp3Alignment(
     measured.push(-result.lag);
   }
 
-  if (measured.length === 0) {
-    // Every window was silent. Allowed, but not counted as a pass: silence proves nothing.
-    recordPartialVerificationResult("skipped");
-    return { status: "skipped", reason: "silent" };
-  }
-
   const first = measured[0];
   if (first === undefined) {
-    recordPartialVerificationResult("skipped");
-    return { status: "skipped", reason: "silent" };
+    // Every window was silent. Retry-able, and NOT a failure: silence proves nothing either way.
+    return { status: "silent" };
   }
   // Two windows must agree, or the material is periodic enough that the number cannot be trusted.
   if (measured.some((value) => value !== first)) {
-    probe.partialDisabled = true;
-    probe.verified = "fail";
-    recordPartialVerification(false);
-    recordPartialVerificationResult("fail");
     return { status: "fail", reason: "windows-disagree" };
   }
 
-  probe.alignDeltaSamples = first;
+  return { status: "pass", alignDeltaSamples: first };
+}
+
+export async function verifyMp3Alignment(
+  blob: Blob,
+  probe: MediaProbe,
+  /**
+   * Scans the frame index out to `frames` frames, for a rung deeper than the caller pre-scanned.
+   * Absent means "no deeper rung is available", which simply ends the ladder.
+   */
+  ensureFrames?: (frames: number) => Promise<void>
+): Promise<VerificationOutcome> {
+  const index = probe.mp3;
+  if (!index || index.frameCount < REQUIRED_INDEX_FRAMES) {
+    const outcome: VerificationOutcome = { status: "skipped", reason: "too-short" };
+    recordPartialVerificationResult("skipped", probe.mediaId, undefined, outcome.reason);
+    return outcome;
+  }
+
+  let attempt: AlignmentAttempt = { status: "silent" };
+  let deepTried = false;
+  for (const [rung, referenceFrames] of REFERENCE_FRAME_LADDER.entries()) {
+    const needed = framesNeededForReference(referenceFrames);
+    if (rung > 0) {
+      if (!ensureFrames) {
+        break;
+      }
+      await ensureFrames(needed);
+      // A file simply shorter than this rung ends the ladder; the previous rung's outcome stands.
+      if (index.frameCount < needed) {
+        break;
+      }
+      deepTried = true;
+    }
+    attempt = await attemptAlignment(blob, index, referenceFrames);
+    if (attempt.status !== "silent") {
+      break;
+    }
+  }
+
+  if (attempt.status === "silent") {
+    // `silent-deep` rather than `silent` once a deeper rung has actually been tried and also come
+    // back quiet: the two say different things about the file, and the reason counter is the only
+    // place a device without a debugger can tell them apart.
+    const reason = deepTried ? "silent-deep" : "silent";
+    recordPartialVerificationResult("skipped", probe.mediaId, undefined, reason);
+    return { status: "skipped", reason };
+  }
+
+  if (attempt.status === "skipped") {
+    recordPartialVerificationResult("skipped", probe.mediaId, undefined, attempt.reason);
+    return attempt;
+  }
+
+  if (attempt.status === "fail") {
+    probe.partialDisabled = true;
+    probe.verified = "fail";
+    if (attempt.reason === "decode-rejected") {
+      // No tally is needed to establish a missing capability.
+      blockPartialDecode();
+    } else {
+      recordPartialVerification(false);
+    }
+    recordPartialVerificationResult("fail", probe.mediaId, undefined, attempt.reason);
+    return attempt;
+  }
+
+  probe.alignDeltaSamples = attempt.alignDeltaSamples;
   probe.verified = "pass";
   recordPartialVerification(true);
-  recordPartialVerificationResult("pass", probe.mediaId, first);
-  return { status: "pass", alignDeltaSamples: first };
+  recordPartialVerificationResult("pass", probe.mediaId, attempt.alignDeltaSamples);
+  return { status: "pass", alignDeltaSamples: attempt.alignDeltaSamples };
 }

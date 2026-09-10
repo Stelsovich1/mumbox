@@ -11,6 +11,7 @@ import {
   diagSetPartialDecode
 } from "../support/diag";
 import { seedProject } from "../support/seedProject";
+import { PARTIAL_DECODE_STORAGE_KEY } from "../../src/shared/lib/partialDecodePolicy";
 
 /**
  * The byte-range decode path.
@@ -557,4 +558,79 @@ test("a streamed cue releases each segment as it finishes", async ({ page }) => 
   expect(await diagRoutePcmBytes(page)).toBeLessThan(14 * 1024 * 1024);
   // Ended by its own last segment, not by the safety net — pruning must not break `isLast`.
   expect(partial?.segments.watchdog).toBe(0);
+});
+
+/**
+ * A verdict recorded under the previous blocking rule must not survive into this build.
+ *
+ * The rule it was written under blocked on ANY failure past three verifications, so one file whose
+ * alignment could not be measured latched `blocked` for the life of the browser profile — and the
+ * recovery branch was guarded by `verdict !== "blocked"`, so passes could never lift it. Measured
+ * in the field: 14 passes, 1 failure, byte-range decoding off, 1 539 MiB of resident PCM against
+ * 182 MiB with the path on, and the previous session reported killed.
+ *
+ * Shipping the new rule alone would have fixed nothing for anyone who had already hit the old one:
+ * the verdict is persisted, and nothing in the app ever rewrites it while it reads `blocked`. So
+ * the record carries the rule version it was earned under, and a mismatch resets it — the same
+ * mechanism `uaKey` already used, for the same reason.
+ *
+ * The uaKey is read back from the app rather than recomputed here: duplicating the hash in a test
+ * would let the two drift and the test would then pass by writing a record the app ignores anyway.
+ */
+test("a blocked verdict from the previous rule is discarded, a capability block is not", async ({
+  page
+}) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: { seconds: 60, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 1
+  });
+  await page.goto("/");
+  const uaKey = (await diagPartial(page))?.uaKey ?? "";
+  expect(uaKey).not.toBe("");
+
+  await page.evaluate(
+    ({ key, storageKey }) => {
+      localStorage.setItem(
+        storageKey,
+        // Rule 1's shape exactly: no `policy`, no `hardBlocked`, and a verdict earned by one
+        // failure among fourteen passes.
+        JSON.stringify({
+          uaKey: key,
+          verdict: "blocked",
+          passes: 14,
+          failures: 1,
+          updatedAt: Date.now()
+        })
+      );
+    },
+    { key: uaKey, storageKey: PARTIAL_DECODE_STORAGE_KEY }
+  );
+  await page.reload();
+  expect((await diagPartial(page))?.verdict).not.toBe("blocked");
+
+  // The other direction, and it matters just as much: a browser that REFUSED a slice the full
+  // decode accepts is not on this path at all, and no rule change may quietly put it back.
+  await page.evaluate(
+    ({ key, storageKey }) => {
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          uaKey: key,
+          policy: 2,
+          verdict: "blocked",
+          passes: 0,
+          failures: 1,
+          hardBlocked: true,
+          updatedAt: Date.now()
+        })
+      );
+    },
+    { key: uaKey, storageKey: PARTIAL_DECODE_STORAGE_KEY }
+  );
+  await page.reload();
+  expect((await diagPartial(page))?.verdict).toBe("blocked");
 });

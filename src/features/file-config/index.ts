@@ -3,6 +3,7 @@ import { SerializableAppState } from "../../app/model/appState";
 import { computeContentHash } from "../../shared/lib/contentHash";
 import { CRC32_INITIAL, finalizeCrc32, updateCrc32 } from "../../shared/lib/crc32";
 import { FileHandleLike, writeBlobToHandle } from "../../shared/lib/fileSystemAccess";
+import { Crc32Folder, createCrc32Folder } from "./model/crc32Folder";
 import { ProjectFileError } from "./model/projectFileError";
 import { normalizeProjectMeta, ProjectMeta, toProjectFileName } from "./model/projectMeta";
 import { parseProjectManifest } from "./model/projectManifest";
@@ -129,21 +130,29 @@ function makeZipEndRecord(entryCount: number, centralDirectorySize: number, cent
 }
 
 /**
- * How much of an entry is held in memory at once while its CRC is computed.
+ * How much of an entry is read at a time while its CRC is computed.
  *
  * A project is 700 MB - 1 GB of media, so the old shape — `await entry.blob.arrayBuffer()` per
  * entry — put a whole media file in memory just to checksum it, on top of the assembled output.
- * Reading in slices keeps the export peak at one slice, and the entry itself goes into the output
+ * Reading in slices keeps the EXPORT peak at one slice, and the entry itself goes into the output
  * `Blob` by reference: a `Blob` built from other blobs does not copy their bytes.
+ *
+ * 16 MiB rather than 4. On the export path the value is the peak, and 16 MiB is still nothing
+ * against the output blob it sits beside. On the import path it is NOT the peak — the whole entry
+ * is retained either way, because `readVerifiedMediaBlob` has to hand those bytes to the write —
+ * so there the only thing it controls is the number of read calls, and a read call on a picked file
+ * is what has latency: a content provider on Android, a network drive on a desktop. At 16 MiB a
+ * typical multi-megabyte track is one read, which is the same shape the pre-verification import
+ * had per entry.
  */
-const ZIP_CRC_CHUNK_BYTES = 4 * 1024 * 1024;
+const ZIP_CRC_CHUNK_BYTES = 16 * 1024 * 1024;
 
-async function getBlobCrc32(blob: Blob) {
+async function getBlobCrc32(blob: Blob, folder?: Crc32Folder) {
   let state = CRC32_INITIAL;
   for (let offset = 0; offset < blob.size; offset += ZIP_CRC_CHUNK_BYTES) {
     const end = Math.min(blob.size, offset + ZIP_CRC_CHUNK_BYTES);
     const chunk = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
-    state = updateCrc32(state, chunk);
+    state = folder ? await folder.fold(state, chunk) : updateCrc32(state, chunk);
   }
 
   return finalizeCrc32(state);
@@ -175,7 +184,11 @@ function assertWritableArchive(entries: readonly { name: string; blob: Blob }[])
   }
 }
 
-async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?: (progress: ProjectFileProgress) => void) {
+async function makeZipBlob(
+  entries: { name: string; blob: Blob }[],
+  onProgress?: (progress: ProjectFileProgress) => void,
+  folder?: Crc32Folder
+) {
   // Authoritative: real blob sizes, checked before a single byte is assembled.
   assertWritableArchive(entries);
   const encoder = new TextEncoder();
@@ -186,7 +199,7 @@ async function makeZipBlob(entries: { name: string; blob: Blob }[], onProgress?:
 
   for (const [index, entry] of entries.entries()) {
     const nameBytes = encoder.encode(entry.name);
-    const crc32 = await getBlobCrc32(entry.blob);
+    const crc32 = await getBlobCrc32(entry.blob, folder);
     const localHeader = makeZipLocalHeader(nameBytes, crc32, entry.blob.size);
     parts.push(localHeader, entry.blob);
     centralParts.push(makeZipCentralHeader(nameBytes, crc32, entry.blob.size, offset));
@@ -354,20 +367,69 @@ async function readZipProjectFile(file: File, onProgress?: (progress: ProjectFil
   };
 }
 
+export { createCrc32Folder };
+export type { Crc32Folder };
+
+export type VerifiableMedia = {
+  fileName: string;
+  mimeType: string;
+  crc32: number;
+  blob: Blob;
+};
+
 /**
- * Reads every media entry and checks it against the CRC the archive recorded.
+ * Reads one media entry once, checks it against the CRC the archive recorded, and hands back those
+ * same bytes ready to be stored.
+ *
+ * ONE READ, and that is the whole point. The reader's media blobs are lazy `File.slice` views, so
+ * the previous shape — verify every entry, then write every entry — read the source file TWICE:
+ * once for the checksum here and once inside `set()`, where IndexedDB has to pull the bytes out of
+ * the picked file itself. On Android that file is routinely behind a content provider, where the
+ * second read is the dominant cost of an import and the reason the "Запись аудио" stage crawled.
+ * Returning a memory-backed blob makes the write a copy from RAM instead.
+ *
+ * Peak memory is ONE media file, not the project: the caller verifies and writes one entry at a
+ * time. Materialising all of them first would be the 2 GB peak that `readZipProjectFile` exists to
+ * avoid.
  *
  * Deliberately NOT part of `readProjectFile`. That function is also called by
  * `addProjectsToLibrary`, once per file the user picks, purely to read the project name and two
  * counts for a bookmark row — verifying there would read every byte of every project just to build
  * a list. Structural checks are O(entries) and always on; content verification is O(bytes) and
  * asked for explicitly, on the one path that is about to overwrite the user's project.
+ */
+export async function readVerifiedMediaBlob(
+  media: VerifiableMedia,
+  folder?: Crc32Folder
+): Promise<Blob> {
+  const chunks: Uint8Array[] = [];
+  let fold = beginCrc32Fold();
+  for (let offset = 0; offset < media.blob.size; offset += ZIP_CRC_CHUNK_BYTES) {
+    const end = Math.min(media.blob.size, offset + ZIP_CRC_CHUNK_BYTES);
+    const chunk = new Uint8Array(await media.blob.slice(offset, end).arrayBuffer());
+    fold = folder
+      ? { state: await folder.fold(fold.state, chunk), bytes: fold.bytes + chunk.byteLength }
+      : foldCrc32Chunk(fold, chunk);
+    chunks.push(chunk);
+  }
+  if (!verifyCrc32Fold(fold, { crc32: media.crc32, size: media.blob.size })) {
+    throw new ProjectFileError("corrupt", `media-crc:${media.fileName}`);
+  }
+
+  return new Blob(chunks, { type: media.mimeType });
+}
+
+/**
+ * Verifies every media entry without keeping any of them.
  *
- * Sequential and chunked, so the peak is one 4 MiB slice rather than one media file.
+ * The read-only counterpart of `readVerifiedMediaBlob`, for a caller that wants the archive
+ * checked but is not about to store it. The import and merge paths do NOT use this: they interleave
+ * the check with the write so the bytes are read once.
  */
 export async function verifyProjectMedia(
   project: ImportedProject,
-  onProgress?: (progress: ProjectFileProgress) => void
+  onProgress?: (progress: ProjectFileProgress) => void,
+  folder?: Crc32Folder
 ): Promise<void> {
   const total = project.mediaBlobs.length;
   for (const [index, media] of project.mediaBlobs.entries()) {
@@ -375,7 +437,9 @@ export async function verifyProjectMedia(
     for (let offset = 0; offset < media.blob.size; offset += ZIP_CRC_CHUNK_BYTES) {
       const end = Math.min(media.blob.size, offset + ZIP_CRC_CHUNK_BYTES);
       const chunk = new Uint8Array(await media.blob.slice(offset, end).arrayBuffer());
-      fold = foldCrc32Chunk(fold, chunk);
+      fold = folder
+        ? { state: await folder.fold(fold.state, chunk), bytes: fold.bytes + chunk.byteLength }
+        : foldCrc32Chunk(fold, chunk);
     }
     if (!verifyCrc32Fold(fold, { crc32: media.crc32, size: media.blob.size })) {
       throw new ProjectFileError("corrupt", `media-crc:${media.fileName}`);
@@ -480,7 +544,14 @@ export async function makeProjectBlob(
     blob: new Blob([JSON.stringify(project)], { type: "application/json" })
   });
 
-  return makeZipBlob(entries, onProgress);
+  // The export folds a CRC over every byte it writes, which is the same main-thread loop the
+  // import used to freeze on. One worker for the whole archive, torn down either way.
+  const folder = createCrc32Folder();
+  try {
+    return await makeZipBlob(entries, onProgress, folder);
+  } finally {
+    folder.dispose();
+  }
 }
 
 /**

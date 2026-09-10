@@ -452,6 +452,9 @@ test("a burst of volume changes is written once, and within the max wait", async
   // stops sixty writes a second during a slider drag; the 2 s CAP is what stops a continuous
   // gesture from re-arming that delay forever and never writing at all — where a tab killed
   // mid-gesture loses everything since the previous edit.
+  //
+  // Counted on `ui:v1` now, because that is where a volume change lands. `state:v1` is counted
+  // too, and the assertion on it is the point of the split: a drag must not rewrite the layout.
   await page.goto("/");
   await expect(page.getByLabel("Общая громкость")).toBeVisible();
 
@@ -462,7 +465,8 @@ test("a burst of volume changes is written once, and within the max wait", async
     if (!slider) {
       throw new Error("slider missing");
     }
-    let puts = 0;
+    let uiPuts = 0;
+    let layoutPuts = 0;
     const store = IDBObjectStore.prototype as unknown as {
       put: (this: IDBObjectStore, value: unknown, key?: IDBValidKey) => IDBRequest;
     };
@@ -470,8 +474,11 @@ test("a burst of volume changes is written once, and within the max wait", async
     Object.defineProperty(IDBObjectStore.prototype, "put", {
       configurable: true,
       value: function put(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === "state" && key === "ui:v1") {
+          uiPuts += 1;
+        }
         if (this.name === "state" && key === "state:v1") {
-          puts += 1;
+          layoutPuts += 1;
         }
         return originalPut.call(this, value, key);
       }
@@ -490,9 +497,12 @@ test("a burst of volume changes is written once, and within the max wait", async
       descriptor?.set?.call(element, value);
     };
     const started = performance.now();
+    // A monotonic sweep rather than a 40/41 toggle: the writer drops a write whose payload equals
+    // the one it last stored, and with two values the cap write and the trailing write landed on
+    // the same number often enough to look like a debounce that never fired.
     let volume = 40;
     while (performance.now() - started < 3000) {
-      volume = volume === 40 ? 41 : 40;
+      volume = (volume % 100) + 1;
       setValue(slider, String(volume));
       slider.dispatchEvent(new Event("input", { bubbles: true }));
       await new Promise((resolve) => window.setTimeout(resolve, 16));
@@ -502,12 +512,111 @@ test("a burst of volume changes is written once, and within the max wait", async
       configurable: true,
       value: originalPut
     });
-    return puts;
+    return { uiPuts, layoutPuts };
   });
 
   // Far fewer than the ~190 dispatches, which is the debounce doing its job...
-  expect(writes).toBeLessThan(20);
+  expect(writes.uiPuts).toBeLessThan(20);
   // ...and at least one landed DURING the gesture, which is the cap doing its job: without it the
   // trailing timer is re-armed on every change and the count here would be exactly one.
-  expect(writes).toBeGreaterThan(1);
+  expect(writes.uiPuts).toBeGreaterThan(1);
+  // The layout is written at most once here — this test starts with no stored project, so the
+  // first write of the session has to create `state:v1`. Every write after it is the sidecar.
+  expect(writes.layoutPuts).toBeLessThanOrEqual(1);
+});
+
+/**
+ * Switching panels must not rewrite the layout.
+ *
+ * `panel/select` changes one string. It used to persist the whole serialized project — and the
+ * localStorage mirror on top of that — so cycling tabs pushed `navigator.storage.estimate()` up by
+ * roughly the project size per switch: LevelDB appends the new value and keeps the old one until
+ * compaction. The number recovered on its own, the write amplification behind it did not.
+ */
+test("cycling panels writes the hot-fields record, never the layout", async ({ page }) => {
+  await seedProject(page, {
+    panels: 3,
+    gridSize: 6,
+    distinctMedia: 1,
+    spec: SIZES.small,
+    filledCellsPerPanel: 1
+  });
+  await page.goto("/");
+  const [firstPanel, secondPanel, thirdPanel] = ["Panel 1", "Panel 2", "Panel 3"];
+  await expect(page.getByRole("tab", { name: firstPanel })).toBeVisible();
+
+  type PutCounts = { ui: number; layout: number };
+  type CountingWindow = Window & { __putCounts?: PutCounts; __restorePut?: () => void };
+  // Counted in the page and READ back on demand: the object a `page.evaluate` returns is a
+  // serialized copy, so polling one would poll a snapshot that can never change.
+  await page.evaluate(() => {
+    const store = IDBObjectStore.prototype as unknown as {
+      put: (this: IDBObjectStore, value: unknown, key?: IDBValidKey) => IDBRequest;
+    };
+    const originalPut = store.put;
+    const counts = { ui: 0, layout: 0 };
+    (window as CountingWindow).__putCounts = counts;
+    Object.defineProperty(IDBObjectStore.prototype, "put", {
+      configurable: true,
+      value: function put(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === "state" && key === "ui:v1") {
+          counts.ui += 1;
+        }
+        if (this.name === "state" && key === "state:v1") {
+          counts.layout += 1;
+        }
+        return originalPut.call(this, value, key);
+      }
+    });
+    (window as CountingWindow).__restorePut = () => {
+      Object.defineProperty(IDBObjectStore.prototype, "put", {
+        configurable: true,
+        value: originalPut
+      });
+    };
+  });
+  const readCounts = () =>
+    page.evaluate(() => (window as CountingWindow).__putCounts ?? { ui: 0, layout: 0 });
+
+  // Two full cycles, ending back where it started, with a pause past the 400 ms trailing debounce
+  // after each switch. Without the pause the whole cycle collapses into one write whose content
+  // equals what is already stored — which the dedup then drops, leaving nothing to count.
+  for (let round = 0; round < 2; round += 1) {
+    for (const panel of [secondPanel, thirdPanel, firstPanel]) {
+      await page.getByRole("tab", { name: panel }).click();
+      await expect(page.getByRole("tab", { name: panel })).toHaveAttribute(
+        "aria-selected",
+        "true"
+      );
+      await page.waitForTimeout(500);
+    }
+  }
+  // Past the 400 ms trailing debounce and the 2 s cap.
+  await expect.poll(async () => (await readCounts()).ui, { timeout: 5_000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(1_200);
+  await page.evaluate(() => {
+    (window as CountingWindow).__restorePut?.();
+  });
+
+  const counts = await readCounts();
+  expect(counts.layout).toBe(0);
+  expect(counts.ui).toBeGreaterThan(0);
+
+  // And the switch is still durable: the sidecar is what the next boot reads it from.
+  await page.reload();
+  await expect(page.getByRole("tab", { name: firstPanel })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+  await page.getByRole("tab", { name: thirdPanel }).click();
+  await expect(page.getByRole("tab", { name: thirdPanel })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+  await page.waitForTimeout(1_200);
+  await page.reload();
+  await expect(page.getByRole("tab", { name: thirdPanel })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
 });
