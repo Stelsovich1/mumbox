@@ -31,8 +31,10 @@ import {
   sliceToAudioBuffer
 } from "./decodeAudio";
 import {
+  HEAD_SECONDS,
   planSegments,
   resolveLateSegment,
+  SEGMENT_MARGIN_SECONDS,
   shouldReadRange,
   shouldSegmentWindow
 } from "./partialPlan";
@@ -238,6 +240,42 @@ function isPartialPathLikely(cell: GridCell, durationMs: number | null): boolean
     }) ||
     shouldSegmentWindow({ windowSeconds, sampleRate: getEngineSampleRate(), channels: 2 })
   );
+}
+
+/**
+ * What warming this cell will actually put in the cache.
+ *
+ * NOT the same as the PCM of its window, and conflating the two is what left half a panel cold on a
+ * phone the moment a default budget existed. A STREAMED cell caches its head — 0.5 s, about 0.2 MiB
+ * — and nothing else; the segments that follow are never cache entries. Estimating it at its window
+ * instead means an untrimmed three-minute track is judged at ~38 MiB, so eighteen of them come to
+ * ~680 MiB, the budget is "exhausted" after the first handful, and every cell after that is skipped
+ * for good: the warm-up does not revisit a skipped target, so those pads stay dim for the life of
+ * the panel with nothing on screen to explain it.
+ *
+ * A HINT, like `isPartialPathLikely`, and it errs LOW on purpose. The container is unknown until a
+ * probe runs, so an ogg cell counted as streamable will cost its full decode instead — and being
+ * wrong that way costs an eviction, which the two-tier LRU handles and which never touches a
+ * playing cue. Being wrong the other way costs a cell that is never warm again.
+ */
+function estimateWarmBytes(
+  cell: GridCell,
+  durationMs: number | null,
+  mono: boolean,
+  sampleRate: number
+): number | null {
+  const windowMs = getTrimmedDurationMs(cell, durationMs);
+  if (windowMs === null) {
+    // No duration means no estimate, which the caller reads as "unknown" rather than as zero.
+    return null;
+  }
+  if (
+    cell.playbackMode !== "loop" &&
+    shouldSegmentWindow({ windowSeconds: windowMs / 1000, sampleRate, channels: 2 })
+  ) {
+    return estimatePcmBytes((HEAD_SECONDS + SEGMENT_MARGIN_SECONDS) * 1000, mono, sampleRate);
+  }
+  return estimatePcmBytes(windowMs, mono, sampleRate);
 }
 
 /**
@@ -2052,10 +2090,12 @@ export function useAudioEngine(
           }
 
           // Predictive skip: decoding something that would be evicted on arrival costs a full
-          // decode plus a transient allocation spike, for nothing.
+          // decode plus a transient allocation spike, for nothing. Measured against what will
+          // actually be CACHED — a streamed cell keeps only its head; see `estimateWarmBytes`.
           const asset = mediaByIdRef.current.get(target.mediaId);
-          const estimate = estimatePcmBytes(
-            getTrimmedDurationMs(target.cell, asset?.durationMs ?? null),
+          const estimate = estimateWarmBytes(
+            target.cell,
+            asset?.durationMs ?? null,
             monoRef.current,
             getEngineSampleRate()
           );

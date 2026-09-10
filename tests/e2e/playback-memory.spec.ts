@@ -589,3 +589,39 @@ test("an explicit zero budget clears the default", async ({ page }) => {
 
   expect((await diagCacheStats(page))?.budgetBytes).toBeNull();
 });
+
+/**
+ * A budget must not leave half a panel permanently cold.
+ *
+ * The predictive skip was written when warming a cell meant decoding its whole window, so it judges
+ * the cell at that window's PCM. A STREAMED cell caches its head — 0.5 s, about 0.2 MiB — and
+ * nothing else, so judging it at 7 MiB is wrong by a factor of thirty-five, and once a default
+ * budget existed on a coarse pointer the arithmetic tipped: cells warmed for a while and then a
+ * whole group stopped, dim for the life of the panel, with the page perfectly healthy and nothing on
+ * screen to explain it. The warm-up never revisits a skipped target.
+ *
+ * The fixture is built so the two estimates land on OPPOSITE sides of the budget: eight untrimmed
+ * 20 s stereo cells are 7.06 MB of window PCM each against a 4 MiB budget — every one refused under
+ * the old estimate — while eight heads together are ~1.6 MB, comfortably inside it. `?rate=44100`
+ * pins the engine to the fixtures' own rate, because a WAV whose rate differs from the engine's
+ * deliberately falls through to a full decode, where a skip would be legitimate and the test would
+ * be measuring the wrong thing.
+ */
+test("a budget skips nothing that would only have cached a head", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 8,
+    spec: { seconds: 20, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 8
+  });
+  await page.goto("/?pcmBudgetMb=4&rate=44100");
+
+  await waitForWarm(page, 8);
+  const stats = await diagCacheStats(page);
+  expect(stats?.budgetBytes).toBe(4 * 1024 * 1024);
+  // Nothing was refused, and nothing had to be evicted to achieve it: eight heads fit.
+  expect(await page.evaluate(() => window.__mumboxDiag?.snapshot().then((s) => s.lastWarmupSkipped))).toBe(0);
+  expect(stats?.evictions).toBe(0);
+});
