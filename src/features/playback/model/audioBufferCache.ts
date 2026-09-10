@@ -89,6 +89,18 @@ export type AudioBufferCache = {
   delete: (key: string) => boolean;
   deleteByMediaId: (mediaId: string) => number;
   clear: () => void;
+  /**
+   * Notified for every key removed by BUDGET EVICTION, and only by that.
+   *
+   * Exists because the warm indicator is engine state keyed by cache key, and nothing invalidated
+   * it when the cache dropped an entry underneath: the pad went on claiming to be instant while its
+   * buffer was gone, so a tap flickered through a cold decode and the cell suppressed its own
+   * re-warm. Invisible until a device had a budget at all — with `null` nothing was ever evicted.
+   *
+   * Explicit deletions are NOT reported here: `delete`, `deleteByMediaId` and `clear` all have
+   * callers who already know what they removed and update the warm state themselves.
+   */
+  subscribeEvictions: (listener: (key: string) => void) => () => void;
   setPinned: (keys: Iterable<string>) => void;
   setPriority: (keys: Iterable<string>) => void;
   keys: () => string[];
@@ -190,6 +202,7 @@ export function createAudioBufferCache(budgetBytes: number | null): AudioBufferC
   let hits = 0;
   let misses = 0;
   let evictions = 0;
+  const evictionListeners = new Set<(key: string) => void>();
 
   const retainBuffer = (entry: PlaybackBufferEntry) => {
     const count = bufferRefs.get(entry.buffer) ?? 0;
@@ -259,12 +272,21 @@ export function createAudioBufferCache(budgetBytes: number | null): AudioBufferC
         }
         if (removeKey(key)) {
           evictions += 1;
+          for (const listener of evictionListeners) {
+            listener(key);
+          }
         }
       }
     }
   };
 
   return {
+    subscribeEvictions(listener) {
+      evictionListeners.add(listener);
+      return () => {
+        evictionListeners.delete(listener);
+      };
+    },
     get(key) {
       const entry = entries.get(key);
       if (!entry) {

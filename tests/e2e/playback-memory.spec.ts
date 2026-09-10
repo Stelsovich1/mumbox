@@ -570,7 +570,7 @@ test("a coarse pointer gets a default PCM budget and a fine pointer does not", a
     () => window.matchMedia("(hover: none) and (pointer: coarse)").matches
   );
   const stats = await diagCacheStats(page);
-  expect(stats?.budgetBytes).toBe(coarse ? 384 * 1024 * 1024 : null);
+  expect(stats?.budgetBytes).toBe(coarse ? 1024 * 1024 * 1024 : null);
 });
 
 /**
@@ -624,4 +624,46 @@ test("a budget skips nothing that would only have cached a head", async ({ page 
   // Nothing was refused, and nothing had to be evicted to achieve it: eight heads fit.
   expect(await page.evaluate(() => window.__mumboxDiag?.snapshot().then((s) => s.lastWarmupSkipped))).toBe(0);
   expect(stats?.evictions).toBe(0);
+});
+
+/**
+ * A cell claims to be warm exactly when its buffer is cached.
+ *
+ * The warm indicator is engine state keyed by cache key, and nothing invalidated it when the cache
+ * evicted underneath — invisible while no device had a budget, because then nothing was ever
+ * evicted. With one, the pad stays coloured, the tap finds no buffer, and the cell flickers through
+ * a cold decode before it plays. Worse than cosmetic: holding the key also suppressed the re-warm,
+ * so the cell could never recover on its own.
+ *
+ * The budget is LOWERED after the panel is warm, rather than set at load. Setting it at load proves
+ * nothing about eviction: the predictive skip exists precisely so that a cell which would be
+ * evicted on arrival is never decoded, so the cache never goes over budget and no eviction happens
+ * at all. Lowering it is also the real sequence a device sees, via `?pcmBudgetMb=` or the diag knob.
+ *
+ * The assertion is the invariant rather than a count: however many entries survive, the cells
+ * claiming to be warm are exactly those keys.
+ */
+test("an evicted buffer takes its warm indicator with it", async ({ page }) => {
+  await installBufferAudioMock(page);
+  await seedProject(page, {
+    panels: 1,
+    gridSize: 6,
+    distinctMedia: 8,
+    spec: { seconds: 20, channels: 2, freqHz: 220 },
+    filledCellsPerPanel: 8,
+    trimStartMs: 0,
+    trimEndMs: 5000
+  });
+  await page.goto("/?rate=44100");
+
+  // 5 s of 44.1 kHz stereo is 1 764 000 bytes per cell, so eight of them are ~13.5 MiB.
+  await waitForWarm(page, 8);
+  await diagSetBudgetMb(page, 4);
+
+  await expect.poll(async () => (await diagCacheStats(page))?.evictions ?? 0).toBeGreaterThan(0);
+  const cachedKeys = await diagCacheKeys(page);
+  await expect(page.locator('[data-warm-state="ready"]')).toHaveCount(cachedKeys.length);
+  // And the survivors are genuinely cached: a count alone would also pass on an implementation
+  // that dropped every indicator.
+  expect(cachedKeys.length).toBeGreaterThan(0);
 });

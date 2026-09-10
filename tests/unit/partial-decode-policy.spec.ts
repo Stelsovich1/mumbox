@@ -13,7 +13,8 @@ import {
  * observable as a failure at all: a blocked verdict is silent, every pad still plays, and the only
  * symptom is memory. Measured on a real 16-file library under the previous rule — 14 passes and one
  * `windows-disagree` — the browser was blocked permanently and the panel held 1 539 MiB of resident
- * PCM instead of 182 MiB, which on a phone is a killed tab.
+ * PCM, with the session then killed. (A working panel measures 110-180 MiB, but on other hardware
+ * and another project: an order of magnitude, not a paired measurement.)
  *
  * `derivePartialVerdict` is pure on purpose. The tally around it needs `localStorage` and a
  * `navigator`, neither of which the unit tier has, so the decision is the part that is testable

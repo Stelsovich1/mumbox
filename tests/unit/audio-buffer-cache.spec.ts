@@ -409,3 +409,65 @@ test("reports the budget without walking the entries", () => {
   expect(cache.budgetBytes()).toBeNull();
   expect(cache.stats().budgetBytes).toBeNull();
 });
+
+test.describe("eviction notifications", () => {
+  test("a budget eviction names the key it dropped", () => {
+    // The warm indicator lives outside the cache, keyed by cache key, and until a device had a
+    // budget nothing was ever evicted — so nothing invalidated it. The pad went on claiming to be
+    // instant with no buffer behind it, and holding the key also suppressed its re-warm.
+    const cache = createAudioBufferCache(100);
+    const evicted: string[] = [];
+    cache.subscribeEvictions((key) => evicted.push(key));
+
+    cache.set("a", entry(60));
+    cache.set("b", entry(60));
+
+    expect(evicted).toEqual(["a"]);
+    expect(cache.has("a")).toBe(false);
+    expect(cache.has("b")).toBe(true);
+  });
+
+  test("an explicit removal is not an eviction", () => {
+    // `delete`, `deleteByMediaId` and `clear` all have callers who already know what they removed
+    // and update the warm state themselves. Reporting those here would double-handle them, and
+    // `clear()` would fire once per entry on a purge.
+    const cache = createAudioBufferCache(1000);
+    const evicted: string[] = [];
+    cache.subscribeEvictions((key) => evicted.push(key));
+
+    cache.set("media-1|0|e|o|s", entry(10));
+    cache.set("media-2|0|e|o|s", entry(10));
+    cache.delete("media-1|0|e|o|s");
+    cache.deleteByMediaId("media-2");
+    cache.set("media-3|0|e|o|s", entry(10));
+    cache.clear();
+
+    expect(evicted).toEqual([]);
+  });
+
+  test("unsubscribing stops the notifications", () => {
+    const cache = createAudioBufferCache(100);
+    const evicted: string[] = [];
+    const stop = cache.subscribeEvictions((key) => evicted.push(key));
+
+    cache.set("a", entry(60));
+    cache.set("b", entry(60));
+    stop();
+    cache.set("c", entry(60));
+
+    expect(evicted).toEqual(["a"]);
+  });
+
+  test("a pinned entry is never reported, because it is never evicted", () => {
+    const cache = createAudioBufferCache(100);
+    const evicted: string[] = [];
+    cache.subscribeEvictions((key) => evicted.push(key));
+
+    cache.set("a", entry(60));
+    cache.setPinned(["a"]);
+    cache.set("b", entry(60));
+
+    expect(evicted).toEqual([]);
+    expect(cache.has("a")).toBe(true);
+  });
+});

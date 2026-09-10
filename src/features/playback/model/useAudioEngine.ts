@@ -2243,6 +2243,27 @@ export function useAudioEngine(
     []
   );
 
+  /**
+   * An evicted buffer must take its warm indicator with it.
+   *
+   * The indicator is engine state keyed by cache key, and until a device had a budget nothing was
+   * ever evicted, so nothing invalidated it. With a budget the gap became a lie the user can feel:
+   * the pad stays coloured, the tap finds no buffer, and the cell flickers through a cold decode —
+   * while `warmedKeys` still holding the key also suppresses any re-warm.
+   *
+   * The cell is left DIM rather than re-warmed on the spot. Re-warming what the budget has just
+   * refused is a thrash — decode, evict, decode — and the dim state is exactly the honest answer:
+   * this pad is not instant. `queueWarmedKeys` batches to the next frame, so a burst of evictions
+   * is one render.
+   */
+  useEffect(
+    () =>
+      playbackBufferCache.subscribeEvictions((key) => {
+        queueWarmedKeys([[key, null]]);
+      }),
+    [queueWarmedKeys]
+  );
+
   useEffect(() => {
     // One write for master and mute, on one node.
     const master = masterGainRef.current;
