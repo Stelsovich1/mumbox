@@ -110,6 +110,15 @@ export type DiagPartial = {
   /** Windows served without a full decode, split by shape. */
   served: { range: number; streamed: number; declined: number };
   /**
+   * Why the partial path declined, counted per reason.
+   *
+   * `served.declined` alone says the feature is not paying without saying whether that is correct.
+   * A decline is a full decode — 30-40 MiB of resident PCM for a three-minute track — so on a
+   * device that cannot be attached to a debugger this is the difference between "these cues are
+   * loops, which are excluded on purpose" and "the whole path is off and the tab is about to die".
+   */
+  declineReasons: Record<string, number>;
+  /**
    * `watchdog` counts cues ended by the rAF safety net rather than by their last segment.
    *
    * On a healthy streamed cue it must stay 0: the last segment's `onended` is what ends a cue, and
@@ -144,6 +153,17 @@ export type DiagPartial = {
     peakLive: number;
   };
   verifications: { pass: number; fail: number; skipped: number };
+  /**
+   * Why a verification failed or was skipped, keyed `fail:<reason>` / `skipped:<reason>`.
+   *
+   * The tally alone cannot be acted on. `windows-disagree` is a property of the FILE — periodic
+   * material the alignment search cannot decide — while `decode-rejected` is a property of the
+   * BROWSER, and the two demand opposite responses. Without the reason the only way to tell them
+   * apart was a debugger, which iOS does not offer.
+   */
+  verificationReasons: Record<string, number>;
+  /** Media whose measurement failed, so the file can actually be found and looked at. */
+  failedMediaIds: string[];
   /** Measured samples between an isolated mid-file decode and the full one, per media. */
   alignDeltaSamples: Record<string, number>;
   rangeReads: { count: number; bytes: number };
@@ -252,8 +272,11 @@ const state = {
   partial: {
     probes: { mp3: 0, wav: 0, unsupported: 0 },
     served: { range: 0, streamed: 0, declined: 0 },
+    declineReasons: new Map<string, number>(),
     segments: { scheduled: 0, late: 0, missed: 0, watchdog: 0, recovered: 0, live: 0, peakLive: 0 },
     verifications: { pass: 0, fail: 0, skipped: 0 },
+    verificationReasons: new Map<string, number>(),
+    failedMediaIds: [] as string[],
     alignDeltaSamples: new Map<string, number>(),
     rangeReads: { count: 0, bytes: 0 }
   }
@@ -297,17 +320,27 @@ export function isDiagnosticsEnabled(): boolean {
   return overlayEnabled;
 }
 
-/** `?pcmBudgetMb=NNN` — the knob used to walk the mobile budget up until the device complains. */
-export function getBudgetOverrideFromQuery(): number | null {
+/**
+ * `?pcmBudgetMb=NNN` — the knob used to walk the mobile budget up until the device complains.
+ *
+ * `present` is separate from `bytes` because "no flag" and "flag asking for no budget" became
+ * different answers once a device could have a default budget: `?pcmBudgetMb=0` must CLEAR the cap,
+ * and a single `number | null` return cannot say that apart from silence.
+ */
+export function readBudgetOverride(): { present: boolean; bytes: number | null } {
   const raw = readQueryFlag("pcmBudgetMb");
   if (raw === null) {
-    return null;
+    return { present: false, bytes: null };
   }
   const megabytes = Number.parseFloat(raw);
   if (!Number.isFinite(megabytes) || megabytes <= 0) {
-    return null;
+    return { present: true, bytes: null };
   }
-  return Math.round(megabytes * 1024 * 1024);
+  return { present: true, bytes: Math.round(megabytes * 1024 * 1024) };
+}
+
+export function getBudgetOverrideFromQuery(): number | null {
+  return readBudgetOverride().bytes;
 }
 
 export function setPcmAccountingSource(
@@ -411,8 +444,22 @@ export function recordProbe(format: "mp3" | "wav" | "unsupported"): void {
   state.partial.probes[format] += 1;
 }
 
-export function recordPartialServed(kind: "range" | "streamed" | "declined"): void {
+/** Caps the reason maps: a reason set is small and bounded by the code, this is belt and braces. */
+const REASON_LIMIT = 32;
+
+function bumpReason(counter: Map<string, number>, reason: string): void {
+  const key = counter.has(reason) || counter.size < REASON_LIMIT ? reason : "other";
+  counter.set(key, (counter.get(key) ?? 0) + 1);
+}
+
+export function recordPartialServed(
+  kind: "range" | "streamed" | "declined",
+  reason?: string
+): void {
   state.partial.served[kind] += 1;
+  if (kind === "declined") {
+    bumpReason(state.partial.declineReasons, reason ?? "unspecified");
+  }
 }
 
 /**
@@ -436,11 +483,23 @@ export function recordSegment(
 export function recordPartialVerificationResult(
   kind: "pass" | "fail" | "skipped",
   mediaId?: string,
-  alignDeltaSamples?: number
+  alignDeltaSamples?: number,
+  reason?: string
 ): void {
   state.partial.verifications[kind] += 1;
   if (mediaId !== undefined && alignDeltaSamples !== undefined) {
     state.partial.alignDeltaSamples.set(mediaId, alignDeltaSamples);
+  }
+  if (kind !== "pass") {
+    bumpReason(state.partial.verificationReasons, `${kind}:${reason ?? "unspecified"}`);
+  }
+  if (
+    kind === "fail" &&
+    mediaId !== undefined &&
+    !state.partial.failedMediaIds.includes(mediaId) &&
+    state.partial.failedMediaIds.length < REASON_LIMIT
+  ) {
+    state.partial.failedMediaIds.push(mediaId);
   }
 }
 
@@ -508,8 +567,11 @@ export function getPartialDiag(): DiagPartial {
     uaKey: record.uaKey,
     probes: { ...state.partial.probes },
     served: { ...state.partial.served },
+    declineReasons: Object.fromEntries(state.partial.declineReasons),
     segments: { ...state.partial.segments },
     verifications: { ...state.partial.verifications },
+    verificationReasons: Object.fromEntries(state.partial.verificationReasons),
+    failedMediaIds: [...state.partial.failedMediaIds],
     alignDeltaSamples: Object.fromEntries(state.partial.alignDeltaSamples),
     rangeReads: { ...state.partial.rangeReads }
   };

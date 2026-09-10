@@ -1,6 +1,6 @@
 import { test } from "@playwright/test";
 
-import { diagPartial, diagPcmBytes } from "../support/diag";
+import { diagPartial, diagPcmBytes, diagRoutePcmBytes } from "../support/diag";
 import { seedProject } from "../support/seedProject";
 import { expectWithinBaseline } from "./support/baseline";
 import {
@@ -85,6 +85,14 @@ test("a trimmed window of a long media never decodes the whole file", async ({ p
       ratio: 1.1,
       absFloor: 1024 * 1024
     },
+    // The same absolute ceiling as the streamed scenario, for the same reason: twelve 5 s windows
+    // are 21.2 MiB and a silent fall back to full decodes is 762 MiB.
+    residentPcmBytes: {
+      value: (await diagPcmBytes(page)) + (await diagRoutePcmBytes(page)),
+      unit: "bytes",
+      gate: "hard",
+      ceiling: 64 * 1024 * 1024
+    },
     warmupTotalMs: {
       value: await page.evaluate(() => window.__mumboxDiag?.lastWarmupMs() ?? -1),
       unit: "ms",
@@ -139,6 +147,23 @@ test("a panel of whole long tracks warms to heads, not to tracks", async ({ page
       value: getPeakConcurrentBytes(probe.decodes),
       unit: "bytes",
       gate: "record"
+    },
+    /**
+     * An ABSOLUTE ceiling on resident PCM, and the only gate here that needs no baseline.
+     *
+     * Every other number in this scenario is `exact` against a recorded figure, which pins the
+     * behaviour of a clean profile — and the regression that made this gate necessary was not in a
+     * clean profile. A `blocked` verdict persisted in `mumbox:partial-decode:v1` took the whole
+     * byte-range path off, in the field only, and nothing in CI could reach that state. What is
+     * observable regardless of the cause is the consequence: twelve heads are ~2.4 MiB, twelve full
+     * 180 s stereo decodes are 762 MiB, and the ceiling sits far enough above the former that only
+     * a collapse to the latter can breach it.
+     */
+    residentPcmBytes: {
+      value: (await diagPcmBytes(page)) + (await diagRoutePcmBytes(page)),
+      unit: "bytes",
+      gate: "hard",
+      ceiling: 64 * 1024 * 1024
     },
     segmentsMissed: {
       value: partial?.segments.missed ?? -1,

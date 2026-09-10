@@ -1,5 +1,5 @@
 import {
-  getBudgetOverrideFromQuery,
+  readBudgetOverride,
   setDiagnosticsSinks,
   setPcmAccountingSource
 } from "../../../shared/lib/diagnostics";
@@ -20,23 +20,44 @@ import { createAudioBufferCache } from "./audioBufferCache";
  */
 
 /**
- * There is no default budget, on any device.
+ * There is no default budget on a desktop, and there IS one on a coarse-pointer device.
  *
- * A cap smaller than the project turns every trigger into a cold decode, and this app is a
- * soundboard: a pad that is not instant is not a pad. Capping was a regression for people whose
- * libraries already worked. What made memory grow without bound before was not the absence of a
- * cap but the absence of housekeeping — deleted media kept its PCM, revisited panels accumulated,
- * a looping fallback leaked a context per iteration, and an untrimmed decode was kept even for a
- * cell that plays twelve seconds of it. Those are fixed, so the footprint is now what the project
- * actually needs rather than everything it ever touched.
+ * The desktop half is unchanged and for the original reason: a cap smaller than the project turns
+ * every trigger into a cold decode, and this app is a soundboard, so a pad that is not instant is
+ * not a pad. The bound there comes from housekeeping — deleted media releases its PCM, only the
+ * panel on screen is kept warm, a streamed route releases its finished segments.
  *
- * The limit still exists so it can be set deliberately: `?pcmBudgetMb=N` at load, or
- * `__mumboxDiag.setBudgetMb(n)` at runtime, with a non-positive value clearing it again. That is
- * the knob for measuring where a device gives up — pair it with `__mumboxDiag.termination()`,
- * which reports whether the previous session ended without running its `pagehide` handler.
+ * The mobile half exists because housekeeping bounds the footprint to ONE PANEL'S WORTH, and on a
+ * phone one panel's worth can still be more than the device has. Measured on a real 18-cell panel
+ * of whole MP3s with byte-range decoding off: 1 539 MiB resident, and `__mumboxDiag.termination()`
+ * reporting the previous session killed. With the path on the same panel held 182 MiB — so the
+ * budget is not the mechanism that makes this app fit, it is the backstop for when that mechanism
+ * declines. Declining is legitimate and permanent for some cells: a loop is excluded from
+ * streaming by design, and a file whose alignment cannot be measured is off the path for good. A
+ * handful of those must not be able to kill the tab.
+ *
+ * 384 MiB, and the number is a floor-of-evidence rather than a measurement: it is above the 182 MiB
+ * a working panel of long tracks needs, and far below the 1 539 MiB that got a tab killed. The
+ * two-tier eviction is what makes it safe to be wrong — a pinned buffer is never evicted, so a
+ * playing cue cannot be cut, and the active panel is evicted last.
+ *
+ * Both halves stay overridable, and the override still wins in BOTH directions: `?pcmBudgetMb=N`
+ * at load or `__mumboxDiag.setBudgetMb(n)` at runtime sets it, `?pcmBudgetMb=0` clears it even
+ * where a default would apply. That is the knob for measuring where a device gives up.
  */
+export const COARSE_POINTER_BUDGET_BYTES = 384 * 1024 * 1024;
+
 export function getDefaultBudgetBytes(): number | null {
-  return getBudgetOverrideFromQuery();
+  const override = readBudgetOverride();
+  if (override.present) {
+    return override.bytes;
+  }
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return null;
+  }
+  return window.matchMedia("(hover: none) and (pointer: coarse)").matches
+    ? COARSE_POINTER_BUDGET_BYTES
+    : null;
 }
 
 export const playbackBufferCache = createAudioBufferCache(getDefaultBudgetBytes());

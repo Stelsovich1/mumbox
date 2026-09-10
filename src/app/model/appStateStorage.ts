@@ -25,8 +25,31 @@ const APP_DB_NAME = "mumbox-app";
 const APP_STORE_NAME = "state";
 export const STATE_RECORD_KEY = "state:v1";
 export const SESSION_RECORD_KEY = "session:v1";
+/**
+ * The hot fields, in their own record.
+ *
+ * Switching a panel changes one string, and it used to rewrite the WHOLE layout - twice, once into
+ * IndexedDB and once into the localStorage mirror. Both are LevelDB-backed, and overwriting a key
+ * appends: the old value lives on until compaction, so `navigator.storage.estimate()` climbed by
+ * roughly the size of the project on every tab switch. The number came back down on its own, but
+ * the write amplification behind it was real - a 20-panel project meant ~0.78 MiB of serialization
+ * and disk traffic for six bytes of change, on the main thread, while audio played.
+ *
+ * These five are exactly `DEFERRABLE_ACTIONS` minus `editMode`, which is not persisted at all. They
+ * are still written into `state:v1` by every FULL write, so the record stays self-contained for a
+ * reader that knows nothing about this key - including an older build.
+ */
+export const UI_RECORD_KEY = "ui:v1";
 
-/** The keys this store replaces, kept readable for one release. See `LEGACY_MIRROR_MAX_CHARS`. */
+/**
+ * The keys this store replaced.
+ *
+ * Still READ, so a layout written by an older build is migrated on first run; no longer written.
+ * The mirror was a rollback net for one release and cost a full `JSON.stringify` plus a
+ * synchronous localStorage write on every persisted change, which is the same amplification
+ * `UI_RECORD_KEY` exists to remove. Going back to a build older than the IndexedDB move now finds
+ * whatever that build last wrote, which is the honest answer rather than a silently stale project.
+ */
 export const LEGACY_STATE_KEY = "mumbox:state:v1";
 export const LEGACY_SESSION_KEY = "mumbox:project-session:v1";
 
@@ -50,18 +73,50 @@ export const WRITE_DEBOUNCE_MS = 400;
 export const WRITE_MAX_WAIT_MS = 2000;
 
 /**
- * How large the localStorage mirror may get before it stops being written.
+ * The hot fields as they are written down.
  *
- * The mirror exists so a user who is still on the previous build — the app is a PWA with
- * `registerType: "prompt"`, and someone can stay on one for weeks — does not open it to an empty
- * project. It is a ROLLBACK NET, not a sync channel: IndexedDB always wins, and edits made on the
- * old build are lost. Pretending otherwise would need merge-by-timestamp, which is a feature with
- * its own failure modes, and doing it badly is worse than saying so.
- *
- * Self-disabling: past this size the mirror simply stops, which is exactly where localStorage had
- * stopped working anyway. Remove the mirror, and this constant, one release later.
+ * A plain object of primitives on purpose: it is compared by its JSON on every write, so it must be
+ * small and it must not contain anything whose serialization depends on key order beyond this
+ * literal.
  */
-const LEGACY_MIRROR_MAX_CHARS = 1_500_000;
+export type StoredUiState = {
+  activePanelId: string;
+  masterVolume: number;
+  masterMuted: boolean;
+  stopOthers: boolean;
+  monoPlayback: boolean;
+};
+
+export function pickUiState(state: AppState): StoredUiState {
+  return {
+    activePanelId: state.activePanelId,
+    masterVolume: state.masterVolume,
+    masterMuted: state.masterMuted,
+    stopOthers: state.stopOthers,
+    monoPlayback: state.monoPlayback
+  };
+}
+
+/**
+ * Validated rather than cast.
+ *
+ * Nothing between this store and the reducer checks anything - `hydrateAppState` catches a throw
+ * and starts fresh, which for a bad UI record would mean losing the whole project over a stale
+ * boolean. A record that is not the expected shape is ignored and `state:v1` answers instead.
+ */
+function isStoredUiState(value: unknown): value is StoredUiState {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<StoredUiState>;
+  return (
+    typeof candidate.activePanelId === "string" &&
+    typeof candidate.masterVolume === "number" &&
+    typeof candidate.masterMuted === "boolean" &&
+    typeof candidate.stopOthers === "boolean" &&
+    typeof candidate.monoPlayback === "boolean"
+  );
+}
 
 export type LoadedAppState = {
   state: SerializableAppState | null;
@@ -109,7 +164,7 @@ export async function readAppState(): Promise<LoadedAppState> {
     } catch {
       session = undefined;
     }
-    return { state: stored, session: session ?? null, failed: false };
+    return { state: await applyStoredUi(stored), session: session ?? null, failed: false };
   }
 
   const legacyState = readLegacy(LEGACY_STATE_KEY) as SerializableAppState | null;
@@ -122,41 +177,67 @@ export async function readAppState(): Promise<LoadedAppState> {
     if (legacySession) {
       await set(SESSION_RECORD_KEY, legacySession, appStore);
     }
+    // A sidecar left over from a project this one replaces would override the migrated volume and
+    // active panel with another project's. The legacy payload is complete on its own.
+    await del(UI_RECORD_KEY, appStore);
   } catch {
     // The migration failed but the data is readable; run from it rather than refusing to start.
   }
   return { state: legacyState, session: legacySession, failed: false };
 }
 
+/**
+ * Folds `ui:v1` over the layout record.
+ *
+ * The two can disagree: `state:v1` also carries these five fields, and something that writes it
+ * without going through this module - the e2e seeder, a hand-edited record, a build that predates
+ * `ui:v1` - leaves the sidecar behind. `ui:v1` still wins, because in the only case that happens
+ * in production it is the newer of the two; the seeder deletes it instead of racing this rule.
+ * `hydrateAppState` re-checks `activePanelId` against the panels it actually has, so a stale id
+ * costs the active tab, never the layout.
+ */
+async function applyStoredUi(state: SerializableAppState): Promise<SerializableAppState> {
+  let ui: unknown;
+  try {
+    ui = await get(UI_RECORD_KEY, appStore);
+  } catch {
+    // A readable layout must not be discarded because a five-field sidecar failed.
+    return state;
+  }
+  return isStoredUiState(ui) ? { ...state, ...ui } : state;
+}
+
+/**
+ * The FULL write: layout, session and the hot fields, all three.
+ *
+ * `state:v1` keeps carrying the hot fields so it stays a complete layout on its own. Only
+ * `writeUiState` skips it, and only when nothing but those fields changed.
+ */
 export async function writeAppState(
   state: SerializableAppState,
-  session: ProjectSession
+  session: ProjectSession,
+  ui: StoredUiState
 ): Promise<void> {
   await set(STATE_RECORD_KEY, state, appStore);
   await set(SESSION_RECORD_KEY, session, appStore);
+  await set(UI_RECORD_KEY, ui, appStore);
+}
 
-  // The mirror, best effort and never allowed to fail the real write.
-  try {
-    const serialized = JSON.stringify(state);
-    if (serialized.length <= LEGACY_MIRROR_MAX_CHARS) {
-      localStorage.setItem(LEGACY_STATE_KEY, serialized);
-      localStorage.setItem(LEGACY_SESSION_KEY, JSON.stringify(session));
-    } else {
-      // Stopping means REMOVING, not freezing. A mirror left at its last written value hands the
-      // previous build a silently outdated project, which the user may then edit believing it is
-      // current — and those edits are discarded on the way back. An absent mirror gives them the
-      // honest empty project the design intends.
-      localStorage.removeItem(LEGACY_STATE_KEY);
-      localStorage.removeItem(LEGACY_SESSION_KEY);
-    }
-  } catch {
-    // Exactly the case the mirror is expected to hit eventually.
+/** The cheap write: a few dozen bytes, and the layout record is not touched. */
+export async function writeUiState(
+  ui: StoredUiState,
+  session: ProjectSession | null
+): Promise<void> {
+  await set(UI_RECORD_KEY, ui, appStore);
+  if (session) {
+    await set(SESSION_RECORD_KEY, session, appStore);
   }
 }
 
 export async function clearAppStateStorage(): Promise<void> {
   await del(STATE_RECORD_KEY, appStore).catch(() => undefined);
   await del(SESSION_RECORD_KEY, appStore).catch(() => undefined);
+  await del(UI_RECORD_KEY, appStore).catch(() => undefined);
   try {
     localStorage.removeItem(LEGACY_STATE_KEY);
     localStorage.removeItem(LEGACY_SESSION_KEY);
@@ -193,7 +274,28 @@ export type PersistenceHandle = {
   dispose: () => void;
 };
 
-export function createPersistence(onError: (error: unknown) => void): PersistenceHandle {
+/**
+ * What is already on disk when persistence starts, so the first cheap change stays cheap.
+ *
+ * Without it the first write of a session is always a full one, because nothing has been written
+ * yet — so the very first panel switch after a launch rewrote the whole layout, which is the case
+ * the split exists to remove. `BoardPage` passes the state it just READ; on a fresh project, or a
+ * failed read, it passes null and the first write is full, because there is no layout record to
+ * skip.
+ *
+ * The baseline layout need not be byte-identical to the record — `hydrateAppState` clamps and
+ * migrates — only equivalent, which is the same rule `useAppStore` already applies by refusing to
+ * write the state it loaded.
+ */
+export type PersistenceBaseline = {
+  state: AppState;
+  session: ProjectSession;
+};
+
+export function createPersistence(
+  onError: (error: unknown) => void,
+  baseline: PersistenceBaseline | null = null
+): PersistenceHandle {
   let pending: { state: AppState; session: ProjectSession } | null = null;
   let timer: number | null = null;
   let firstQueuedAt = 0;
@@ -206,6 +308,34 @@ export function createPersistence(onError: (error: unknown) => void): Persistenc
    */
   let stopped = false;
   let lastWriteFailed = false;
+  /**
+   * What the last successful write left on disk, by REFERENCE for the layout and by JSON for the
+   * hot fields.
+   *
+   * Reference equality is exact here rather than approximate: the reducer returns the same
+   * `panels`, `cellsByPanel` and `media` objects for every action that does not touch them, so
+   * three pointer comparisons decide whether `state:v1` needs rewriting at all — without the whole
+   * `serializeState` walk the comparison is meant to avoid. The hot fields are primitives and
+   * compared by their JSON, which also makes a write that would change nothing at all disappear.
+   *
+   * Cleared on a failed write, so a retry is always a full one: after a failure there is no longer
+   * anything to know about what is on disk.
+   */
+  let written: {
+    panels: unknown;
+    cellsByPanel: unknown;
+    media: unknown;
+    session: ProjectSession;
+    ui: string;
+  } | null = baseline
+    ? {
+        panels: baseline.state.panels,
+        cellsByPanel: baseline.state.cellsByPanel,
+        media: baseline.state.media,
+        session: baseline.session,
+        ui: JSON.stringify(pickUiState(baseline.state))
+      }
+    : null;
   // Serialized, so two flushes can never interleave and the last one wins. Same idiom the warm-up
   // chain in the audio engine uses.
   let chain: Promise<void> = Promise.resolve();
@@ -224,18 +354,45 @@ export function createPersistence(onError: (error: unknown) => void): Persistenc
     if (!next || stopped) {
       return chain;
     }
+    const previous = written;
+    const ui = pickUiState(next.state);
+    const uiSignature = JSON.stringify(ui);
+    const layoutUnchanged =
+      previous !== null &&
+      previous.panels === next.state.panels &&
+      previous.cellsByPanel === next.state.cellsByPanel &&
+      previous.media === next.state.media;
+    const sessionUnchanged = previous !== null && previous.session === next.session;
+
+    if (layoutUnchanged && sessionUnchanged && previous.ui === uiSignature) {
+      // Nothing to write. Reached by an action that produced a new state object without changing
+      // anything that is written down — and by returning early it also keeps the failure flag,
+      // so `flush` still reports the truth about the last write that happened.
+      return chain;
+    }
+
+    const record = () => {
+      written = {
+        panels: next.state.panels,
+        cellsByPanel: next.state.cellsByPanel,
+        media: next.state.media,
+        session: next.session,
+        ui: uiSignature
+      };
+      lastWriteFailed = false;
+    };
+    const fail = (error: unknown) => {
+      // Recorded as well as reported: `flush` has to be able to tell a caller that the state
+      // it is about to act on never reached storage.
+      written = null;
+      lastWriteFailed = true;
+      onError(error);
+    };
     const attempt = () =>
-      writeAppState(serializeState(next.state), next.session).then(
-        () => {
-          lastWriteFailed = false;
-        },
-        (error: unknown) => {
-          // Recorded as well as reported: `flush` has to be able to tell a caller that the state
-          // it is about to act on never reached storage.
-          lastWriteFailed = true;
-          onError(error);
-        }
-      );
+      (layoutUnchanged
+        ? writeUiState(ui, sessionUnchanged ? null : next.session)
+        : writeAppState(serializeState(next.state), next.session, ui)
+      ).then(record, fail);
     chain = chain.then(attempt, attempt);
     return chain;
   };

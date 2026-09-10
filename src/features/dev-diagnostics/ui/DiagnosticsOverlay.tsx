@@ -22,6 +22,20 @@ function formatMs(value: number | null) {
   return value === null ? "—" : `${String(Math.round(value))} мс`;
 }
 
+/**
+ * Reason counters, most frequent first and clipped to three.
+ *
+ * The overlay is a phone-width chip, and the tail of a reason histogram is noise: what is being
+ * looked for is the reason that explains most of the declines.
+ */
+function formatReasons(counts: Record<string, number>) {
+  return Object.entries(counts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3)
+    .map(([reason, count]) => `${reason} ${String(count)}`)
+    .join(" · ");
+}
+
 export function DiagnosticsOverlay() {
   const [snapshot, setSnapshot] = useState<DiagSnapshot | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -53,7 +67,7 @@ export function DiagnosticsOverlay() {
     return null;
   }
 
-  const { pcm, termination } = snapshot;
+  const { partial, pcm, termination } = snapshot;
   const budgetLabel = pcm.budgetBytes === null ? "∞" : formatMib(pcm.budgetBytes);
   const warmLabel =
     snapshot.lastWarmupSkipped > 0
@@ -121,6 +135,33 @@ export function DiagnosticsOverlay() {
           <Typography component="span" sx={{ font: "inherit" }}>
             {`панель: движок ${formatMs(snapshot.lastPanelSwitchEngineMs)} · отрисовка ${formatMs(snapshot.lastPanelSwitchPaintMs)}`}
           </Typography>
+          {/*
+            The byte-range path, and the reason it is on the overlay rather than only in
+            `__mumboxDiag`: a blocked verdict is silent — every pad still plays, and the only
+            symptom is 1.5 GiB of resident PCM and a killed tab. Reading it from a console needs a
+            debugger, which iOS does not offer, and iOS is the browser this feature is riskiest on.
+          */}
+          <Typography component="span" sx={{ font: "inherit" }}>
+            {`partial: ${partial.verdict} · поток ${String(partial.served.streamed)} · диап ${String(partial.served.range)} · отказ ${String(partial.served.declined)}`}
+          </Typography>
+          <Typography component="span" sx={{ font: "inherit" }}>
+            {`выравн: ok ${String(partial.verifications.pass)} · сбой ${String(partial.verifications.fail)} · проп ${String(partial.verifications.skipped)} · восст ${String(partial.segments.recovered)}`}
+          </Typography>
+          {/*
+            Only when there is something to say. A decline is a full decode, so its reason is the
+            difference between "loops, excluded by design" and "the path is off"; an empty line here
+            would just push the numbers that matter off a phone screen.
+          */}
+          {Object.keys(partial.declineReasons).length > 0 ? (
+            <Typography component="span" sx={{ font: "inherit" }}>
+              {`причины отказа: ${formatReasons(partial.declineReasons)}`}
+            </Typography>
+          ) : null}
+          {Object.keys(partial.verificationReasons).length > 0 ? (
+            <Typography component="span" sx={{ font: "inherit" }}>
+              {`причины сбоя: ${formatReasons(partial.verificationReasons)}`}
+            </Typography>
+          ) : null}
           <Typography component="span" sx={{ font: "inherit" }}>
             {`хранилище: ${snapshot.storage?.usage === undefined || snapshot.storage.usage === null ? "—" : `${formatMib(snapshot.storage.usage)} МиБ`}`}
           </Typography>

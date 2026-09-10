@@ -495,15 +495,21 @@ export async function ensureMp3Alignment(mediaId: string): Promise<boolean> {
   // The byte bound is the same shape `decodeMp3Range` uses: 2048 is an upper bound on an MPEG-1
   // Layer III frame, so this covers the frames the measurement needs plus a margin for the range
   // that ends it.
-  await ensureScannedTo(
-    blob,
-    index,
-    Math.min(
-      index.info.audioEndOffset,
-      index.info.firstFrameOffset + (REQUIRED_INDEX_FRAMES + 8) * 2048
-    )
+  const scanToFrames = async (frames: number) => {
+    await ensureScannedTo(
+      blob,
+      index,
+      Math.min(index.info.audioEndOffset, index.info.firstFrameOffset + frames * 2048)
+    );
+  };
+  await scanToFrames(REQUIRED_INDEX_FRAMES + 8);
+  // The scanner is handed over so a silent first attempt can grow its reference window: the
+  // reference has to start at frame 0 to stay on the full decode's timeline, so reaching past a
+  // quiet intro means a LONGER window and therefore more of the frame table. Scanning that far for
+  // every file would spend the header read on the fifteen in sixteen that never need it.
+  const outcome = await getDecodeSemaphore().run(() =>
+    verifyMp3Alignment(blob, probe, scanToFrames)
   );
-  const outcome = await getDecodeSemaphore().run(() => verifyMp3Alignment(blob, probe));
   return outcome.status === "pass";
 }
 

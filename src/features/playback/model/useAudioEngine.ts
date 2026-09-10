@@ -715,6 +715,11 @@ export function useAudioEngine(
     ): Promise<PlaybackBufferEntry | null> => {
       const asset = mediaByIdRef.current.get(mediaId);
       if (!isPartialPathLikely(cell, asset?.durationMs ?? null)) {
+        // Counted, not silent. This is the ordinary decline — a short one-shot with nothing to skip
+        // and nothing worth streaming — and it is also what a missing duration looks like, which is
+        // NOT ordinary: the window would then be judged against zero and every cell on the panel
+        // would take a full decode with no other trace anywhere.
+        recordPartialServed("declined", asset?.durationMs ? "no-payoff-hint" : "no-duration");
         return null;
       }
       const sourceSeconds = (asset?.durationMs ?? 0) / 1000;
@@ -785,15 +790,23 @@ export function useAudioEngine(
             channels: 2
           })
         ) {
-          recordPartialServed("declined");
+          // Three distinguishable shapes, and the whole point of separating them is that they call
+          // for different answers. A loop is excluded by design and costs a full decode knowingly;
+          // a plan that came back null means the browser verdict, the container or the missing
+          // alignment measurement took the cue off the path; a head that failed after a plan
+          // existed means the read itself did not work.
+          recordPartialServed(
+            "declined",
+            cell.playbackMode === "loop" ? "loop" : plan ? "head-failed" : "no-plan"
+          );
           return null;
         }
         const result = await decodeMediaRange({ mediaId, startSeconds, endSeconds, mono }, lane);
-        recordPartialServed(result ? "range" : "declined");
+        recordPartialServed(result ? "range" : "declined", result ? undefined : "range-empty");
         return result?.entry ?? null;
       } catch {
         // Never fail a cue from here; the full decode below is the fallback.
-        recordPartialServed("declined");
+        recordPartialServed("declined", "threw");
         return null;
       }
     },

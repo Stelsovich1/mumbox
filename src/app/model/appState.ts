@@ -940,6 +940,20 @@ function remapImportedState(
 }
 
 /**
+ * Turns one incoming blob into the blob that is actually stored.
+ *
+ * The seam exists so the import and merge paths can verify a media entry's checksum on the SAME
+ * read that produces the bytes to store. The archive reader hands out lazy `File.slice` views, so a
+ * separate verification pass and the write each read the source file in full — and inside `set()`
+ * that read is IndexedDB pulling bytes out of the picked file, which on Android sits behind a
+ * content provider. Injected rather than imported because `file-config` already imports this
+ * module; the dependency may only run one way.
+ *
+ * A throw aborts the write and triggers the same rollback a storage failure does.
+ */
+export type MediaWritePrepare = (item: { id: string; blob: Blob }) => Promise<Blob>;
+
+/**
  * Writes only the media the merge decided to keep, and rewrites incoming ids to the ids the merged
  * project uses. Reused assets are never written again — that is the whole point of deduplicating.
  */
@@ -948,7 +962,8 @@ export async function writeMergedProjectMedia(
   blobs: { id: string; blob: Blob }[],
   mediaIdMap: Map<string, string>,
   keptIncomingIds: readonly string[],
-  onProgress?: (progress: MediaStorageProgress) => void
+  onProgress?: (progress: MediaStorageProgress) => void,
+  prepare?: MediaWritePrepare
 ) {
   const kept = new Set(keptIncomingIds);
   const idByImportedId = new Map<string, string>();
@@ -964,13 +979,13 @@ export async function writeMergedProjectMedia(
     for (const [index, item] of toWrite.entries()) {
       const nextId = idByImportedId.get(item.id);
       if (nextId) {
-        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, prepare ? await prepare(item) : item.blob);
         written.push(nextId);
       }
       onProgress?.({
         completed: index + 1,
         total: toWrite.length,
-        label: `Запись аудио ${String(index + 1)} из ${String(toWrite.length)}`
+        label: `${prepare ? "Проверка и запись" : "Запись"} аудио ${String(index + 1)} из ${String(toWrite.length)}`
       });
     }
   } catch (error) {
@@ -990,7 +1005,8 @@ export async function writeMergedProjectMedia(
 export async function writeImportedProjectMedia(
   state: SerializableAppState,
   blobs: { id: string; blob: Blob }[],
-  onProgress?: (progress: MediaStorageProgress) => void
+  onProgress?: (progress: MediaStorageProgress) => void,
+  prepare?: MediaWritePrepare
 ) {
   const idByImportedId = new Map(blobs.map((item) => [item.id, createId("media")]));
 
@@ -1002,13 +1018,13 @@ export async function writeImportedProjectMedia(
     for (const [index, item] of blobs.entries()) {
       const nextId = idByImportedId.get(item.id);
       if (nextId) {
-        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, item.blob);
+        await set(`${MEDIA_BLOB_PREFIX}${nextId}`, prepare ? await prepare(item) : item.blob);
         written.push(nextId);
       }
       onProgress?.({
         completed: index + 1,
         total: blobs.length,
-        label: `Запись аудио ${String(index + 1)} из ${String(blobs.length)}`
+        label: `${prepare ? "Проверка и запись" : "Запись"} аудио ${String(index + 1)} из ${String(blobs.length)}`
       });
     }
   } catch (error) {

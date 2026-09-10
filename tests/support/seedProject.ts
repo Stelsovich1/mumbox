@@ -26,6 +26,15 @@ export const STATE_STORAGE_KEY = "mumbox:state:v1";
 export const APP_DB_NAME = "mumbox-app";
 export const APP_STORE_NAME = "state";
 export const STATE_RECORD_KEY = "state:v1";
+/**
+ * The hot-fields sidecar, deleted rather than written.
+ *
+ * `state:v1` carries those five fields too, so a seed is complete without it — but a sidecar left
+ * by an earlier run in the same origin would override the seeded active panel and volume with
+ * another project's. `readAppState` folds `ui:v1` over the layout, so the only way for a seed to
+ * be authoritative is for it not to be there.
+ */
+export const UI_RECORD_KEY = "ui:v1";
 export const MAX_GRID_SIZE = 12;
 
 export type GridSize = 6 | 8 | 10 | 12;
@@ -313,6 +322,7 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
       await new Promise<void>((resolve, reject) => {
         const tx = appDb.transaction(payload.appStoreName, "readwrite");
         tx.objectStore(payload.appStoreName).put(payload.state, payload.stateRecordKey);
+        tx.objectStore(payload.appStoreName).delete(payload.uiRecordKey);
         tx.oncomplete = () => {
           resolve();
         };
@@ -334,6 +344,7 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
       appDbName: APP_DB_NAME,
       appStoreName: APP_STORE_NAME,
       stateRecordKey: STATE_RECORD_KEY,
+      uiRecordKey: UI_RECORD_KEY,
       state: seed.state,
       media: seed.media.map((asset) => ({
         id: asset.id,
@@ -431,8 +442,10 @@ export async function writeSeededAppState(page: Page, state: unknown): Promise<v
         const tx = db.transaction(payload.storeName, "readwrite");
         tx.objectStore(payload.storeName).put(payload.state, payload.recordKey);
         // The session record has to go too: a stale one would keep a project name the seeded
-        // layout knows nothing about.
+        // layout knows nothing about. The hot-fields sidecar goes for the reason `UI_RECORD_KEY`
+        // gives — it would override the seeded active panel and volume.
         tx.objectStore(payload.storeName).delete(payload.sessionKey);
+        tx.objectStore(payload.storeName).delete(payload.uiKey);
         tx.oncomplete = () => {
           resolve();
         };
@@ -447,6 +460,7 @@ export async function writeSeededAppState(page: Page, state: unknown): Promise<v
       storeName: APP_STORE_NAME,
       recordKey: STATE_RECORD_KEY,
       sessionKey: "session:v1",
+      uiKey: UI_RECORD_KEY,
       state
     }
   );
