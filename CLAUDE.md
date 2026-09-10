@@ -121,7 +121,46 @@ loading the stored layout, importing a `.mumbox`, merging one — would delete t
 ids are flat for the panel's own size, so an out-of-grid id names a lattice position only when that
 size was 12, and guessing would move a cue somewhere it never was.
 
-Several reducer actions (`panel/add`, `panel/copy`, `panel/rename`, `panel/delete`) intentionally no-op unless `state.editMode` is true.
+Several reducer actions (`panel/add`, `panel/copy`, `panel/rename`, `panel/delete`,
+`panel/deleteMany`) intentionally no-op unless `state.editMode` is true.
+
+### Selection mode and the bulk actions
+
+«Режим выбора» (`RightToolbar`, edit mode only) turns a tap into a tick: `cell/clearMany`,
+`cell/copyMany` and `panel/deleteMany` are the bulk counterparts of `cell/clear`, `cell/copy` and
+`panel/delete`. The planning is pure and unit-tested — `entities/cell/model/clearCells.ts`,
+`copyCells.ts`, `entities/panel/model/deletePanels.ts` — and the singular reducer cases share
+`copyCellInto` and `isConfiguredCell` with them so the two cannot drift.
+
+**One action, never a loop of the singular one.** N dispatches mean N renders of the grid, N
+persistence writes and N warm-up signature changes; worse, `panel/delete` re-picks `activePanelId`
+on every step, so a mid-loop fallback can land on a panel the next step deletes.
+
+**Selection lives in `AppShell` state, not in `appState`.** It is ephemeral UI: in the store it
+would be serialized into the `.mumbox` payload and would flip `ProjectSession` to dirty for a tap
+that changed nothing. Four invariants hold it together, and each exists because its absence is a
+data bug rather than a cosmetic one:
+
+- cell selection is dropped outright on `panel/select`, because cell ids repeat across panels and
+  pruning would silently retarget the set at the new panel's cells;
+- it is pruned against `activePanel.cellIds`, so a cue hidden by a grid shrink leaves the count
+  rather than becoming a ghost `clearPanelCells` refuses anyway;
+- leaving edit mode leaves selection mode, so destructive buttons are never armed over a live set;
+- `clearSelectedCells` stops every selected cell BEFORE dispatching, and `deleteSelectedPanels`
+  calls `stopAll` — `stopOthers` is off by default, so routes of a panel about to stop existing are
+  normally still playing.
+
+Two rules the pure planners carry: the FIRST panel is never deletable (so it has no checkbox, and
+`planPanelDeletion` refuses it again), and a copy onto a panel with fewer free cells than sources
+copies as many as fit and REPORTS the rest instead of refusing the batch — a partly filled target
+is the common case, not an error.
+
+An empty cell is not selectable at all (`isConfiguredCell`): it has nothing to clear and nothing to
+copy, and ticking one would put a number in the confirmation that the bulk action then skips.
+
+The per-tab delete cross is hidden while selection mode is on. It is absolutely positioned over the
+tab corner and the checkbox widens the label, so on a phone the two overlapped once a few tabs stood
+side by side.
 
 ### Audio engine
 
@@ -436,6 +475,13 @@ implying they were.
 
 - **UI language is Russian** and e2e tests select by Russian accessible names (`getByRole("button", { name: "Режим редактирования" })`). Renaming a label or `aria-label` breaks tests; grep `tests/e2e` before changing user-facing strings.
 - ESLint runs `strictTypeChecked` + `stylisticTypeChecked`. Consequences seen throughout the code: `type` instead of `interface` (enforced), `String(n)` inside template literals, and `noUncheckedIndexedAccess` making every array/record index `| undefined`.
+- The master volume slider carries its dragged value in local state (`dragVolume`) and also
+  dispatches on `onChangeCommitted`. Rendering `masterVolume` directly made every frame of a touch
+  drag depend on a dispatch-render round trip landing before the next `touchmove`, and anything
+  that drops one leaves the thumb showing the old value — the gesture then ends with the slider
+  back where it started. MUI also restates the vertical slider's 20 px side padding inside
+  `@media (pointer: coarse)`, so `p: 0` must be repeated there or the hit area is clipped by the
+  sidebar column on exactly the devices that need it.
 - Mobile landscape (`@media (orientation: landscape) and (max-height: 430px)`) is a first-class layout, not an afterthought. `MobileLandscapeTextField` renders a portal overlay positioned from `visualViewport` because the on-screen keyboard covers inline inputs there. Height comes from the `--app-height` CSS variable (`100dvh` where supported), never `100vh`.
 - Vite `base` is `/mumbox/` for GitHub Pages; PWA `registerType: "prompt"`, so the update banner is
   wired through `useRegisterSW` in `AppShell`.

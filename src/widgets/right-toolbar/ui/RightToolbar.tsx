@@ -1,4 +1,5 @@
 import AppsIcon from "@mui/icons-material/Apps";
+import ChecklistIcon from "@mui/icons-material/Checklist";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import Filter1Icon from "@mui/icons-material/Filter1";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
@@ -26,6 +27,7 @@ type RightToolbarProps = {
   masterVolume: number;
   masterMuted: boolean;
   editMode: boolean;
+  selectionMode: boolean;
   stopOthers: boolean;
   gridSize: GridSize;
   panelId: string;
@@ -35,6 +37,7 @@ type RightToolbarProps = {
   minGridSize: GridSize | null;
   dispatch: React.Dispatch<AppAction>;
   onStopAll: () => void;
+  onToggleSelectionMode: () => void;
 };
 
 /**
@@ -46,15 +49,29 @@ export const RightToolbar = memo(function RightToolbar({
   masterVolume,
   masterMuted,
   editMode,
+  selectionMode,
   stopOthers,
   gridSize,
   panelId,
   hiddenMediaCount,
   minGridSize,
   dispatch,
-  onStopAll
+  onStopAll,
+  onToggleSelectionMode
 }: RightToolbarProps) {
   const [gridAnchor, setGridAnchor] = useState<HTMLElement | null>(null);
+  /**
+   * What the thumb shows while a finger is on it.
+   *
+   * The slider used to render `masterVolume` directly, so every frame of a touch drag depended on a
+   * full dispatch-render round trip landing before the next `touchmove`. Anything that drops or
+   * defers one of those dispatches leaves the thumb rendering the OLD value, and on release the
+   * gesture ends with the slider back where it started — the reported glitch, and a class of bug
+   * rather than one path. Holding the dragged value locally makes the thumb independent of that
+   * round trip, and `onChangeCommitted` dispatches the final value even if every intermediate
+   * change was lost.
+   */
+  const [dragVolume, setDragVolume] = useState<number | null>(null);
   const hasHiddenMedia = hiddenMediaCount > 0;
   const hiddenLabel = formatCountRu(hiddenMediaCount, ["ячейка", "ячейки", "ячеек"]);
 
@@ -74,6 +91,10 @@ export const RightToolbar = memo(function RightToolbar({
         height: "100%",
         overflowX: "hidden",
         overflowY: "auto",
+        // The aside scrolls on a short viewport, and a vertical drag that the browser hands to the
+        // scroller instead of the slider rubber-bands the whole column and springs back — which
+        // reads as the slider snapping back. `contain` keeps that gesture from leaving the box.
+        overscrollBehavior: "contain",
         justifyContent: "space-between",
         border: 1,
         borderColor: "divider",
@@ -135,13 +156,15 @@ export const RightToolbar = memo(function RightToolbar({
         </Tooltip>
         <Box
           sx={{
-            height: { xs: 120, sm: 180 },
+            // 30 % longer than it was (120/180/88): a longer travel is finer control per pixel,
+            // and the sidebar scrolls if a short viewport cannot fit it.
+            height: { xs: 156, sm: 234 },
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             px: { xs: 0.25, sm: 0.5 },
             "@media (max-height: 480px)": {
-              height: 88,
+              height: 114,
               px: 0.25
             }
           }}
@@ -149,34 +172,57 @@ export const RightToolbar = memo(function RightToolbar({
           <Slider
             aria-label="Общая громкость"
             orientation="vertical"
-            value={masterVolume}
+            value={dragVolume ?? masterVolume}
             disabled={masterMuted}
             min={0}
             max={100}
             onChange={(_, value: number | number[]) => {
               const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
+              setDragVolume(nextVolume);
+              dispatch({
+                type: "volume/master",
+                value: nextVolume
+              });
+            }}
+            onChangeCommitted={(_, value: number | number[]) => {
+              const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
+              setDragVolume(null);
               dispatch({
                 type: "volume/master",
                 value: nextVolume
               });
             }}
             sx={{
-              width: { xs: 35, sm: 44 },
+              // Rail and thumb are wider than the visual design would ask for: this is the only
+              // continuous control in the app and it is driven by a thumb on a phone.
+              width: { xs: 44, sm: 52 },
+              // MUI pads a vertical slider by 20 px each side for the hit area. The sidebar column
+              // is 46-64 px wide and `overflowX` is hidden, so that padding was clipped and the
+              // grabbable strip ended at the column edge anyway. Dropping it and paying for the
+              // width in the rail and the thumb makes the whole control reachable.
+              p: 0,
+              // MUI restates that padding inside `@media (pointer: coarse)`, so a plain `p: 0`
+              // wins on desktop and loses on every touch device — the one place it matters.
+              "@media (pointer: coarse)": {
+                p: 0
+              },
+              touchAction: "none",
               "& .MuiSlider-thumb": {
-                width: { xs: 22, sm: 28 },
-                height: { xs: 22, sm: 28 }
+                width: { xs: 26, sm: 30 },
+                height: { xs: 26, sm: 30 }
               },
               "& .MuiSlider-track, & .MuiSlider-rail": {
-                width: { xs: 7, sm: 10 }
+                width: { xs: 12, sm: 16 }
               },
               "@media (max-height: 480px)": {
-                width: 18,
+                // The sidebar column is 46 px wide there, so this is the widest the control fits.
+                width: 28,
                 "& .MuiSlider-thumb": {
-                  width: 12,
-                  height: 12
+                  width: 18,
+                  height: 18
                 },
                 "& .MuiSlider-track, & .MuiSlider-rail": {
-                  width: 4
+                  width: 8
                 }
               }
             }}
@@ -193,6 +239,21 @@ export const RightToolbar = memo(function RightToolbar({
           }
         }}
       >
+        {editMode ? (
+          /* Above «Режим редактирования», not below it: appearing below would push the grid-size
+             and stop-others buttons down the moment edit mode is entered. */
+          <Tooltip title="Режим выбора" disableInteractive>
+            <IconButton
+              aria-label="Режим выбора"
+              color={selectionMode ? "secondary" : "default"}
+              aria-pressed={selectionMode}
+              onClick={onToggleSelectionMode}
+              sx={selectionMode ? undefined : { color: "common.white" }}
+            >
+              <ChecklistIcon />
+            </IconButton>
+          </Tooltip>
+        ) : null}
         <Tooltip title="Режим редактирования" disableInteractive>
           <IconButton
             aria-label="Режим редактирования"

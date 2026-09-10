@@ -1,6 +1,7 @@
 import { Box, Typography } from "@mui/material";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { GridSize } from "../../../entities/panel/model/types";
@@ -31,7 +32,15 @@ type WorkspaceGridProps = {
   cells: GridCell[];
   media: MediaAsset[];
   editMode: boolean;
+  /**
+   * Multi-select mode. A tap toggles membership instead of playing, opening settings or starting a
+   * drag — one flag rather than modifier keys, because a coarse pointer has no Ctrl and a long
+   * press is already taken by the cell drag.
+   */
+  selectionMode: boolean;
   selectedCellId: string | null;
+  /** Multi-selected cells of THIS panel. Cell ids repeat across panels, so the set is panel-scoped. */
+  selectedCellIds: ReadonlySet<string>;
   /**
    * Which cells are playing. Membership only — the continuous progress value is written straight to
    * the DOM by the engine through `cellVisuals`, because pushing it through React re-rendered the
@@ -220,6 +229,7 @@ function supportsPointerEvents() {
 
 type CellController = {
   editMode: boolean;
+  selectionMode: boolean;
   onCellClick: (cell: GridCell) => void;
   onGateStart: (cell: GridCell) => void;
   onGateEnd: (cell: GridCell) => void;
@@ -246,6 +256,10 @@ type WorkspaceGridCellProps = {
   isPlaying: boolean;
   warmState: "idle" | "warming" | "ready";
   isSelected: boolean;
+  multiSelected: boolean;
+  selectionMode: boolean;
+  /** False for a cell with nothing to clear or copy — an empty cell takes no tick and no tap. */
+  selectable: boolean;
   isDragging: boolean;
   activeDragOverCellId: string | null;
   editMode: boolean;
@@ -286,6 +300,9 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
   isPlaying,
   warmState,
   isSelected,
+  multiSelected,
+  selectionMode,
+  selectable,
   isDragging,
   activeDragOverCellId,
   editMode,
@@ -346,8 +363,9 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
         data-fade-in-ms={cell.fadeInEnabled ? cell.fadeInMs : ""}
         data-fade-out-ms={cell.fadeOutEnabled ? cell.fadeOutMs : ""}
         data-selected={isSelected ? "true" : "false"}
+        data-multi-selected={multiSelected ? "true" : "false"}
         data-drop-target={activeDragOverCellId === cell.id ? "true" : "false"}
-        draggable={editMode && Boolean(mediaAsset)}
+        draggable={editMode && !selectionMode && Boolean(mediaAsset)}
         aria-label={
           label ? `Ячейка ${String(index + 1)} ${label}` : `Пустая ячейка ${String(index + 1)}`
         }
@@ -407,6 +425,11 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           }
         }}
         onClick={() => {
+          // Selection mode ignores an empty cell outright rather than ticking something the bulk
+          // actions would then skip and count as a ghost.
+          if (controller.current.selectionMode && !selectable) {
+            return;
+          }
           if (controller.current.suppressClickRef.current) {
             controller.current.suppressClickRef.current = false;
             return;
@@ -422,6 +445,11 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
         }}
         onPointerDown={(event) => {
           setPressed(event.currentTarget, true);
+          // Selection mode owns the tap: the click handler toggles membership. Starting a touch
+          // drag here would move a cell the user was only trying to tick.
+          if (controller.current.selectionMode) {
+            return;
+          }
           if (editMode) {
             if (event.pointerType !== "mouse" && mediaAsset) {
               event.preventDefault();
@@ -542,7 +570,9 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           overflow: "hidden",
           border: 1,
           borderColor:
-            activeDragOverCellId === cell.id
+            multiSelected
+              ? "secondary.main"
+              : activeDragOverCellId === cell.id
               ? "secondary.main"
               : isSelected
               ? "secondary.main"
@@ -632,6 +662,37 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           }
         }}
       >
+        {selectionMode && selectable ? (
+          /* A border alone cannot carry this: the playing and drop-target states use borders too,
+             and on a 12x12 grid a border is a few pixels. The tick is rendered only in selection
+             mode, so nothing is paid for it during a show. */
+          <Box
+            component="span"
+            aria-hidden="true"
+            data-testid={`cell-tick-${cell.id}`}
+            sx={{
+              position: "absolute",
+              top: "6%",
+              left: "6%",
+              width: "clamp(10px, 26cqw, 20px)",
+              height: "clamp(10px, 26cqw, 20px)",
+              display: "grid",
+              placeItems: "center",
+              borderRadius: "50%",
+              border: "1px solid",
+              borderColor: multiSelected ? "secondary.main" : "rgba(169, 183, 207, 0.55)",
+              backgroundColor: multiSelected ? "secondary.main" : "rgba(5, 7, 13, 0.55)",
+              color: multiSelected ? "common.black" : "transparent",
+              fontSize: "clamp(8px, 18cqw, 14px)",
+              lineHeight: 1,
+              fontWeight: 700,
+              pointerEvents: "none",
+              zIndex: 2
+            }}
+          >
+            ✓
+          </Box>
+        ) : null}
         {mediaAsset ? (
           <Box
             sx={{
@@ -714,7 +775,9 @@ export function WorkspaceGrid({
   cells,
   media,
   editMode,
+  selectionMode,
   selectedCellId,
+  selectedCellIds,
   playingCellKeys,
   warmedCells,
   onCellClick,
@@ -745,6 +808,7 @@ export function WorkspaceGrid({
    */
   const controllerRef = useRef<CellController>({
     editMode,
+    selectionMode,
     onCellClick,
     onGateStart,
     onGateEnd,
@@ -870,6 +934,7 @@ export function WorkspaceGrid({
   // while the ref itself stays identical.
   controllerRef.current = {
     editMode,
+    selectionMode,
     onCellClick,
     onGateStart,
     onGateEnd,
@@ -1042,6 +1107,8 @@ export function WorkspaceGrid({
           const mediaAsset = cell.mediaId ? (mediaById.get(cell.mediaId) ?? null) : null;
           const isPlaying = playingKeySet.has(cellKey);
           const isSelected = editMode && selectedCellId === cell.id;
+          const multiSelected = selectionMode && selectedCellIds.has(cell.id);
+          const selectable = isConfiguredCell(cell);
           const isDragging =
             draggingCellId === cell.id || (touchDrag?.active && touchDrag.fromCellId === cell.id);
           const warmState = cell.mediaId ? (warmedCells[cell.id] ?? "idle") : "idle";
@@ -1057,6 +1124,9 @@ export function WorkspaceGrid({
               cellKey={cellKey}
               warmState={warmState}
               isSelected={isSelected}
+              multiSelected={multiSelected}
+              selectionMode={selectionMode}
+              selectable={selectable}
               isDragging={Boolean(isDragging)}
               activeDragOverCellId={activeDragOverCellId}
               editMode={editMode}

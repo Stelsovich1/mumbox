@@ -1,4 +1,6 @@
 import AddIcon from "@mui/icons-material/Add";
+import CheckBoxIcon from "@mui/icons-material/CheckBox";
+import CheckBoxOutlineBlankIcon from "@mui/icons-material/CheckBoxOutlineBlank";
 import CloseIcon from "@mui/icons-material/Close";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import {
@@ -33,8 +35,11 @@ type PanelTabsProps = {
   panels: Panel[];
   activePanelId: string;
   editMode: boolean;
+  selectionMode: boolean;
+  selectedPanelIds: ReadonlySet<string>;
   dispatch: React.Dispatch<AppAction>;
   onDeletePanel: (panelId: string) => void;
+  onTogglePanelSelected: (panelId: string) => void;
 };
 
 /**
@@ -42,7 +47,16 @@ type PanelTabsProps = {
  * re-renders on every progress push while anything plays — 20 times a second — and each of those
  * renders re-serialized every `sx` object in here for nothing.
  */
-export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMode, dispatch, onDeletePanel }: PanelTabsProps) {
+export const PanelTabs = memo(function PanelTabs({
+  panels,
+  activePanelId,
+  editMode,
+  selectionMode,
+  selectedPanelIds,
+  dispatch,
+  onDeletePanel,
+  onTogglePanelSelected
+}: PanelTabsProps) {
   const [renamingPanelId, setRenamingPanelId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
@@ -160,9 +174,11 @@ export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMo
             overflowX: "auto !important"
           },
           "@media (orientation: landscape) and (max-height: 430px)": {
-            minHeight: 32,
+            // 36 rather than 32: four extra pixels of tap target, which is what a thumb needs to
+            // switch panels reliably in a 430 px tall viewport.
+            minHeight: 36,
             "& .MuiTab-root": {
-              minHeight: 32,
+              minHeight: 36,
               px: 0.75,
               fontSize: 11
             },
@@ -209,16 +225,52 @@ export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMo
                     alignItems: "center",
                     minWidth: 0,
                     maxWidth: 150,
-                    pr: editMode && panel !== panels[0] ? 2.5 : 0,
+                    pr: editMode && !selectionMode && panel !== panels[0] ? 2.5 : 0,
                     "&:hover .panel-delete-button, &:focus-within .panel-delete-button": {
                       opacity: 1,
                       pointerEvents: "auto"
                     },
                     "@media (orientation: landscape) and (max-height: 430px)": {
-                      pr: editMode && panel !== panels[0] ? 4 : 0
+                      pr: editMode && !selectionMode && panel !== panels[0] ? 4 : 0
                     }
                   }}
                 >
+                  {selectionMode && panel !== panels[0] ? (
+                    /* Its own control, not the tab body: switching panels must keep working in
+                       selection mode, or a user could never select a panel they are not on. The
+                       first panel gets none — it is not deletable, so offering it would be a lie. */
+                    <IconButton
+                      component="span"
+                      aria-label={`Выбрать панель ${panel.name}`}
+                      aria-pressed={selectedPanelIds.has(panel.id)}
+                      size="small"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onTogglePanelSelected(panel.id);
+                      }}
+                      onMouseDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      sx={{
+                        mr: 0.25,
+                        width: 26,
+                        height: 26,
+                        p: 0.25,
+                        color: selectedPanelIds.has(panel.id) ? "secondary.main" : "text.secondary",
+                        "@media (orientation: landscape) and (max-height: 430px)": {
+                          width: 24,
+                          height: 24,
+                          mr: 0
+                        }
+                      }}
+                    >
+                      {selectedPanelIds.has(panel.id) ? (
+                        <CheckBoxIcon sx={{ fontSize: 18 }} />
+                      ) : (
+                        <CheckBoxOutlineBlankIcon sx={{ fontSize: 18 }} />
+                      )}
+                    </IconButton>
+                  ) : null}
                   <Box
                     component="span"
                     sx={{
@@ -229,7 +281,10 @@ export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMo
                   >
                     {panel.name}
                   </Box>
-                  {editMode && panel !== panels[0] ? (
+                  {/* Hidden while selecting: the cross sits absolutely over the tab's corner and
+                      the checkbox widens the label, so on a phone the two overlapped as soon as a
+                      few tabs stood side by side. Bulk deletion is what selection mode is for. */}
+                  {editMode && !selectionMode && panel !== panels[0] ? (
                     <Tooltip title="Удалить панель">
                       <IconButton
                         className="panel-delete-button"
@@ -269,7 +324,12 @@ export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMo
                             pointerEvents: "auto"
                           },
                           "@media (orientation: landscape) and (max-height: 430px)": {
-                            top: -4,
+                            // Centred on the label rather than pinned near its top: the header row
+                            // grew to 38 px and a top-anchored cross drifted below the tab text.
+                            // A negative margin does the centring instead of `translateY`, which
+                            // the hover `scale` would overwrite.
+                            top: "50%",
+                            mt: "-13px",
                             right: -8,
                             width: 26,
                             height: 26,
@@ -305,7 +365,7 @@ export const PanelTabs = memo(function PanelTabs({ panels, activePanelId, editMo
                 color: editMode ? "secondary.main" : undefined
               },
               "@media (orientation: landscape) and (max-height: 430px)": {
-                minHeight: 32,
+                minHeight: 36,
                 maxWidth: 120
               }
             }}

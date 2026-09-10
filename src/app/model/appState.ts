@@ -2,9 +2,12 @@ import { clear, del, get, set } from "idb-keyval";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model/assignCells";
+import { clearPanelCells } from "../../entities/cell/model/clearCells";
+import { copyCellInto, planCellCopy } from "../../entities/cell/model/copyCells";
 import { makeCell } from "../../entities/cell/model/makeCell";
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
 import { MediaAsset } from "../../entities/media/model/types";
+import { planPanelDeletion } from "../../entities/panel/model/deletePanels";
 import { preserveHiddenCells } from "../../entities/panel/model/hiddenCells";
 import {
   ensurePanelCells,
@@ -85,6 +88,7 @@ export type AppAction =
   | { type: "panel/select"; panelId: string }
   | { type: "panel/rename"; panelId: string; name: string }
   | { type: "panel/delete"; panelId: string }
+  | { type: "panel/deleteMany"; panelIds: readonly string[] }
   | { type: "panel/gridSize"; panelId: string; gridSize: GridSize }
   | { type: "media/addMany"; media: MediaAsset[] }
   | { type: "media/update"; mediaId: string; alias?: string; color?: string }
@@ -124,7 +128,14 @@ export type AppAction =
     }
   | { type: "cell/move"; panelId: string; fromCellId: string; toCellId: string }
   | { type: "cell/copy"; fromPanelId: string; fromCellId: string; toPanelId: string; toCellId: string }
+  | {
+      type: "cell/copyMany";
+      fromPanelId: string;
+      cellIds: readonly string[];
+      toPanelId: string;
+    }
   | { type: "cell/clear"; panelId: string; cellId: string }
+  | { type: "cell/clearMany"; panelId: string; cellIds: readonly string[] }
   | { type: "volume/master"; value: number }
   | { type: "volume/muteToggle" }
   | { type: "editMode/toggle" }
@@ -342,6 +353,30 @@ function reducer(state: AppState, action: AppAction): AppState {
         cellsByPanel
       };
     }
+    case "panel/deleteMany": {
+      if (!state.editMode) {
+        return state;
+      }
+
+      // One action, not a loop of `panel/delete`: a loop re-picks `activePanelId` on every step,
+      // so a mid-loop fallback can land on a panel the next step deletes.
+      const plan = planPanelDeletion({
+        panels: state.panels,
+        cellsByPanel: state.cellsByPanel,
+        activePanelId: state.activePanelId,
+        panelIds: action.panelIds
+      });
+      if (!plan) {
+        return state;
+      }
+
+      return {
+        ...state,
+        panels: plan.panels,
+        activePanelId: plan.activePanelId,
+        cellsByPanel: plan.cellsByPanel
+      };
+    }
     case "panel/gridSize": {
       const panels = state.panels.map((panel) => {
         if (panel.id !== action.panelId) {
@@ -532,13 +567,34 @@ function reducer(state: AppState, action: AppAction): AppState {
           ...state.cellsByPanel,
           [action.toPanelId]: {
             ...targetCells,
-            [action.toCellId]: {
-              ...sourceCell,
-              id: action.toCellId,
-              aliasOverride: copyAliasBase ? `${copyAliasBase}_copy` : "",
-              hotkey: ""
-            }
+            [action.toCellId]: copyCellInto(sourceCell, action.toCellId, copyAliasBase)
           }
+        }
+      };
+    }
+    case "cell/copyMany": {
+      const targetPanel = state.panels.find((candidate) => candidate.id === action.toPanelId);
+      if (!targetPanel || action.cellIds.length === 0) {
+        return state;
+      }
+
+      const plan = planCellCopy({
+        sourceCells: state.cellsByPanel[action.fromPanelId] ?? {},
+        sourceCellIds: action.cellIds,
+        targetCells: state.cellsByPanel[action.toPanelId] ?? {},
+        targetPanelCellIds: targetPanel.cellIds,
+        aliasBaseFor: (cell) =>
+          state.media.find((media) => media.id === cell.mediaId)?.fileName ?? ""
+      });
+      if (plan.pairs.length === 0) {
+        return state;
+      }
+
+      return {
+        ...state,
+        cellsByPanel: {
+          ...state.cellsByPanel,
+          [action.toPanelId]: plan.cells
         }
       };
     }
@@ -553,6 +609,29 @@ function reducer(state: AppState, action: AppAction): AppState {
           }
         }
       };
+    case "cell/clearMany": {
+      const panel = state.panels.find((candidate) => candidate.id === action.panelId);
+      if (!panel || action.cellIds.length === 0) {
+        return state;
+      }
+
+      const { cells, changed } = clearPanelCells(
+        state.cellsByPanel[action.panelId] ?? {},
+        panel.cellIds,
+        action.cellIds
+      );
+      if (!changed) {
+        return state;
+      }
+
+      return {
+        ...state,
+        cellsByPanel: {
+          ...state.cellsByPanel,
+          [action.panelId]: cells
+        }
+      };
+    }
     case "volume/master":
       return { ...state, masterVolume: action.value };
     case "volume/muteToggle":

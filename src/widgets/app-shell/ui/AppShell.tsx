@@ -21,6 +21,7 @@ import {
   MenuItem,
   Snackbar,
   Stack,
+  TextField,
   Typography
 } from "@mui/material";
 import useMediaQuery from "@mui/material/useMediaQuery";
@@ -50,6 +51,7 @@ import {
   writeMergedProjectMedia
 } from "../../../app/model/appState";
 import { AudioImportDialog } from "../../../features/audio-import";
+import { SelectionActionBar } from "../../../features/bulk-selection";
 import { CellSettingsDrawer } from "../../../features/cell-settings";
 import {
   classifyProjectFileError,
@@ -63,6 +65,8 @@ import {
   toProjectFileName,
   verifyProjectMedia
 } from "../../../features/file-config";
+import { getFreeCellIds } from "../../../entities/cell/model/copyCells";
+import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
 import { MediaLibraryDialog } from "../../../features/media-library";
 import {
   countHiddenMediaCells,
@@ -100,6 +104,8 @@ import {
   buildDistributionMessage,
   planMediaDistribution
 } from "../../../shared/lib/mediaDistribution";
+import { pruneSelection, setSelection, toggleSelection } from "../../../shared/lib/rowSelection";
+import { formatCountRu } from "../../../shared/lib/pluralizeRu";
 import { hasLikelyStorageForBytes } from "../../../shared/lib/storage";
 import { filterValidAudioFiles } from "../../../shared/lib/audioFileUtils";
 import { installNativeFileDropGuard } from "../../../shared/lib/nativeFileDropGuard";
@@ -155,36 +161,6 @@ function hasConfiguredLayout(
     Object.values(cellsByPanel).some((cells) =>
       Object.values(cells).some((cell) => Boolean(cell.mediaId))
     )
-  );
-}
-
-function hasConfiguredCell(cell: {
-  mediaId: string | null;
-  aliasOverride: string;
-  colorOverride: string | null;
-  hotkey: string;
-  playbackMode: string;
-  volumeOffset: number;
-  trimStartMs: number | null;
-  trimEndMs: number | null;
-  fadeInEnabled: boolean;
-  fadeInMs: number;
-  fadeOutEnabled: boolean;
-  fadeOutMs: number;
-}) {
-  return (
-    Boolean(cell.mediaId) ||
-    cell.aliasOverride.length > 0 ||
-    cell.colorOverride !== null ||
-    cell.hotkey.length > 0 ||
-    cell.playbackMode !== "once" ||
-    cell.volumeOffset !== 0 ||
-    cell.trimStartMs !== null ||
-    cell.trimEndMs !== null ||
-    cell.fadeInEnabled ||
-    cell.fadeInMs !== 0 ||
-    cell.fadeOutEnabled ||
-    cell.fadeOutMs !== 0
   );
 }
 
@@ -263,6 +239,19 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [pendingDeletePanelId, setPendingDeletePanelId] = useState<string | null>(null);
   const [pendingClearCellId, setPendingClearCellId] = useState<string | null>(null);
+  /**
+   * Selection is deliberately NOT in `appState`: it is ephemeral UI, so putting it there would
+   * serialize it into the `.mumbox` payload and flip the project to dirty for a tap that changed
+   * nothing. Cell selection is scoped to the panel on screen — cell ids repeat across panels, so a
+   * set that outlived a panel switch would point at the wrong cells.
+   */
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedCellIds, setSelectedCellIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedPanelIds, setSelectedPanelIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [clearSelectionConfirmOpen, setClearSelectionConfirmOpen] = useState(false);
+  const [copySelectionOpen, setCopySelectionOpen] = useState(false);
+  const [copyTargetPanelId, setCopyTargetPanelId] = useState("");
+  const [deletePanelsConfirmOpen, setDeletePanelsConfirmOpen] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
@@ -418,13 +407,185 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
       return;
     }
     const cell = state.cellsByPanel[activePanel.id]?.[cellId];
-    if (!cell || !hasConfiguredCell(cell)) {
+    if (!cell || !isConfiguredCell(cell)) {
       clearCell(cellId);
       return;
     }
 
     setPendingClearCellId(cellId);
   };
+
+  const activePanelCellIds = activePanel?.cellIds;
+  const panelIds = useMemo(() => state.panels.map((panel) => panel.id), [state.panels]);
+  const selectedCellIdList = useMemo(() => [...selectedCellIds], [selectedCellIds]);
+  const selectedPanelIdList = useMemo(() => [...selectedPanelIds], [selectedPanelIds]);
+  /**
+   * What the «Все» button sweeps in, and what the confirmation counts. Configured rather than
+   * merely media-holding: a cell with a hotkey and no audio is still something a user would miss.
+   */
+  const selectableCellIds = useMemo(
+    () => activeCells.filter((cell) => isConfiguredCell(cell)).map((cell) => cell.id),
+    [activeCells]
+  );
+
+  const resetSelection = useCallback(() => {
+    setSelectedCellIds(new Set());
+    setSelectedPanelIds(new Set());
+  }, []);
+
+  // Leaving edit mode leaves selection mode: every bulk action is an edit, and a selection that
+  // survived into playback mode would arm destructive buttons over a live set.
+  useEffect(() => {
+    if (!state.editMode) {
+      setSelectionMode(false);
+    }
+  }, [state.editMode]);
+
+  useEffect(() => {
+    if (selectionMode) {
+      return;
+    }
+    resetSelection();
+    setClearSelectionConfirmOpen(false);
+    setCopySelectionOpen(false);
+    setDeletePanelsConfirmOpen(false);
+  }, [resetSelection, selectionMode]);
+
+  // Cell ids repeat across panels, so a switch drops the cell selection outright rather than
+  // pruning it — pruning would silently retarget it at the new panel's cells.
+  useEffect(() => {
+    setSelectedCellIds(new Set());
+  }, [state.activePanelId]);
+
+  // Shrinking the grid hides cells rather than clearing them. A hidden cell must leave the
+  // selection: `clearPanelCells` would refuse it anyway, and the count would keep a ghost.
+  useEffect(() => {
+    if (!activePanelCellIds) {
+      return;
+    }
+    setSelectedCellIds((current) =>
+      current.size === 0 ? current : pruneSelection(current, activePanelCellIds)
+    );
+  }, [activePanelCellIds]);
+
+  useEffect(() => {
+    setSelectedPanelIds((current) =>
+      current.size === 0 ? current : pruneSelection(current, panelIds)
+    );
+  }, [panelIds]);
+
+  const toggleCellSelected = useCallback((cellId: string) => {
+    setSelectedCellIds((current) => toggleSelection(current, cellId));
+  }, []);
+
+  const togglePanelSelected = useCallback((panelId: string) => {
+    setSelectedPanelIds((current) => toggleSelection(current, panelId));
+  }, []);
+
+  const selectAllCells = useCallback(() => {
+    setSelectedCellIds((current) => setSelection(current, selectableCellIds, true));
+  }, [selectableCellIds]);
+
+  const clearSelectedCells = useCallback(() => {
+    if (!activePanel || selectedCellIdList.length === 0) {
+      return;
+    }
+    // Stop first: a route keeps playing the buffer of a cell that no longer names any media.
+    for (const cellId of selectedCellIdList) {
+      stopCell(cellId);
+    }
+    dispatch({ type: "cell/clearMany", panelId: activePanel.id, cellIds: selectedCellIdList });
+    if (selectedCellId && selectedCellIds.has(selectedCellId)) {
+      setSelectedCellId(null);
+    }
+    setSelectedCellIds(new Set());
+  }, [activePanel, dispatch, selectedCellId, selectedCellIdList, selectedCellIds, stopCell]);
+
+  const configuredSelectedCellCount = useMemo(() => {
+    const cells = state.cellsByPanel[activePanel?.id ?? ""] ?? {};
+    return selectedCellIdList.filter((cellId) => {
+      const cell = cells[cellId];
+      return cell !== undefined && isConfiguredCell(cell);
+    }).length;
+  }, [activePanel?.id, selectedCellIdList, state.cellsByPanel]);
+
+  const requestClearSelectedCells = useCallback(() => {
+    if (selectedCellIdList.length === 0) {
+      return;
+    }
+    if (configuredSelectedCellCount === 0) {
+      clearSelectedCells();
+      return;
+    }
+    setClearSelectionConfirmOpen(true);
+  }, [clearSelectedCells, configuredSelectedCellCount, selectedCellIdList.length]);
+
+  const selectedCellsWithMediaCount = useMemo(() => {
+    const cells = state.cellsByPanel[activePanel?.id ?? ""] ?? {};
+    return selectedCellIdList.filter((cellId) => Boolean(cells[cellId]?.mediaId)).length;
+  }, [activePanel?.id, selectedCellIdList, state.cellsByPanel]);
+
+  const copyTargetPanel = state.panels.find((panel) => panel.id === copyTargetPanelId) ?? null;
+  const copyTargetFreeCellCount = copyTargetPanel
+    ? getFreeCellIds(state.cellsByPanel[copyTargetPanel.id] ?? {}, copyTargetPanel.cellIds).length
+    : 0;
+
+  const openCopySelectionDialog = useCallback(() => {
+    if (selectedCellIdList.length === 0) {
+      return;
+    }
+    const target =
+      state.panels.find((panel) => panel.id !== state.activePanelId) ??
+      state.panels.find((panel) => panel.id === state.activePanelId);
+    setCopyTargetPanelId(target?.id ?? "");
+    setCopySelectionOpen(true);
+  }, [selectedCellIdList.length, state.activePanelId, state.panels]);
+
+  const copySelectedCells = useCallback(() => {
+    if (!activePanel || !copyTargetPanel) {
+      return;
+    }
+    dispatch({
+      type: "cell/copyMany",
+      fromPanelId: activePanel.id,
+      cellIds: selectedCellIdList,
+      toPanelId: copyTargetPanel.id
+    });
+    const copied = Math.min(selectedCellsWithMediaCount, copyTargetFreeCellCount);
+    const skipped = selectedCellsWithMediaCount - copied;
+    setSaveMessage(
+      skipped > 0
+        ? `Скопировано ${String(copied)} из ${String(selectedCellsWithMediaCount)} — на панели «${copyTargetPanel.name}» не хватило свободных ячеек`
+        : `Скопировано ${formatCountRu(copied, ["ячейка", "ячейки", "ячеек"])} на панель «${copyTargetPanel.name}»`
+    );
+    setCopySelectionOpen(false);
+    setSelectedCellIds(new Set());
+  }, [
+    activePanel,
+    copyTargetFreeCellCount,
+    copyTargetPanel,
+    dispatch,
+    selectedCellIdList,
+    selectedCellsWithMediaCount
+  ]);
+
+  /** The first panel is not deletable at any count, so the dialog says so instead of dropping it. */
+  const undeletablePanelCount = selectedPanelIds.has(panelIds[0] ?? "") ? 1 : 0;
+
+  const deleteSelectedPanels = useCallback(() => {
+    if (selectedPanelIdList.length === 0) {
+      return;
+    }
+    // Routes of a deleted panel outlive it — `stopOthers` is off by default, so a cue from another
+    // panel is normal — and their cells are about to stop existing.
+    stopAll();
+    if (selectedPanelIds.has(state.activePanelId)) {
+      setSelectedCellId(null);
+    }
+    dispatch({ type: "panel/deleteMany", panelIds: selectedPanelIdList });
+    setSelectedPanelIds(new Set());
+    setDeletePanelsConfirmOpen(false);
+  }, [dispatch, selectedPanelIdList, selectedPanelIds, state.activePanelId, stopAll]);
 
   const clampSettingsPanelWidth = useCallback((nextWidth: number) => {
     const viewportWidth = window.innerWidth;
@@ -1380,7 +1541,10 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
         pb: "var(--app-safe-area-bottom)",
         pl: "var(--app-safe-area-left)",
         "@media (orientation: landscape) and (max-height: 430px)": {
-          gridTemplateRows: "34px minmax(0, 1fr)",
+          // 38 rather than 34: four extra pixels of header, which is the whole point of the change
+          // — switching panels by thumb in a 430 px tall viewport. The tab minHeight in
+          // `PanelTabs` moved with it, and the two must stay in step or the tabs overflow the row.
+          gridTemplateRows: "38px minmax(0, 1fr)",
           pt: 0,
           pb: 0
         }
@@ -1565,8 +1729,11 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
             panels={state.panels}
             activePanelId={state.activePanelId}
             editMode={state.editMode}
+            selectionMode={selectionMode}
+            selectedPanelIds={selectedPanelIds}
             dispatch={dispatch}
             onDeletePanel={requestDeletePanel}
+            onTogglePanelSelected={togglePanelSelected}
           />
         </Stack>
 
@@ -1627,10 +1794,16 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
           cells={activeCells}
           media={state.media}
           editMode={state.editMode}
+          selectionMode={selectionMode}
           selectedCellId={selectedCellId}
+          selectedCellIds={selectedCellIds}
           playingCellKeys={playingCells}
           warmedCells={warmedCells}
           onCellClick={(cell) => {
+            if (selectionMode) {
+              toggleCellSelected(cell.id);
+              return;
+            }
             if (state.editMode) {
               setSelectedCellId(cell.id);
               return;
@@ -1669,6 +1842,7 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
           masterVolume={state.masterVolume}
           masterMuted={state.masterMuted}
           editMode={state.editMode}
+          selectionMode={selectionMode}
           stopOthers={state.stopOthers}
           gridSize={activePanel.gridSize}
           panelId={activePanel.id}
@@ -1676,6 +1850,9 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
           minGridSize={minGridSize}
           dispatch={dispatch}
           onStopAll={stopAll}
+          onToggleSelectionMode={() => {
+            setSelectionMode((current) => !current);
+          }}
         />
         {cellSettingsOpen ? (
           <Box
@@ -1900,6 +2077,166 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
             }}
           >
             Импортировать
+          </Button>
+        </DialogActions>
+      </Dialog>
+      {selectionMode ? (
+        <SelectionActionBar
+          selectedCellCount={selectedCellIdList.length}
+          selectedPanelCount={selectedPanelIdList.length}
+          selectableCellCount={selectableCellIds.length}
+          onSelectAllCells={selectAllCells}
+          onResetSelection={resetSelection}
+          onClearCells={requestClearSelectedCells}
+          onCopyCells={openCopySelectionDialog}
+          onDeletePanels={() => {
+            setDeletePanelsConfirmOpen(true);
+          }}
+        />
+      ) : null}
+      <Dialog
+        open={clearSelectionConfirmOpen}
+        onClose={() => {
+          setClearSelectionConfirmOpen(false);
+        }}
+        aria-labelledby="clear-selection-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="clear-selection-dialog-title">Очистить выбранные ячейки?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            {`Будет очищено ${formatCountRu(selectedCellIdList.length, ["ячейка", "ячейки", "ячеек"])}, из них с настройками — ${String(configuredSelectedCellCount)}. Аудио останется в библиотеке.`}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setClearSelectionConfirmOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() => {
+              clearSelectedCells();
+              setClearSelectionConfirmOpen(false);
+            }}
+          >
+            Очистить
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={copySelectionOpen}
+        onClose={() => {
+          setCopySelectionOpen(false);
+        }}
+        aria-labelledby="copy-selection-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="copy-selection-dialog-title">Скопировать выбранные ячейки</DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: "grid", gap: 1.5, pt: 1 }}>
+            <TextField
+              select
+              label="Панель"
+              value={copyTargetPanel?.id ?? ""}
+              onChange={(event) => {
+                setCopyTargetPanelId(event.target.value);
+              }}
+              fullWidth
+              slotProps={{ htmlInput: { "aria-label": "Панель для копирования" } }}
+            >
+              {state.panels.map((panel) => (
+                <MenuItem key={panel.id} value={panel.id}>
+                  {panel.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Typography data-testid="copy-selection-hint" color="text.secondary">
+              {selectedCellsWithMediaCount > copyTargetFreeCellCount
+                ? `С аудио выбрано ${String(selectedCellsWithMediaCount)}, свободных ячеек — ${String(copyTargetFreeCellCount)}. Скопируется только ${String(copyTargetFreeCellCount)}.`
+                : `Копии займут первые свободные ячейки: ${String(selectedCellsWithMediaCount)} из ${String(copyTargetFreeCellCount)} свободных.`}
+            </Typography>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setCopySelectionOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!copyTargetPanel || copyTargetFreeCellCount === 0 || selectedCellsWithMediaCount === 0}
+            onClick={copySelectedCells}
+          >
+            Скопировать
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={deletePanelsConfirmOpen}
+        onClose={() => {
+          setDeletePanelsConfirmOpen(false);
+        }}
+        aria-labelledby="delete-panels-dialog-title"
+        slotProps={{
+          paper: {
+            sx: {
+              width: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxWidth: { xs: "calc(100vw - 24px)", sm: 420 },
+              maxHeight: "calc(100dvh - 24px)",
+              m: { xs: 1.5, sm: 4 }
+            }
+          }
+        }}
+      >
+        <DialogTitle id="delete-panels-dialog-title">Удалить выбранные панели?</DialogTitle>
+        <DialogContent>
+          <Typography data-testid="delete-panels-hint">
+            {undeletablePanelCount > 0
+              ? `Будет удалено ${formatCountRu(selectedPanelIdList.length - undeletablePanelCount, ["панель", "панели", "панелей"])}. Первую панель удалить нельзя — она останется.`
+              : `Будет удалено ${formatCountRu(selectedPanelIdList.length, ["панель", "панели", "панелей"])} вместе с их ячейками.`}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setDeletePanelsConfirmOpen(false);
+            }}
+          >
+            Отмена
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={selectedPanelIdList.length - undeletablePanelCount === 0}
+            onClick={deleteSelectedPanels}
+          >
+            Удалить
           </Button>
         </DialogActions>
       </Dialog>
