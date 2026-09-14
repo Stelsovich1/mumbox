@@ -202,14 +202,10 @@ test("copies the selected cells into the first free cells of another panel", asy
 
   await expect(page.getByText("Скопировано 2 ячейки на панель «Panel 2»")).toBeVisible();
   await page.getByRole("tab", { name: "Panel 2" }).click();
-  // Panel 2 starts with cell-0..cell-3 filled, so the copies land right after them. The copy's
-  // alias comes from the media file name, exactly as a single-cell copy names one.
-  await expect(
-    page.getByRole("button", { name: "Ячейка 5 seed-0000.wav_copy" })
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Ячейка 6 seed-0001.wav_copy" })
-  ).toBeVisible();
+  // Panel 2 starts with cell-0..cell-3 filled, so the copies land right after them. Onto another
+  // panel a copy keeps the source's name — here the media alias, since the cells have no override.
+  await expect(page.getByRole("button", { name: "Ячейка 5 Seed 0" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ячейка 6 Seed 1" })).toBeVisible();
 });
 
 test("copies as many cells as fit and says how many did not", async ({ page }) => {

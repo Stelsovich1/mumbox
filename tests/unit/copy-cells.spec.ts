@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-import { copyCellInto, getFreeCellIds, planCellCopy } from "../../src/entities/cell/model/copyCells";
+import {
+  copyAliasFor,
+  copyCellInto,
+  getFreeCellIds,
+  planCellCopy
+} from "../../src/entities/cell/model/copyCells";
 import { makeCell } from "../../src/entities/cell/model/makeCell";
 import { GridCell } from "../../src/entities/cell/model/types";
 
@@ -8,23 +13,49 @@ function filled(id: string, patch: Partial<GridCell> = {}): GridCell {
   return { ...makeCell(id), mediaId: "media-1", ...patch };
 }
 
-const aliasBaseFor = () => "bell.mp3";
+const labelFor = () => "bell.mp3";
 
 test.describe("copyCellInto", () => {
-  test("carries settings over, renames the alias and drops the hotkey", () => {
-    const source = filled("cell-0", { hotkey: "Q", volumeOffset: -4, trimStartMs: 120 });
-    const copy = copyCellInto(source, "cell-5", "bell.mp3");
+  test("carries every setting over, takes the given alias and drops the hotkey", () => {
+    const source = filled("cell-0", {
+      hotkey: "Q",
+      volumeOffset: -4,
+      trimStartMs: 120,
+      colorOverride: "#f97316",
+      playbackMode: "loop",
+      fadeInEnabled: true,
+      fadeInMs: 250
+    });
+    const copy = copyCellInto(source, "cell-5", "bell.mp3_copy");
 
-    expect(copy.id).toBe("cell-5");
-    expect(copy.mediaId).toBe("media-1");
-    expect(copy.volumeOffset).toBe(-4);
-    expect(copy.trimStartMs).toBe(120);
-    expect(copy.aliasOverride).toBe("bell.mp3_copy");
-    expect(copy.hotkey).toBe("");
+    expect(copy).toEqual({
+      ...source,
+      id: "cell-5",
+      aliasOverride: "bell.mp3_copy",
+      hotkey: ""
+    });
+  });
+});
+
+test.describe("copyAliasFor", () => {
+  test("onto another panel the override travels verbatim", () => {
+    expect(copyAliasFor(filled("cell-0", { aliasOverride: "Гром" }), false, labelFor)).toBe("Гром");
   });
 
-  test("leaves the alias empty when there is no base", () => {
-    expect(copyCellInto(filled("cell-0"), "cell-1", "").aliasOverride).toBe("");
+  test("onto another panel an empty override stays empty so the media alias still shows", () => {
+    // The old rule produced `bell.mp3_copy` here, skipping the media alias the source displayed.
+    expect(copyAliasFor(filled("cell-0"), false, labelFor)).toBe("");
+  });
+
+  test("onto the same panel the override gains a _copy suffix", () => {
+    expect(copyAliasFor(filled("cell-0", { aliasOverride: "Гром" }), true, labelFor)).toBe("Гром_copy");
+  });
+
+  test("onto the same panel a blank override falls back to the visible media label", () => {
+    expect(copyAliasFor(filled("cell-0", { aliasOverride: "  " }), true, labelFor)).toBe(
+      "bell.mp3_copy"
+    );
+    expect(copyAliasFor(filled("cell-0"), true, () => "")).toBe("");
   });
 });
 
@@ -52,7 +83,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-4", "cell-2"],
       targetCells: { "cell-0": filled("cell-0") },
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     // Sources are ordered by lattice index, not by the order they were selected in.
@@ -70,7 +102,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-0", "cell-1"],
       targetCells: { "cell-0": filled("cell-0") },
       targetPanelCellIds: ["cell-0", "cell-1"],
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([{ fromCellId: "cell-0", toCellId: "cell-1" }]);
@@ -84,7 +117,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-0"],
       targetCells: { "cell-0": target },
       targetPanelCellIds: ["cell-0"],
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([]);
@@ -98,7 +132,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-0"],
       targetCells: {},
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([]);
@@ -111,7 +146,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-77"],
       targetCells: {},
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([]);
@@ -124,7 +160,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-0", "cell-0"],
       targetCells: {},
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([{ fromCellId: "cell-0", toCellId: "cell-0" }]);
@@ -137,23 +174,44 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-1"],
       targetCells,
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: false,
+      labelFor
     });
 
     expect(plan.cells).not.toBe(targetCells);
     expect(targetCells["cell-1"]).toBeUndefined();
   });
 
-  test("prefers the cell's own alias override over the media file name", () => {
+  test("onto another panel the alias and colour travel untouched", () => {
+    const plan = planCellCopy({
+      sourceCells: {
+        "cell-0": filled("cell-0", { aliasOverride: " kick ", colorOverride: "#f97316" }),
+        "cell-1": filled("cell-1")
+      },
+      sourceCellIds: ["cell-0", "cell-1"],
+      targetCells: {},
+      targetPanelCellIds,
+      samePanel: false,
+      labelFor
+    });
+
+    expect(plan.cells["cell-0"]?.aliasOverride).toBe(" kick ");
+    expect(plan.cells["cell-0"]?.colorOverride).toBe("#f97316");
+    // No override on the source: none on the copy, so both keep showing the media label.
+    expect(plan.cells["cell-1"]?.aliasOverride).toBe("");
+  });
+
+  test("onto the same panel the copy is suffixed so it can be told from its source", () => {
     const plan = planCellCopy({
       sourceCells: { "cell-0": filled("cell-0", { aliasOverride: " kick " }) },
       sourceCellIds: ["cell-0"],
-      targetCells: {},
+      targetCells: { "cell-0": filled("cell-0", { aliasOverride: " kick " }) },
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: true,
+      labelFor
     });
 
-    expect(plan.cells["cell-0"]?.aliasOverride).toBe("kick_copy");
+    expect(plan.cells["cell-1"]?.aliasOverride).toBe("kick_copy");
   });
 
   test("copying onto the same panel does not chain into cells it just filled", () => {
@@ -162,7 +220,8 @@ test.describe("planCellCopy", () => {
       sourceCellIds: ["cell-0"],
       targetCells: { "cell-0": filled("cell-0") },
       targetPanelCellIds,
-      aliasBaseFor
+      samePanel: true,
+      labelFor
     });
 
     expect(plan.pairs).toEqual([{ fromCellId: "cell-0", toCellId: "cell-1" }]);

@@ -965,7 +965,9 @@ test("copies a configured cell to the same panel using the first free cell", asy
     .click();
 
   await expect(page.getByRole("button", { name: "Ячейка 1 Launch Pad" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ячейка 2 launch.wav_copy" })).toBeVisible();
+  // On the same panel the copy is suffixed so it can be told from its source, and the suffix goes
+  // on the label the cell shows — the media alias — not on the file name.
+  await expect(page.getByRole("button", { name: "Ячейка 2 Launch Pad_copy" })).toBeVisible();
   await expect(page.locator('[data-cell-id="cell-1"]')).toHaveAttribute("data-hotkey", "");
 });
 
@@ -994,7 +996,9 @@ test("copies a configured cell to another panel and hides panels without free ce
 
   await page.getByRole("button", { name: "Сохранить настройки ячейки" }).click();
   await page.getByRole("tab", { name: "Panel 2" }).click();
-  await expect(page.getByRole("button", { name: "Ячейка 1 launch.wav_copy" })).toBeVisible();
+  // Onto another panel the cue keeps its name: no override on the source, none on the copy, and
+  // both show the media alias.
+  await expect(page.getByRole("button", { name: "Ячейка 1 Shared Pad" })).toBeVisible();
 
   const mediaAsset = {
     id: "media-filled",
@@ -2314,7 +2318,10 @@ test("edits cell audio trim and fades in the waveform editor", async ({ page }) 
     "true"
   );
   await page.getByLabel("Масштаб таймлайна").fill("3");
-  await expect(page.getByLabel("Начало сек")).toHaveAttribute("step", "0.01");
+  // Decimal text, not a number input: the fraction is on screen from the start and a comma is
+  // accepted, so a Russian keyboard can type the fraction without fighting the field.
+  await expect(page.getByLabel("Начало сек")).toHaveAttribute("inputmode", "decimal");
+  await expect(page.getByLabel("Начало сек")).toHaveValue("0,0");
   await expect
     .poll(async () =>
       page.evaluate(() => {

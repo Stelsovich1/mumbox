@@ -3,9 +3,10 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model/assignCells";
 import { clearPanelCells } from "../../entities/cell/model/clearCells";
-import { copyCellInto, planCellCopy } from "../../entities/cell/model/copyCells";
+import { copyAliasFor, copyCellInto, planCellCopy } from "../../entities/cell/model/copyCells";
 import { makeCell } from "../../entities/cell/model/makeCell";
 import { GridCell, PlaybackMode } from "../../entities/cell/model/types";
+import { getMediaLabel } from "../../entities/media/model/mediaSort";
 import { MediaAsset } from "../../entities/media/model/types";
 import { planPanelDeletion } from "../../entities/panel/model/deletePanels";
 import { preserveHiddenCells } from "../../entities/panel/model/hiddenCells";
@@ -16,6 +17,7 @@ import {
   remapLegacyCells
 } from "../../entities/panel/model/panelCells";
 import { makeUniquePanelName } from "../../entities/panel/model/panelName";
+import { reorderPanels } from "../../entities/panel/model/reorderPanels";
 import { GridSize, Panel } from "../../entities/panel/model/types";
 import { ensureMedia } from "../../entities/media/model/normalizeMedia";
 import { CELL_COLORS } from "../../shared/config/colorPalette";
@@ -89,6 +91,7 @@ export type AppAction =
   | { type: "panel/rename"; panelId: string; name: string }
   | { type: "panel/delete"; panelId: string }
   | { type: "panel/deleteMany"; panelIds: readonly string[] }
+  | { type: "panel/reorder"; panelId: string; toIndex: number }
   | { type: "panel/gridSize"; panelId: string; gridSize: GridSize }
   | { type: "media/addMany"; media: MediaAsset[] }
   | { type: "media/update"; mediaId: string; alias?: string; color?: string }
@@ -267,6 +270,12 @@ export function serializeState(state: AppState): SerializableAppState {
   return serializeStatePure(state);
 }
 
+/** The label the grid would show for the cell's media when the cell has no alias of its own. */
+function labelForCellMedia(media: readonly MediaAsset[], cell: GridCell): string {
+  const asset = media.find((candidate) => candidate.id === cell.mediaId);
+  return asset ? getMediaLabel(asset) : "";
+}
+
 function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "panel/add": {
@@ -325,6 +334,13 @@ function reducer(state: AppState, action: AppAction): AppState {
           panel.id === action.panelId ? { ...panel, name: action.name.trim() || panel.name } : panel
         )
       };
+    case "panel/reorder": {
+      if (!state.editMode) {
+        return state;
+      }
+      const panels = reorderPanels(state.panels, action.panelId, action.toIndex);
+      return panels === state.panels ? state : { ...state, panels };
+    }
     case "panel/delete": {
       if (!state.editMode) {
         return state;
@@ -558,8 +574,11 @@ function reducer(state: AppState, action: AppAction): AppState {
         return state;
       }
 
-      const sourceMedia = state.media.find((media) => media.id === sourceCell.mediaId);
-      const copyAliasBase = sourceCell.aliasOverride.trim() || (sourceMedia?.fileName ?? "");
+      const copyAlias = copyAliasFor(
+        sourceCell,
+        action.fromPanelId === action.toPanelId,
+        (cell) => labelForCellMedia(state.media, cell)
+      );
 
       return {
         ...state,
@@ -567,7 +586,7 @@ function reducer(state: AppState, action: AppAction): AppState {
           ...state.cellsByPanel,
           [action.toPanelId]: {
             ...targetCells,
-            [action.toCellId]: copyCellInto(sourceCell, action.toCellId, copyAliasBase)
+            [action.toCellId]: copyCellInto(sourceCell, action.toCellId, copyAlias)
           }
         }
       };
@@ -583,8 +602,8 @@ function reducer(state: AppState, action: AppAction): AppState {
         sourceCellIds: action.cellIds,
         targetCells: state.cellsByPanel[action.toPanelId] ?? {},
         targetPanelCellIds: targetPanel.cellIds,
-        aliasBaseFor: (cell) =>
-          state.media.find((media) => media.id === cell.mediaId)?.fileName ?? ""
+        samePanel: action.fromPanelId === action.toPanelId,
+        labelFor: (cell) => labelForCellMedia(state.media, cell)
       });
       if (plan.pairs.length === 0) {
         return state;

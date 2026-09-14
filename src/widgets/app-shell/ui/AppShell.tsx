@@ -1580,10 +1580,10 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
         pb: "var(--app-safe-area-bottom)",
         pl: "var(--app-safe-area-left)",
         "@media (orientation: landscape) and (max-height: 430px)": {
-          // 38 rather than 34: four extra pixels of header, which is the whole point of the change
-          // — switching panels by thumb in a 430 px tall viewport. The tab minHeight in
-          // `PanelTabs` moved with it, and the two must stay in step or the tabs overflow the row.
-          gridTemplateRows: "38px minmax(0, 1fr)",
+          // 42 rather than 38: another four pixels of header for the thumb that switches panels
+          // in a 430 px tall viewport. The tab minHeight in `PanelTabs` moved with it (40), and the
+          // two must stay in step or the tabs overflow the row.
+          gridTemplateRows: "42px minmax(0, 1fr)",
           pt: 0,
           pb: 0
         }

@@ -122,9 +122,11 @@ test("the panel tab strip keeps a thumb-sized tap target on mobile landscape", a
   await page.goto("/");
 
   const tab = page.getByRole("tab", { name: "Panel 1" });
-  // 36 rather than the earlier 32, matching the 38 px header row in `AppShell`.
-  expect(await heightOf(tab)).toBeGreaterThanOrEqual(36);
-  await expect(tab).toHaveCSS("min-height", "36px");
+  // 40 rather than the earlier 36, matching the 42 px header row in `AppShell`.
+  expect(await heightOf(tab)).toBeGreaterThanOrEqual(40);
+  await expect(tab).toHaveCSS("min-height", "40px");
+  const header = page.locator("header");
+  expect(await heightOf(header)).toBe(42);
 });
 
 test("the panel delete cross stays vertically centred on mobile landscape", async ({
@@ -144,7 +146,7 @@ test("the panel delete cross stays vertically centred on mobile landscape", asyn
     throw new Error("tab or cross has no box");
   }
 
-  // The taller 38 px header row left a top-anchored cross sitting below the tab text.
+  // The taller header row (now 42 px) left a top-anchored cross sitting below the tab text.
   const tabCentre = tabBox.y + tabBox.height / 2;
   const crossCentre = crossBox.y + crossBox.height / 2;
   expect(Math.abs(crossCentre - tabCentre)).toBeLessThanOrEqual(3);

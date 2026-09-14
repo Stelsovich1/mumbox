@@ -3,6 +3,7 @@ import CheckBoxIcon from "@mui/icons-material/CheckBox";
 import CheckBoxOutlineBlankIcon from "@mui/icons-material/CheckBoxOutlineBlank";
 import CloseIcon from "@mui/icons-material/Close";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import {
   Box,
   Button,
@@ -22,6 +23,7 @@ import {
   KeyboardEvent,
   memo,
   PointerEvent as ReactPointerEvent,
+  useCallback,
   useEffect,
   useRef,
   useState
@@ -41,6 +43,39 @@ type PanelTabsProps = {
   onDeletePanel: (panelId: string) => void;
   onTogglePanelSelected: (panelId: string) => void;
 };
+
+type PanelDrag = {
+  panelId: string;
+  pointerId: number;
+  /** Index in `panels` the pointer currently sits over; the drop target. */
+  overIndex: number;
+};
+
+/**
+ * Index of the tab whose horizontal span holds `clientX`, or the nearest edge when the pointer is
+ * outside every tab. Tabs are read from the DOM rather than from a ref per panel: the scroller may
+ * have moved them since the drag began and the rects have to be live.
+ */
+function tabIndexAtX(root: HTMLElement | null, clientX: number): number | null {
+  if (!root) {
+    return null;
+  }
+  const tabs = Array.from(root.querySelectorAll<HTMLElement>('[role="tab"]'));
+  if (tabs.length === 0) {
+    return null;
+  }
+  for (const [index, tab] of tabs.entries()) {
+    const rect = tab.getBoundingClientRect();
+    if (clientX >= rect.left && clientX < rect.right) {
+      return index;
+    }
+  }
+  const first = tabs[0]?.getBoundingClientRect();
+  if (first && clientX < first.left) {
+    return 0;
+  }
+  return tabs.length - 1;
+}
 
 /**
  * Memoised. Its props change only when the panel layout or a mode does, but `AppShell`
@@ -63,6 +98,10 @@ export const PanelTabs = memo(function PanelTabs({
   const [copySourcePanelId, setCopySourcePanelId] = useState("");
   const [copyNameDraft, setCopyNameDraft] = useState("");
   const lastTouchTapRef = useRef<{ panelId: string; time: number } | null>(null);
+  const tabsRootRef = useRef<HTMLDivElement | null>(null);
+  const [panelDrag, setPanelDrag] = useState<PanelDrag | null>(null);
+  const panelDragRef = useRef<PanelDrag | null>(null);
+  panelDragRef.current = panelDrag;
   const selectedCopyPanel =
     panels.find((panel) => panel.id === copySourcePanelId) ??
     panels.find((panel) => panel.id === activePanelId) ??
@@ -74,8 +113,69 @@ export const PanelTabs = memo(function PanelTabs({
     if (!editMode) {
       setRenamingPanelId(null);
       setCopyDialogOpen(false);
+      setPanelDrag(null);
     }
   }, [editMode]);
+
+  /**
+   * Reordering runs on pointer events with capture, not on HTML5 drag and drop: the tab strip must
+   * work by finger, and the picker already learned that a touch drag needs a dedicated handle with
+   * `touch-action: none` — on the tab body it would kill the horizontal scroll of the strip. The
+   * handle stops propagation of the press so MUI does not also select the tab, and the double-tap
+   * rename never sees the gesture.
+   */
+  const startPanelDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>, panel: Panel) => {
+      if (!editMode || selectionMode) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const overIndex = panels.findIndex((candidate) => candidate.id === panel.id);
+      setPanelDrag({ panelId: panel.id, pointerId: event.pointerId, overIndex });
+    },
+    [editMode, panels, selectionMode]
+  );
+
+  const movePanelDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const drag = panelDragRef.current;
+    if (drag?.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    const overIndex = tabIndexAtX(tabsRootRef.current, event.clientX);
+    if (overIndex !== null && overIndex !== drag.overIndex) {
+      setPanelDrag({ ...drag, overIndex });
+    }
+  }, []);
+
+  const endPanelDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>, commit: boolean) => {
+      const drag = panelDragRef.current;
+      if (drag?.pointerId !== event.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setPanelDrag(null);
+      if (!commit) {
+        return;
+      }
+      const overIndex = tabIndexAtX(tabsRootRef.current, event.clientX) ?? drag.overIndex;
+      dispatch({ type: "panel/reorder", panelId: drag.panelId, toIndex: overIndex });
+    },
+    [dispatch]
+  );
+
+  const draggedIndex = panelDrag
+    ? panels.findIndex((candidate) => candidate.id === panelDrag.panelId)
+    : -1;
+  const dropTargetPanelId =
+    panelDrag && panelDrag.overIndex !== draggedIndex
+      ? (panels[panelDrag.overIndex]?.id ?? null)
+      : null;
+  const dropTargetIsAfter = panelDrag !== null && panelDrag.overIndex > draggedIndex;
 
   const commitRename = () => {
     if (!renamingPanelId || !editMode) {
@@ -151,6 +251,7 @@ export const PanelTabs = memo(function PanelTabs({
   return (
     <>
       <Tabs
+        ref={tabsRootRef}
         value={activePanelId}
         aria-label="Панели MUMBOX"
         variant="scrollable"
@@ -174,11 +275,11 @@ export const PanelTabs = memo(function PanelTabs({
             overflowX: "auto !important"
           },
           "@media (orientation: landscape) and (max-height: 430px)": {
-            // 36 rather than 32: four extra pixels of tap target, which is what a thumb needs to
-            // switch panels reliably in a 430 px tall viewport.
-            minHeight: 36,
+            // 40 rather than 36: the header row in `AppShell` grew to 42 px, and the tab has to
+            // fill it or the thumb lands on dead space above and below the label.
+            minHeight: 40,
             "& .MuiTab-root": {
-              minHeight: 36,
+              minHeight: 40,
               px: 0.75,
               fontSize: 11
             },
@@ -235,6 +336,62 @@ export const PanelTabs = memo(function PanelTabs({
                     }
                   }}
                 >
+                  {editMode && !selectionMode ? (
+                    /* Pointer-only affordance, hidden from the accessibility tree on purpose: a
+                       labelled control inside the tab would become part of the tab's own name, and
+                       every `getByRole("tab", { name })` — and every screen reader — would read
+                       «Переместить панель Alpha Alpha». Tests reach it by test id. */
+                    <Box
+                      component="span"
+                      aria-hidden="true"
+                      title="Перетащите, чтобы переставить панель"
+                      data-testid="panel-drag-handle"
+                      data-panel-name={panel.name}
+                      data-dragging={panelDrag?.panelId === panel.id ? "true" : "false"}
+                      onPointerDown={(event) => {
+                        startPanelDrag(event, panel);
+                      }}
+                      onPointerMove={movePanelDrag}
+                      onPointerUp={(event) => {
+                        endPanelDrag(event, true);
+                      }}
+                      onPointerCancel={(event) => {
+                        endPanelDrag(event, false);
+                      }}
+                      onMouseDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        event.preventDefault();
+                      }}
+                      sx={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 22,
+                        height: 26,
+                        mr: 0.25,
+                        ml: -0.5,
+                        flexShrink: 0,
+                        color: panelDrag?.panelId === panel.id ? "secondary.main" : "text.secondary",
+                        cursor: panelDrag ? "grabbing" : "grab",
+                        touchAction: "none",
+                        userSelect: "none",
+                        borderRadius: 1,
+                        "&:hover": {
+                          color: "text.primary"
+                        },
+                        "@media (orientation: landscape) and (max-height: 430px)": {
+                          width: 24,
+                          height: 30,
+                          ml: -0.75
+                        }
+                      }}
+                    >
+                      <DragIndicatorIcon sx={{ fontSize: 18 }} />
+                    </Box>
+                  ) : null}
                   {selectionMode && panel !== panels[0] ? (
                     /* Its own control, not the tab body: switching panels must keep working in
                        selection mode, or a user could never select a panel they are not on. The
@@ -325,7 +482,7 @@ export const PanelTabs = memo(function PanelTabs({
                           },
                           "@media (orientation: landscape) and (max-height: 430px)": {
                             // Centred on the label rather than pinned near its top: the header row
-                            // grew to 38 px and a top-anchored cross drifted below the tab text.
+                            // grew to 42 px and a top-anchored cross drifted below the tab text.
                             // A negative margin does the centring instead of `translateY`, which
                             // the hover `scale` would overwrite.
                             top: "50%",
@@ -357,6 +514,7 @@ export const PanelTabs = memo(function PanelTabs({
             onPointerUp={(event) => {
               handlePanelPointerUp(event, panel);
             }}
+            data-drop-target={dropTargetPanelId === panel.id ? "true" : "false"}
             sx={{
               minHeight: 42,
               maxWidth: 180,
@@ -364,8 +522,16 @@ export const PanelTabs = memo(function PanelTabs({
               "&.Mui-selected": {
                 color: editMode ? "secondary.main" : undefined
               },
+              // The drop target shows an edge on the side the dragged tab will land on, so the
+              // gesture reads as "insert here" rather than "swap with this one".
+              boxShadow:
+                dropTargetPanelId === panel.id
+                  ? dropTargetIsAfter
+                    ? "inset -3px 0 0 0 rgba(236, 90, 167, 0.9)"
+                    : "inset 3px 0 0 0 rgba(236, 90, 167, 0.9)"
+                  : "none",
               "@media (orientation: landscape) and (max-height: 430px)": {
-                minHeight: 36,
+                minHeight: 40,
                 maxWidth: 120
               }
             }}
