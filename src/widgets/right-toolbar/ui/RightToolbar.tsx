@@ -16,12 +16,18 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
-import { memo, MouseEvent, useState } from "react";
+import { memo, MouseEvent, useRef, useState } from "react";
 
 import { AppAction } from "../../../app/model/appState";
 import { GRID_SIZES } from "../../../entities/panel/model/hiddenCells";
 import { GridSize } from "../../../entities/panel/model/types";
 import { formatCountRu } from "../../../shared/lib/pluralizeRu";
+
+/**
+ * How long after a touch a `mousedown` on the slider is treated as Safari's emulation of it.
+ * The synthetic pair arrives within a few frames of `touchend`; a second is generous.
+ */
+const TOUCH_MOUSE_GUARD_MS = 1000;
 
 type RightToolbarProps = {
   masterVolume: number;
@@ -72,6 +78,25 @@ export const RightToolbar = memo(function RightToolbar({
    * change was lost.
    */
   const [dragVolume, setDragVolume] = useState<number | null>(null);
+  /**
+   * When a finger last touched the slider, or null while none has.
+   *
+   * iOS Safari turns a long press into hover emulation: after `touchend` it dispatches synthetic
+   * `mousedown` / `mouseup` at the point where the finger LANDED. MUI's slider drives a separate
+   * mouse path from those, so the touch drag committed the new volume and the fake mouse pair
+   * then re-read the start coordinates and committed the old one — the thumb snapped back on
+   * release, on the phone only, and only after a long press (a short tap or an immediate drag
+   * gets no emulation). MUI bails out of its mouse handler when `defaultPrevented` is set, so a
+   * `mousedown` that arrives shortly after a touch is cancelled here. A real mouse on a hybrid
+   * device is untouched: nothing sets the timestamp.
+   */
+  const lastTouchAtRef = useRef<number | null>(null);
+  const isEmulatedMouse = () =>
+    lastTouchAtRef.current !== null && performance.now() - lastTouchAtRef.current < TOUCH_MOUSE_GUARD_MS;
+  const commitVolume = (nextVolume: number) => {
+    setDragVolume(null);
+    dispatch({ type: "volume/master", value: nextVolume });
+  };
   const hasHiddenMedia = hiddenMediaCount > 0;
   const hiddenLabel = formatCountRu(hiddenMediaCount, ["ячейка", "ячейки", "ячеек"]);
 
@@ -185,12 +210,30 @@ export const RightToolbar = memo(function RightToolbar({
               });
             }}
             onChangeCommitted={(_, value: number | number[]) => {
-              const nextVolume = Array.isArray(value) ? value[0] ?? masterVolume : value;
-              setDragVolume(null);
-              dispatch({
-                type: "volume/master",
-                value: nextVolume
-              });
+              commitVolume(Array.isArray(value) ? value[0] ?? masterVolume : value);
+            }}
+            onTouchStart={() => {
+              lastTouchAtRef.current = performance.now();
+            }}
+            onTouchEnd={() => {
+              lastTouchAtRef.current = performance.now();
+            }}
+            onTouchCancel={() => {
+              // MUI listens to `touchend` only. A cancelled touch (edge gesture, second finger,
+              // notification) would otherwise leave the thumb pinned to `dragVolume` forever.
+              lastTouchAtRef.current = performance.now();
+              if (dragVolume !== null) {
+                commitVolume(dragVolume);
+              }
+            }}
+            onMouseDown={(event) => {
+              if (isEmulatedMouse()) {
+                event.preventDefault();
+              }
+            }}
+            onContextMenu={(event) => {
+              // A long press is how the slider is held, not a request for a callout.
+              event.preventDefault();
             }}
             sx={{
               // Rail and thumb are wider than the visual design would ask for: this is the only

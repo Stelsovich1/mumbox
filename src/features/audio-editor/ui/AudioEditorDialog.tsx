@@ -35,6 +35,7 @@ import {
   scheduleEnvelope
 } from "../../playback/model/audioEnvelope";
 import { formatDuration } from "../../../shared/lib/duration";
+import { DecimalTextField } from "../../../shared/ui/DecimalTextField";
 import { MobileLandscapeTextField } from "../../../shared/ui/MobileLandscapeTextField";
 
 type AudioEditorDialogProps = {
@@ -1201,31 +1202,30 @@ export function AudioEditorDialog({
                 }
               }}
             >
-              <MobileLandscapeTextField
+              {/* Text fields showing `34,0`, not number inputs: a whole second used to render as
+                  `34` and the fraction could only be typed after a separator the Russian keyboard
+                  offers as a comma — which a number input rejects. See `DecimalTextField`. */}
+              <DecimalTextField
                 label="Начало сек"
-                type="number"
                 size="small"
                 value={rangeValue[0]}
-                slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
                 sx={compactNumberFieldSx}
-                onValueChange={(value) => {
+                onValueChange={(seconds) => {
                   setDraft((current) => ({
                     ...current,
-                    trimStartMs: Math.round(Math.max(0, Number(value)) * 1000)
+                    trimStartMs: Math.round(Math.max(0, seconds) * 1000)
                   }));
                 }}
               />
-              <MobileLandscapeTextField
+              <DecimalTextField
                 label="Конец сек"
-                type="number"
                 size="small"
                 value={rangeValue[1]}
-                slotProps={{ htmlInput: { step: 0.01, min: 0, max: durationMs / 1000 } }}
                 sx={compactNumberFieldSx}
-                onValueChange={(value) => {
+                onValueChange={(seconds) => {
                   setDraft((current) => ({
                     ...current,
-                    trimEndMs: Math.round(Math.min(durationMs / 1000, Number(value)) * 1000)
+                    trimEndMs: Math.round(Math.min(durationMs / 1000, seconds) * 1000)
                   }));
                 }}
               />
@@ -1374,17 +1374,15 @@ export function AudioEditorDialog({
                 }
                 label="Нарастание"
               />
-              <MobileLandscapeTextField
+              <DecimalTextField
                 label="Секунды"
-                type="number"
                 size="small"
                 value={draft.fadeInMs / 1000}
-                slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
                 sx={compactNumberFieldSx}
-                onValueChange={(value) => {
+                onValueChange={(seconds) => {
                   setDraft((current) => ({
                     ...current,
-                    fadeInMs: Math.max(0, Number(value) * 1000)
+                    fadeInMs: Math.max(0, Math.round(seconds * 1000))
                   }));
                 }}
               />
@@ -1412,17 +1410,15 @@ export function AudioEditorDialog({
                 }
                 label="Затухание"
               />
-              <MobileLandscapeTextField
+              <DecimalTextField
                 label="Секунды"
-                type="number"
                 size="small"
                 value={draft.fadeOutMs / 1000}
-                slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
                 sx={compactNumberFieldSx}
-                onValueChange={(value) => {
+                onValueChange={(seconds) => {
                   setDraft((current) => ({
                     ...current,
-                    fadeOutMs: Math.max(0, Number(value) * 1000)
+                    fadeOutMs: Math.max(0, Math.round(seconds * 1000))
                   }));
                 }}
               />

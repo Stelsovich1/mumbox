@@ -221,6 +221,18 @@ regeneration on merge in `src/features/project-merge/CLAUDE.md`.
   horizontal table scroll. `global.css` writes that rule at the same specificity as
   `[data-noselect] button:not([draggable="true"])` — otherwise that rule wins and the touch drag
   breaks silently, on real hardware only.
+- The panel drag handle in `PanelTabs` is `aria-hidden` and reached by `data-testid` on purpose: a
+  labelled control inside a MUI `Tab` becomes part of the tab's accessible name, so a
+  `role="button"` there turned `getByRole("tab", { name: "Alpha", exact: true })` into a miss and
+  would read «Переместить панель Alpha Alpha» to a screen reader. The delete cross gets away with
+  it only because non-exact `getByRole` matches a substring.
+- A cell copied onto ANOTHER panel keeps its alias verbatim (an empty override stays empty, so the
+  grid falls back to the media alias exactly as the source does); only a copy onto the SAME panel
+  gets the `_copy` suffix, built from the label the cell shows (`copyAliasFor`). The old rule
+  suffixed the media FILE name and skipped the media alias, which read as "the alias did not copy".
+- The seconds fields of the audio editor are `DecimalTextField` (text + `inputMode="decimal"`),
+  not `type="number"`: they show `34,0` / `0,0` and accept a comma, because a Russian keyboard
+  offers a comma and a number input rejects it. Tests fill them with either separator.
 - New cells assigned in one gesture go through `cell/assignMany`, not a loop of `cell/assign`: one
   action, one validated state change, no half-applied layout.
 - Commit messages follow Conventional Commits with a Russian subject: `feat(panel): добавить копирование панелей`.
