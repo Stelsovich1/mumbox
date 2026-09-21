@@ -313,11 +313,34 @@ function readQueryFlag(name: string): string | null {
   }
 }
 
-let overlayEnabled: boolean | null = null;
+let overlayFromQuery: boolean | null = null;
+let overlayFromSettings = false;
+
+/**
+ * `?diag=1`, read once per load.
+ *
+ * Kept separate from the saved setting because the two answer different questions: the flag is what
+ * someone typed into a URL for this load, the setting is what the device is configured to do. The
+ * flag is latched on purpose — it cannot change without a navigation — and the setting deliberately
+ * is not, or the toggle in the settings dialog would need a reload to take effect.
+ */
+export function isDiagnosticsQueryEnabled(): boolean {
+  overlayFromQuery ??= readQueryFlag("diag") === "1";
+  return overlayFromQuery;
+}
+
+/**
+ * Mirrors the saved setting into this module so `snapshot().overlayEnabled` tells the truth.
+ *
+ * `App` does not read the overlay state from here — it derives it from the settings hook, because
+ * a module-level boolean cannot make React re-render.
+ */
+export function setOverlayFromSettings(enabled: boolean): void {
+  overlayFromSettings = enabled;
+}
 
 export function isDiagnosticsEnabled(): boolean {
-  overlayEnabled ??= readQueryFlag("diag") === "1";
-  return overlayEnabled;
+  return isDiagnosticsQueryEnabled() || overlayFromSettings;
 }
 
 /**

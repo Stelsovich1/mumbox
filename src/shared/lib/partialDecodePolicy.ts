@@ -184,6 +184,22 @@ export function setPartialDecodeMode(mode: PartialDecodeMode | null): void {
 }
 
 /**
+ * Whether `?partial=` is present on this load.
+ *
+ * Exported so a saved setting can stand down in front of it. `setPartialDecodeMode` is checked
+ * BEFORE the query flag by `getPartialDecodeMode`, so a setting applied unconditionally would
+ * quietly beat the flag — and the flag is the per-load switch the byte-range path is debugged with
+ * on devices that have no console.
+ */
+export function hasPartialQueryFlag(): boolean {
+  // Only the two values `getPartialDecodeMode` actually honours. `?partial=7` changes nothing
+  // there, so reporting it as an override would disable the control and tell the user a flag is
+  // in charge when none is.
+  const flag = readQueryFlag("partial");
+  return flag === "0" || flag === "1";
+}
+
+/**
  * WAV is exempt from the verdict entirely.
  *
  * Its path never invokes the browser's decoder — it is our own Int16-to-Float32 arithmetic — so

@@ -1,4 +1,4 @@
-import { clear, del, get, set } from "idb-keyval";
+import { clear, del, get, keys, set } from "idb-keyval";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
 import { applyCellAssignments, assignCellMedia } from "../../entities/cell/model/assignCells";
@@ -38,7 +38,7 @@ export { getPanelCellIds } from "../../entities/panel/model/panelCells";
 const STORAGE_KEY = "mumbox:state:v1";
 // A sidecar key on purpose: the layout payload stays byte-identical for an untouched project.
 const PROJECT_SESSION_KEY = "mumbox:project-session:v1";
-const MEDIA_BLOB_PREFIX = "mumbox:media:";
+export const MEDIA_BLOB_PREFIX = "mumbox:media:";
 
 export type AppState = {
   panels: Panel[];
@@ -1052,6 +1052,18 @@ export async function writeImportedProjectMedia(
   }
 
   return remapImportedState(state, idByImportedId);
+}
+
+/**
+ * Every media id that has a blob in storage.
+ *
+ * The one place in the app that enumerates the blob store. It is never on a hot path: the settings
+ * dialog calls it when its storage section opens, to say how many blobs no longer belong to
+ * anything. See `planOrphanMediaKeys` for why the answer is shown rather than acted on.
+ */
+export async function listStoredMediaKeys(): Promise<string[]> {
+  const stored = await keys();
+  return stored.filter((key): key is string => typeof key === "string");
 }
 
 export async function deleteStoredMedia(mediaIds: string[]) {

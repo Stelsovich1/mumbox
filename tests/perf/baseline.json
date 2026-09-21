@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-09-10T20:23:56.336Z",
+  "recordedAt": "2026-09-21T11:52:35.929Z",
   "notes": "WAV-only fixtures: decode is near-free by design, which isolates memory and IndexedDB cost from codec cost. Recorded locally; see codec-cost.perf.spec.ts for the codec axis. Fixtures long enough to be streamed take the byte-range path, so their decode counts are 0 and their cached bytes are heads; partial-off-12x180s holds the full-decode figures for comparison.",
   "env": {
     "os": "win32",
@@ -691,6 +691,54 @@
         },
         "tailMs": {
           "value": 0,
+          "unit": "ms"
+        }
+      }
+    },
+    "visuals-default-grid144@6x": {
+      "metrics": {
+        "fullDecodeCount": {
+          "value": 24,
+          "unit": "count"
+        },
+        "warmupTotalMs": {
+          "value": 19330,
+          "unit": "ms"
+        },
+        "warmupWallMs": {
+          "value": 19821,
+          "unit": "ms"
+        },
+        "fps": {
+          "value": 1.7,
+          "unit": "fps"
+        },
+        "p95FrameMs": {
+          "value": 2183,
+          "unit": "ms"
+        }
+      }
+    },
+    "visuals-flat-grid144@6x": {
+      "metrics": {
+        "fullDecodeCount": {
+          "value": 24,
+          "unit": "count"
+        },
+        "warmupTotalMs": {
+          "value": 4888,
+          "unit": "ms"
+        },
+        "warmupWallMs": {
+          "value": 7172,
+          "unit": "ms"
+        },
+        "fps": {
+          "value": 6.4,
+          "unit": "fps"
+        },
+        "p95FrameMs": {
+          "value": 383,
           "unit": "ms"
         }
       }

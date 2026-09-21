@@ -35,6 +35,14 @@ export const STATE_RECORD_KEY = "state:v1";
  * be authoritative is for it not to be there.
  */
 export const UI_RECORD_KEY = "ui:v1";
+/**
+ * Per-device settings, deleted by every seed for the same reason `UI_RECORD_KEY` is.
+ *
+ * A leaked warm-up mode would be invisible and catastrophic for the suites: `on-press` warms
+ * nothing, so every wait for `[data-warm-state="ready"]` across the whole panel would time out, and
+ * the perf tier's `exact` gates on decode counts would fail with no hint as to why.
+ */
+export const SETTINGS_RECORD_KEY = "settings:v1";
 export const MAX_GRID_SIZE = 12;
 
 export type GridSize = 6 | 8 | 10 | 12;
@@ -323,6 +331,7 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
         const tx = appDb.transaction(payload.appStoreName, "readwrite");
         tx.objectStore(payload.appStoreName).put(payload.state, payload.stateRecordKey);
         tx.objectStore(payload.appStoreName).delete(payload.uiRecordKey);
+        tx.objectStore(payload.appStoreName).delete(payload.settingsRecordKey);
         tx.oncomplete = () => {
           resolve();
         };
@@ -345,6 +354,7 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
       appStoreName: APP_STORE_NAME,
       stateRecordKey: STATE_RECORD_KEY,
       uiRecordKey: UI_RECORD_KEY,
+      settingsRecordKey: SETTINGS_RECORD_KEY,
       state: seed.state,
       media: seed.media.map((asset) => ({
         id: asset.id,
@@ -356,6 +366,64 @@ export async function seedProject(page: Page, plan: SeedPlan): Promise<SeedResul
   );
 
   return seed;
+}
+
+/**
+ * Writes the per-device settings record, for a test that needs the app to boot WITH a setting.
+ *
+ * Setting a `data-` attribute from an init script does not work and fails quietly: the boot gate
+ * applies the stored settings once it has read them, and the default record removes exactly those
+ * attributes again. Anything measuring a visual setting has to go through the record.
+ *
+ * Call AFTER `seedProject`, which deletes this key along with the other sidecars.
+ */
+export async function seedAppSettings(page: Page, settings: unknown): Promise<void> {
+  await page.evaluate(
+    async (payload: { dbName: string; storeName: string; key: string; settings: unknown }) => {
+      const open = (version?: number) =>
+        new Promise<IDBDatabase>((resolve, reject) => {
+          const request =
+            version === undefined
+              ? indexedDB.open(payload.dbName)
+              : indexedDB.open(payload.dbName, version);
+          request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(payload.storeName)) {
+              request.result.createObjectStore(payload.storeName);
+            }
+          };
+          request.onsuccess = () => {
+            resolve(request.result);
+          };
+          request.onerror = () => {
+            reject(request.error ?? new Error("indexedDB.open failed"));
+          };
+        });
+
+      let db = await open();
+      if (!db.objectStoreNames.contains(payload.storeName)) {
+        const nextVersion = db.version + 1;
+        db.close();
+        db = await open(nextVersion);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(payload.storeName, "readwrite");
+        tx.objectStore(payload.storeName).put(payload.settings, payload.key);
+        tx.oncomplete = () => {
+          resolve();
+        };
+        tx.onerror = () => {
+          reject(tx.error ?? new Error("settings seed failed"));
+        };
+      });
+      db.close();
+    },
+    {
+      dbName: APP_DB_NAME,
+      storeName: APP_STORE_NAME,
+      key: SETTINGS_RECORD_KEY,
+      settings
+    }
+  );
 }
 
 export async function readSeededKeys(page: Page): Promise<string[]> {
@@ -446,6 +514,7 @@ export async function writeSeededAppState(page: Page, state: unknown): Promise<v
         // gives — it would override the seeded active panel and volume.
         tx.objectStore(payload.storeName).delete(payload.sessionKey);
         tx.objectStore(payload.storeName).delete(payload.uiKey);
+        tx.objectStore(payload.storeName).delete(payload.settingsKey);
         tx.oncomplete = () => {
           resolve();
         };
@@ -461,6 +530,7 @@ export async function writeSeededAppState(page: Page, state: unknown): Promise<v
       recordKey: STATE_RECORD_KEY,
       sessionKey: "session:v1",
       uiKey: UI_RECORD_KEY,
+      settingsKey: SETTINGS_RECORD_KEY,
       state
     }
   );

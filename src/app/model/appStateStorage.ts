@@ -1,5 +1,6 @@
 import { createStore, del, get, set } from "idb-keyval";
 
+import { AppSettings, DEFAULT_SETTINGS, parseSettings } from "../../shared/lib/appSettings";
 import type { AppState, SerializableAppState } from "./appState";
 import type { ProjectSession } from "./projectSession";
 import { serializeState } from "./serializeState";
@@ -52,6 +53,17 @@ export const UI_RECORD_KEY = "ui:v1";
  */
 export const LEGACY_STATE_KEY = "mumbox:state:v1";
 export const LEGACY_SESSION_KEY = "mumbox:project-session:v1";
+
+/**
+ * Per-device settings, beside the layout rather than inside it.
+ *
+ * Its own key for the same reason `ui:v1` has one: it is written on its own schedule — only when
+ * the user presses "apply" — and must never drag the layout record through a write. It lives in
+ * this database rather than in localStorage because nothing reads it before the boot gate, so the
+ * synchronous read localStorage would buy is not needed, and the root CLAUDE.md keeps that storage
+ * for the two records that genuinely cannot be asynchronous.
+ */
+export const SETTINGS_RECORD_KEY = "settings:v1";
 
 /**
  * A dedicated store, not idb-keyval's default one.
@@ -234,10 +246,34 @@ export async function writeUiState(
   }
 }
 
+/**
+ * Reads the settings record. A failure or a foreign shape both mean "defaults".
+ *
+ * Deliberately not part of `readAppState`'s `failed` flag: that flag suspends WRITING the layout,
+ * because writing over a project that is still there is the worst thing this layer can do. A
+ * settings record that cannot be read costs a preference, so it must not be able to stop the app
+ * from saving the project.
+ */
+export async function readStoredSettings(): Promise<AppSettings> {
+  try {
+    return parseSettings(await get(SETTINGS_RECORD_KEY, appStore));
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+export async function writeStoredSettings(settings: AppSettings): Promise<void> {
+  await set(SETTINGS_RECORD_KEY, settings, appStore);
+}
+
 export async function clearAppStateStorage(): Promise<void> {
   await del(STATE_RECORD_KEY, appStore).catch(() => undefined);
   await del(SESSION_RECORD_KEY, appStore).catch(() => undefined);
   await del(UI_RECORD_KEY, appStore).catch(() => undefined);
+  // The settings go too. Someone who reaches for "erase everything" is usually trying to escape a
+  // state they cannot explain, and keeping the very setting that produced it would be the one
+  // thing this button must not do.
+  await del(SETTINGS_RECORD_KEY, appStore).catch(() => undefined);
   try {
     localStorage.removeItem(LEGACY_STATE_KEY);
     localStorage.removeItem(LEGACY_SESSION_KEY);
