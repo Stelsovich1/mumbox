@@ -59,11 +59,8 @@ import { createAudioBufferCache } from "./audioBufferCache";
  */
 export const COARSE_POINTER_BUDGET_BYTES = 1024 * 1024 * 1024;
 
-export function getDefaultBudgetBytes(): number | null {
-  const override = readBudgetOverride();
-  if (override.present) {
-    return override.bytes;
-  }
+/** The device rule on its own: no cap on a fine pointer, 1 GiB on a coarse one. */
+export function getDeviceBudgetBytes(): number | null {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return null;
   }
@@ -72,7 +69,31 @@ export function getDefaultBudgetBytes(): number | null {
     : null;
 }
 
+export function getDefaultBudgetBytes(): number | null {
+  const override = readBudgetOverride();
+  if (override.present) {
+    return override.bytes;
+  }
+  return getDeviceBudgetBytes();
+}
+
 export const playbackBufferCache = createAudioBufferCache(getDefaultBudgetBytes());
+
+/**
+ * Applies the saved budget, and refuses to when a query flag is present.
+ *
+ * The flag has to win, and that is not the direction the plumbing naturally runs: `setBudgetBytes`
+ * writes to the cache directly, with nothing left of `readBudgetOverride` to consult. Without this
+ * guard a saved setting would silently override `?pcmBudgetMb=` for the rest of the session — and
+ * that flag is the instrument every memory measurement in this repo is taken with.
+ */
+export function applyBudgetSetting(setting: { present: boolean; bytes: number | null }): boolean {
+  if (readBudgetOverride().present) {
+    return false;
+  }
+  playbackBufferCache.setBudgetBytes(setting.present ? setting.bytes : getDeviceBudgetBytes());
+  return true;
+}
 
 let activePanelKeys: readonly string[] = [];
 

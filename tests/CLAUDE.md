@@ -14,7 +14,9 @@ separate config files rather than separate projects.
 `tests/support/` holds the shared helpers: `audioFixtures.ts` (pure-JS WAV writer),
 `seedProject.ts` (seeds the IndexedDB media blobs plus the IndexedDB layout record in one
 navigation — never the legacy localStorage key, or every seeded test would be exercising the
-migration path instead of the steady state),
+migration path instead of the steady state — and deletes the `ui:v1` and `settings:v1` sidecars,
+without which a leaked warm-up mode would silently turn every "wait for the panel to be ready" into
+a timeout; `seedAppSettings` writes that settings record back for the tests that need one),
 `audioMock.ts` (the opt-in Web Audio mock that exercises the buffer route), `diag.ts` (typed access
 to `window.__mumboxDiag`).
 

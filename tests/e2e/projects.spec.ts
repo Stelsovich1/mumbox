@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openEraseAllData } from "../support/eraseAllData";
 import type { Page } from "@playwright/test";
 
 import { join } from "node:path";
@@ -210,8 +211,7 @@ test("erasing everything clears the projects list as well", async ({ page }) => 
   await page.goto("/");
 
   await page.getByRole("button", { name: "Проект" }).click();
-  await page.getByText("Стереть все данные").click();
-  await expect(page.getByRole("dialog", { name: "Стереть все данные?" })).toBeVisible();
+  await openEraseAllData(page);
   await expect(page.getByText(/Список проектов также будет очищен/)).toBeVisible();
   await page.getByRole("button", { name: "Да, стереть" }).click();
 
@@ -347,7 +347,7 @@ test("merging a project whose audio is new keeps its cells filled", async ({ pag
 
   // Wipe everything, then build a project holding completely different audio.
   await page.getByRole("button", { name: "Проект" }).click();
-  await page.getByText("Стереть все данные").click();
+  await openEraseAllData(page);
   await page.getByRole("button", { name: "Да, стереть" }).click();
   await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
 
@@ -500,7 +500,7 @@ test("merging two same-length files with different audio keeps both", async ({ p
 
   // Start over with the OTHER bell, so the two projects hold different audio under one name.
   await page.getByRole("button", { name: "Проект" }).click();
-  await page.getByText("Стереть все данные").click();
+  await openEraseAllData(page);
   await page.getByRole("button", { name: "Да, стереть" }).click();
   await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
 

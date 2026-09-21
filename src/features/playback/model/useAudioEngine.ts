@@ -16,6 +16,8 @@ import {
   setMonoState,
   setRoutePcmSource
 } from "../../../shared/lib/diagnostics";
+import { resolveWarmupConcurrency } from "../../../shared/lib/appSettings";
+import { useAppSettings } from "../../../shared/lib/appSettingsStore";
 import { clearProgress, writeProgress } from "../../../shared/lib/cellVisuals";
 import { onMediaCachePurge } from "../../../shared/lib/mediaCacheRegistry";
 import {
@@ -168,6 +170,26 @@ const PROGRESS_PUSH_INTERVAL_MS = 50;
  * away on the next one — more transient memory than the accumulation it replaces.
  */
 const WARMUP_DEBOUNCE_MS = 150;
+/**
+ * The "yield to input" setting, in numbers.
+ *
+ * A press is not one event but a burst — a show is several pads within a second — so the warm-up
+ * waits for QUIET rather than for a single event to pass. The number of waits is capped on purpose:
+ * an uncapped one would stall the warm-up for as long as someone keeps playing, which is exactly
+ * the session where the remaining pads still need to become instant.
+ */
+const INPUT_QUIET_MS = 300;
+const INPUT_YIELD_MS = 120;
+const MAX_INPUT_YIELDS = 4;
+/**
+ * How many cells after the pressed one `on-press` warms, and how long it waits first.
+ *
+ * Small on purpose: the mode exists for machines that cannot afford a panel, so its own work has to
+ * stay a rounding error next to one decode. The delay keeps it out of the task that started the
+ * sound.
+ */
+const NEIGHBOUR_WARMUP_COUNT = 2;
+const NEIGHBOUR_WARMUP_DELAY_MS = 250;
 /**
  * Concurrency multiplies the transient memory of in-flight decodes, and that transient is exactly
  * what gets a tab killed on a phone: three simultaneous decodes of 15 MB tracks is two thirds of a
@@ -410,6 +432,15 @@ export function useAudioEngine(
   stopOthers: boolean,
   monoPlayback = false
 ) {
+  /**
+   * Per-device settings. Read through the store rather than passed in: the engine is the only
+   * consumer of the warm-up half of them, and threading four values through `AppShell` would put
+   * them in its props for no other reason.
+   */
+  const settings = useAppSettings();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
   const contextRef = useRef<AudioContext | null>(null);
   // In-flight decodes are tracked apart from the resolved cache so two concurrent requests share
   // one decode, and — unlike caching the promise itself — a failed decode leaves nothing behind
@@ -454,6 +485,30 @@ export function useAudioEngine(
    * would otherwise resolve afterwards and put the PCM straight back into the cache.
    */
   const purgeGenerationRef = useRef(0);
+  /**
+   * When a pad was last pressed, for the "yield to input" setting.
+   *
+   * Wall clock rather than a flag, because what the warm-up has to stay out of the way of is a
+   * burst of presses, not one event: a show is several pads within a second or two.
+   */
+  const lastInteractionRef = useRef(Number.NEGATIVE_INFINITY);
+  /**
+   * Set after the warm-up targets exist, called from the press path.
+   *
+   * A ref rather than a direct call because the press path is defined long before the target list
+   * it needs, and the alternative — moving either one — would reorder a file whose ordering is
+   * already load-bearing.
+   */
+  const neighbourWarmupRef = useRef<((cellId: string) => void) | null>(null);
+  /** The pending neighbour timer, so a burst of presses schedules one pass and unmount cancels it. */
+  const neighbourTimerRef = useRef<number | null>(null);
+  /**
+   * Serializes neighbour passes, for the reason `warmupChainRef` serializes warm-up runs: a pass
+   * awaits `warmMedia` directly, so six pads tapped inside the timer window would otherwise mean
+   * six unsynchronised decodes — the exact ceiling the warm-up pool exists to impose, broken in the
+   * mode the weakest devices choose.
+   */
+  const neighbourChainRef = useRef<Promise<void>>(Promise.resolve());
   const frameRef = useRef<number | null>(null);
 
   /**
@@ -762,6 +817,18 @@ export function useAudioEngine(
       }
       const sourceSeconds = (asset?.durationMs ?? 0) / 1000;
       const { startSeconds, endSeconds } = getClampedPlaybackRange(cell, sourceSeconds);
+
+      // A mid-file window is refused outright while the decoder offset is unmeasured, and the cue
+      // then pays a whole-file decode. Measuring here rather than only in the warm-up is what makes
+      // the warm-up modes that skip cells safe: a cell the warm-up never reached would otherwise be
+      // permanently off the byte-range path, which is the opposite of what those modes are for.
+      //
+      // It is not extra work on the press path — it is two short decodes instead of one very long
+      // one — but it must go through the lane the CALLER is on, or a press would queue behind
+      // speculative warm-up decodes.
+      if (needsAlignmentMeasurement(cell, asset?.durationMs ?? null)) {
+        await ensureMp3Alignment(mediaId, lane).catch(() => false);
+      }
 
       try {
         // A window large enough to stream becomes a HEAD plus a plan; the rest arrives while the
@@ -1817,6 +1884,10 @@ export function useAudioEngine(
 
       const cellKey = getCellKey(panelId, cell.id);
       const triggeredAt = performance.now();
+      // Two things the press owes the warm-up: a timestamp, so "yield to input" knows the glass is
+      // busy, and — in `on-press` mode — a nudge to warm what is likely to be pressed next.
+      lastInteractionRef.current = triggeredAt;
+      neighbourWarmupRef.current?.(cell.id);
 
       if (stopOthers) {
         stopAll();
@@ -1959,6 +2030,85 @@ export function useAudioEngine(
   );
 
   /**
+   * `on-press`: after a pad is played, warm that cue and the next few in cell order.
+   *
+   * The run id is the CURRENT one rather than a private counter, and that is the whole safety
+   * argument: a panel switch bumps it, so anything this started and did not finish is dropped by
+   * the same check that drops a superseded warm-up run — no second lifetime to reason about.
+   *
+   * The pressed cell is included even though its buffer is usually already cached by the press: the
+   * warm STATE is what the grid shows, and without this pass the pad that was just played would go
+   * on claiming it is cold.
+   */
+  const warmNeighbours = useCallback(
+    async (cellId: string, pressedPanelId: string) => {
+      // The panel the press happened on, not the panel on screen now. Cell ids are
+      // position-stable, so `cell-0` exists on every panel: without this check a press on panel A
+      // followed by a switch to panel B within the delay would warm B's cells instead, and the
+      // run-id guard could not tell, because B's run id is the current one.
+      if (panelIdRef.current !== pressedPanelId) {
+        return;
+      }
+      const targets = warmupTargetsRef.current;
+      const index = targets.findIndex((target) => target.cellId === cellId);
+      if (index < 0) {
+        return;
+      }
+      const runId = warmupRunRef.current;
+      for (const target of targets.slice(index, index + NEIGHBOUR_WARMUP_COUNT + 1)) {
+        if (warmupRunRef.current !== runId || panelIdRef.current !== pressedPanelId) {
+          return;
+        }
+        if (playbackBufferCache.has(target.cacheKey) && warmedKeysRef.current[target.cacheKey]) {
+          continue;
+        }
+        const asset = mediaByIdRef.current.get(target.mediaId);
+        // The same measurement the warm-up pool makes, and for the same reason: without it every
+        // mid-file window is refused and the cue falls back to decoding the whole file — which in
+        // this mode is the whole point of what is being avoided.
+        if (needsAlignmentMeasurement(target.cell, asset?.durationMs ?? null)) {
+          await ensureMp3Alignment(target.mediaId).catch(() => false);
+          if (warmupRunRef.current !== runId) {
+            return;
+          }
+        }
+        await warmMedia(target, runId);
+      }
+    },
+    [warmMedia]
+  );
+
+  neighbourWarmupRef.current = (cellId: string) => {
+    if (settingsRef.current.performance.warmupMode !== "on-press") {
+      return;
+    }
+    const pressedPanelId = panelIdRef.current;
+    // One pending pass, not one per press: a burst of taps is the common case here, and each of
+    // them scheduling its own pass is what would put six decodes in flight at once.
+    if (neighbourTimerRef.current !== null) {
+      window.clearTimeout(neighbourTimerRef.current);
+    }
+    // Deferred, so nothing here shares a task with the press that triggered it.
+    neighbourTimerRef.current = window.setTimeout(() => {
+      neighbourTimerRef.current = null;
+      neighbourChainRef.current = neighbourChainRef.current.then(
+        () => warmNeighbours(cellId, pressedPanelId),
+        () => warmNeighbours(cellId, pressedPanelId)
+      );
+    }, NEIGHBOUR_WARMUP_DELAY_MS);
+  };
+
+  useEffect(
+    () => () => {
+      if (neighbourTimerRef.current !== null) {
+        window.clearTimeout(neighbourTimerRef.current);
+        neighbourTimerRef.current = null;
+      }
+    },
+    []
+  );
+
+  /**
    * Panel-scoped eviction. Declared before the warm-up so priority and pinning are in place
    * before anything is decoded.
    */
@@ -2053,12 +2203,26 @@ export function useAudioEngine(
       if (warmupRunRef.current !== runId) {
         return;
       }
+      const performanceSettings = settingsRef.current.performance;
+      const mode = performanceSettings.warmupMode;
+      const budgetMs = performanceSettings.warmupBudgetSeconds * 1000;
+      const yieldsToInput = performanceSettings.warmupYieldsToInput;
+      // `on-press` warms nothing up front. The run still starts and still records, so the warm-up
+      // duration stays readable in diagnostics and a caller waiting for "the warm-up finished" is
+      // not left waiting for an event that will never come.
+      const runTargets = mode === "on-press" ? [] : uniqueTargets;
+      const runStartedAt = performance.now();
+      // Time spent waiting for a gap in the presses is not time spent warming, so it does not
+      // count against the budget. Without this the two settings cancel each other out: four waits
+      // of 120 ms per target exhausts an eight-second budget in seventeen targets at zero decode
+      // cost, and every pad after that is skipped and never revisited.
+      let yieldedMs = 0;
       // Safe to reset here and not before the await: runs are serialized, so no worker of an
       // earlier run is still holding a staged decode by the time this one starts.
       stagingRef.current.clear();
       markStart(`warmup:${String(runId)}`);
       let warmed = 0;
-      let skipped = 0;
+      let skipped = mode === "on-press" ? uniqueTargets.length - readyKeys.length : 0;
       // Cell order, so the visually first cells are decoded first.
       let cursor = 0;
       // Bytes promised to decodes that have not landed in the cache yet. Without this every
@@ -2077,9 +2241,29 @@ export function useAudioEngine(
         }
       };
 
+      /**
+       * Waits for a gap in the presses, bounded.
+       *
+       * The cost the setting exists to remove is not the decode itself — that happens off the main
+       * thread — but everything around it landing while a finger is on the glass.
+       */
+      const yieldToInput = async () => {
+        for (let attempt = 0; attempt < MAX_INPUT_YIELDS; attempt += 1) {
+          if (performance.now() - lastInteractionRef.current >= INPUT_QUIET_MS) {
+            return;
+          }
+          const waitedFrom = performance.now();
+          await new Promise((resolve) => setTimeout(resolve, INPUT_YIELD_MS));
+          yieldedMs += performance.now() - waitedFrom;
+          if (warmupRunRef.current !== runId) {
+            return;
+          }
+        }
+      };
+
       const runWorker = async () => {
         for (;;) {
-          const target = uniqueTargets[cursor];
+          const target = runTargets[cursor];
           cursor += 1;
           if (!target || warmupRunRef.current !== runId) {
             return;
@@ -2088,11 +2272,27 @@ export function useAudioEngine(
             releaseStaged(target.mediaId);
             continue;
           }
+          // Wall-clock budget, checked before a target is taken rather than after: a decode cannot
+          // be cancelled, so the only honest place to stop is before starting another one. What is
+          // left is counted as skipped, exactly as the memory budget counts it.
+          if (mode === "time-budget" && performance.now() - runStartedAt - yieldedMs > budgetMs) {
+            skipped += 1;
+            releaseStaged(target.mediaId);
+            continue;
+          }
 
           // Predictive skip: decoding something that would be evicted on arrival costs a full
           // decode plus a transient allocation spike, for nothing. Measured against what will
           // actually be CACHED — a streamed cell keeps only its head; see `estimateWarmBytes`.
           const asset = mediaByIdRef.current.get(target.mediaId);
+          // `heads-only` warms what the byte-range path can serve as a 0.5 s head and refuses to
+          // pay a full decode for anything else. The test is the same hint the staging exclusion
+          // uses, so the two cannot disagree about which cells are streamable.
+          if (mode === "heads-only" && !isPartialPathLikely(target.cell, asset?.durationMs ?? null)) {
+            skipped += 1;
+            releaseStaged(target.mediaId);
+            continue;
+          }
           const estimate = estimateWarmBytes(
             target.cell,
             asset?.durationMs ?? null,
@@ -2158,6 +2358,9 @@ export function useAudioEngine(
           }
           warmed += 1;
           releaseStaged(target.mediaId);
+          if (yieldsToInput) {
+            await yieldToInput();
+          }
         }
       };
 
@@ -2165,7 +2368,15 @@ export function useAudioEngine(
       // was a hand-tuned way of letting the browser breathe; with several decodes in flight the
       // awaits provide those yields on their own.
       await Promise.all(
-        Array.from({ length: Math.min(getWarmupConcurrency(), uniqueTargets.length) }, runWorker)
+        Array.from(
+          {
+            length: Math.min(
+              resolveWarmupConcurrency(settingsRef.current, getWarmupConcurrency()),
+              runTargets.length
+            )
+          },
+          runWorker
+        )
       );
       stagingRef.current.clear();
 
@@ -2187,7 +2398,14 @@ export function useAudioEngine(
     return () => {
       window.clearTimeout(timer);
     };
-  }, [decodeFullBuffer, queueWarmedKeys, warmupSignature, warmMedia]);
+    // `settings` is here because a mode switch changes what the warm-up should be doing without
+    // changing which keys the panel wants, so `warmupSignature` cannot see it.
+    //
+    // A cache PURGE deliberately does NOT restart the warm-up. Clearing the decoded memory is a
+    // request to give that memory back, and re-decoding it on the spot would hand the user an
+    // unchanged number and a busy machine. The cells go honestly cold — the purge drops their warm
+    // state too — and warm again on the next panel switch or the next press.
+  }, [decodeFullBuffer, queueWarmedKeys, settings, warmupSignature, warmMedia]);
 
   /**
    * A purge must also drop the matching warm state: a stale "ready" entry would suppress the

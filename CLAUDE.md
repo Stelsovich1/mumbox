@@ -91,6 +91,25 @@ and `mumbox:diag:session:v1` (written from `pagehide`, where an async write woul
 
 Audio blobs never enter that JSON. They live in **IndexedDB** via `idb-keyval` under `mumbox:media:<mediaId>` (`saveImportedMedia` / `getMediaBlob` / `deleteStoredMedia`). `MediaAsset` in state only carries metadata. Any code that adds or removes media must keep both stores in sync.
 
+### Per-device settings
+
+`settings:v1`, in the same `mumbox-app`/`state` store as the layout, holds the knobs that used to
+exist only as query flags: PCM budget, byte-range decoding, warm-up mode, visuals, the diagnostics
+overlay. Deliberately outside `SerializableAppState` — everything in there is serialized into the
+`.mumbox` payload, and a budget chosen for an 8 GB laptop must not travel to a phone inside a
+project file. `clearAppStateStorage` deletes it, and both seeders delete it for the reason they
+delete `ui:v1`.
+
+`BoardPage` reads the layout FIRST and the settings second, and bounds the settings read with a
+timer: both records share a database, the layout read is the one whose failure must be detected, and
+a preference must never be able to keep the boot gate from rendering.
+
+Query flags still win over saved settings, and that takes explicit work — `setPartialDecodeMode` is
+consulted before the query flag, and `setBudgetBytes` bypasses `readBudgetOverride` entirely — so
+`applyPlaybackSettings` checks for a flag and stands down. See `src/features/app-settings/CLAUDE.md`
+for the whole contract, including why there is no "reset the browser verdict" button and why the
+storage section reports orphaned blobs instead of deleting them.
+
 ### Cell identity and grid resizing
 
 Cell IDs are position-stable: `cell-${row * 12 + column}` (`getPanelCellIds`), so a cell keeps its coordinates when the grid grows or shrinks between 6/8/10/12. Older saves used flat `cell-${index}`; `normalizePanelCellIds` and `remapLegacyCells` migrate those on load and on project import. Do not change this scheme without keeping both migration paths working — e2e tests cover resize round-trips.

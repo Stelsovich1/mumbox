@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openEraseAllData } from "../support/eraseAllData";
 import type { Page } from "@playwright/test";
 
 import { installBufferAudioMock, readProbe } from "../support/audioMock";
@@ -113,7 +114,7 @@ test("empties the cache on a full reset", async ({ page }) => {
   expect(await diagPcmBytes(page)).toBe(3 * DECODED_BYTES);
 
   await page.getByRole("button", { name: "Проект" }).click();
-  await page.getByRole("menuitem", { name: "Стереть все данные" }).click();
+  await openEraseAllData(page);
   await page.getByRole("button", { name: "Да, стереть" }).click();
 
   await expect.poll(async () => diagPcmBytes(page), { timeout: 15_000 }).toBe(0);

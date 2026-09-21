@@ -40,6 +40,51 @@ the envelope is told.
 enabled fade, because a uniform 256-point grid stretches a short fade over a long cue into a slow
 ramp that starts early.
 
+## Warm-up modes
+
+`features/app-settings` lets the device choose what the warm-up is allowed to do before a pad is
+pressed. The engine reads it from `shared/lib/appSettingsStore`; the rules that make each mode safe
+are here.
+
+- `full` — every configured cell of the active panel. The behaviour that predates settings, and the
+  default.
+- `time-budget` — the worker stops taking targets once the run passes `warmupBudgetSeconds`, and
+  what is left is counted as SKIPPED, exactly as the memory budget counts it. Checked BEFORE a
+  target is taken rather than after: a decode cannot be cancelled, so the only honest place to stop
+  is before starting another one. It adapts to the machine, which a fixed cell count cannot.
+- `heads-only` — a target is skipped unless `isPartialPathLikely` says the byte-range path is likely
+  to serve it without a whole-file decode: a streamed track then caches its 0.5 s head, a trimmed
+  cue its own window. The same HINT the staging exclusion uses, so the two cannot disagree about
+  which cells are streamable, and a wrong guess costs one unshared decode rather than a wrong
+  buffer. Containers off that path stay cold.
+- `on-press` — the pool is handed an EMPTY target list. The run still starts, still marks everything
+  already cached as ready and still records, so "the warm-up finished" remains an event that
+  arrives. A press then warms the cue it played and the next two in cell order, through the same
+  `warmMedia`, with the CURRENT run id — a panel switch bumps it and drops whatever the neighbour
+  pass had in flight, which is why that pass needs no lifetime of its own.
+
+`warmupYieldsToInput` makes a worker wait for a gap in the presses between targets: at most four
+waits of 120 ms, because an uncapped one would stall the warm-up for as long as someone keeps
+playing, and that is the session where the remaining pads still need to become instant.
+
+**The settings object is in the warm-up effect's dependency array.** None of these modes changes
+`warmupSignature` — the panel wants the same keys either way — so a mode read at run time would take
+effect at the next panel change and, on a single-panel project, never.
+
+**A cache purge deliberately does NOT restart the warm-up.** Clearing the decoded memory is a
+request to give that memory back; re-decoding on the spot would hand back an unchanged number and a
+busy machine. The purge drops the warm state with the buffers, so the cells go honestly cold.
+
+**The dim cell is honest only while it is temporary.** Under any mode but `full` it would be
+permanent, and a grid 30 % darker forever reads as a defect rather than as information — so
+`resolveWarmthDisplay` returns `off` for the other modes unless the user picked a value explicitly.
+Measured on a 12x12 panel of 144 configured cells under a 6x CPU throttle and committed as
+`visuals-default-grid144@6x` / `visuals-flat-grid144@6x` in `tests/perf/baseline.json`: the state
+animations and the 160 ms transitions they drive cost MORE of the warm-up's wall clock than the
+decoding does — **19 330 ms at 1.7 fps against 4 888 ms at 6.4 fps** with them off, at an identical
+24 decodes in both arms. That is what «упрощённая графика» switches off, and on a large grid it is
+the biggest lever the app has on a weak machine.
+
 ## Decoded-buffer memory
 
 Decoded PCM is Float32: one second of 44.1 kHz stereo is 0.34 MiB, so a 15 MB MP3 becomes 220–330

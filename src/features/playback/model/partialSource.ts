@@ -464,7 +464,19 @@ export async function decodeMediaRange(
  * Returns whether a mid-file window is now usable. Never throws: a failure disables the partial
  * path for that media and, if the decoder rejected a slice outright, blocks the browser.
  */
-export async function ensureMp3Alignment(mediaId: string): Promise<boolean> {
+export async function ensureMp3Alignment(
+  mediaId: string,
+  /**
+   * Which decode lane the two measurement decodes go through.
+   *
+   * The warm-up measures in the background, where nothing is waiting. The PRESS path measures in
+   * the live lane, and must: a cue whose alignment is unknown is refused the streaming plan
+   * entirely and falls back to decoding the whole file, so measuring is not extra work there — it
+   * is two short decodes instead of one very long one. Queueing that behind speculative warm-up
+   * work is what the two lanes exist to prevent.
+   */
+  lane: DecodeLane = "background"
+): Promise<boolean> {
   const probe = await getMediaProbe(mediaId);
   if (probe?.format !== "mp3" || probe.partialDisabled) {
     return false;
@@ -507,8 +519,9 @@ export async function ensureMp3Alignment(mediaId: string): Promise<boolean> {
   // reference has to start at frame 0 to stay on the full decode's timeline, so reaching past a
   // quiet intro means a LONGER window and therefore more of the frame table. Scanning that far for
   // every file would spend the header read on the fifteen in sixteen that never need it.
-  const outcome = await getDecodeSemaphore().run(() =>
-    verifyMp3Alignment(blob, probe, scanToFrames)
+  const outcome = await getDecodeSemaphore().run(
+    () => verifyMp3Alignment(blob, probe, scanToFrames),
+    lane
   );
   return outcome.status === "pass";
 }

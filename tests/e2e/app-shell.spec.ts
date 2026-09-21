@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openEraseAllData } from "../support/eraseAllData";
 
 import { writeSeededAppState } from "../support/seedProject";
 import type { Page } from "@playwright/test";
@@ -566,8 +567,7 @@ test("saves, resets, and imports a project with audio", async ({
   expect(projectText).toContain('"version":2');
 
   await openFileMenu(page);
-  await page.getByText("Стереть все данные").click();
-  await expect(page.getByRole("dialog", { name: "Стереть все данные?" })).toBeVisible();
+  await openEraseAllData(page);
   await page.getByRole("button", { name: "Да, стереть" }).click();
   await expect(page.getByRole("button", { name: "Пустая ячейка 1", exact: true })).toBeVisible();
 

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openEraseAllData } from "../support/eraseAllData";
 
 import { makeWavBuffer, SIZES } from "../support/audioFixtures";
 import {
@@ -154,7 +155,7 @@ test("a full reset empties both the media store and the projects store", async (
   expect(await readSeededKeys(page)).toContain(`${MEDIA_BLOB_PREFIX}${seed.media[0]?.id ?? ""}`);
 
   await page.getByRole("button", { name: "Проект" }).click();
-  await page.getByText("Стереть все данные").click();
+  await openEraseAllData(page);
   await page.getByRole("button", { name: "Да, стереть" }).click();
   await expect(page.getByText("Все данные MUMBOX стерты")).toBeVisible();
 

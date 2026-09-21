@@ -2,6 +2,9 @@ import { Box, Typography } from "@mui/material";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
+import { resolveWarmthDisplay } from "../../../shared/lib/appSettings";
+import type { ResolvedWarmthDisplay } from "../../../shared/lib/appSettings";
+import { useAppSettings } from "../../../shared/lib/appSettingsStore";
 import { GridCell, PlaybackMode } from "../../../entities/cell/model/types";
 import { MediaAsset } from "../../../entities/media/model/types";
 import { GridSize } from "../../../entities/panel/model/types";
@@ -255,6 +258,11 @@ type WorkspaceGridCellProps = {
   cellKey: string;
   isPlaying: boolean;
   warmState: "idle" | "warming" | "ready";
+  /**
+   * How much of the warm state to show. Resolved once, above the grid: `auto` follows the warm-up
+   * mode, because a dim pad means "a moment longer" only while the warm-up is going to reach it.
+   */
+  warmthDisplay: ResolvedWarmthDisplay;
   isSelected: boolean;
   multiSelected: boolean;
   selectionMode: boolean;
@@ -298,6 +306,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
   mediaAsset,
   cellKey,
   isPlaying,
+  warmthDisplay,
   warmState,
   isSelected,
   multiSelected,
@@ -325,8 +334,12 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
   // A cell holding media that is not decoded yet is a third state, and it needs to look like one:
   // until now it was indistinguishable from a ready cell, so there was no way to tell which pads
   // would start instantly and which would pay for a decode.
+  // `off` is not cosmetic: under any warm-up mode but `full` the dim state stops being temporary,
+  // and a grid that is permanently 30 % darker reads as a defect rather than as information.
   const displayColor =
-    mediaAsset && warmState === "idle" ? mixHexColor(baseColor, "#000000", 0.3) : baseColor;
+    mediaAsset && warmState === "idle" && warmthDisplay !== "off"
+      ? mixHexColor(baseColor, "#000000", 0.3)
+      : baseColor;
   const textColor = mediaAsset ? getReadableTextColor(displayColor) : "#a9b7cf";
   const innerMutedColor = `color-mix(in srgb, ${textColor} 82%, transparent)`;
 
@@ -355,6 +368,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
         data-playing={isPlaying ? "true" : "false"}
         ref={registerVisuals}
         data-warm-state={warmState}
+        data-warmth={warmthDisplay}
         data-playback-mode={cell.playbackMode}
         data-hotkey={cell.hotkey}
         data-volume-offset={cell.volumeOffset}
@@ -601,11 +615,20 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
             activeDragOverCellId === cell.id
               ? "0 0 0 2px rgba(255, 204, 102, 0.54), 0 0 18px rgba(255, 204, 102, 0.26)"
               : "none",
-          "&[data-warm-state='warming']": {
+          "&[data-warmth='full'][data-warm-state='warming']": {
             animation: "mumbox-cell-warm 720ms ease-in-out infinite"
           },
-          "&[data-warm-state='ready']:not([data-playing='true'])": {
+          "&[data-warmth='full'][data-warm-state='ready']:not([data-playing='true'])": {
             animation: "mumbox-cell-ready 620ms ease-out 1"
+          },
+          // `static` keeps the information and drops the motion — the same trade the
+          // `prefers-reduced-motion` branch below makes, reached deliberately instead of by system
+          // preference. Measured on a 12x12 panel under a 6x CPU throttle: the state animations and
+          // the transitions they drive cost more of the warm-up's wall clock than the decoding did.
+          "&[data-warmth='static'][data-warm-state='warming']": {
+            opacity: 0.6,
+            borderStyle: "dashed",
+            borderColor: "primary.main"
           },
           // The warm-up pulse is a status signal, not decoration. The global
           // `prefers-reduced-motion` rule in global.css collapses every animation to a
@@ -613,7 +636,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
           // information and leaves a twitch. Respect the setting by dropping the motion and
           // keeping the state visible statically.
           "@media (prefers-reduced-motion: reduce)": {
-            "&[data-warm-state='warming']": {
+            "&[data-warmth='full'][data-warm-state='warming']": {
               opacity: 0.6,
               borderStyle: "dashed",
               borderColor: "primary.main"
@@ -724,7 +747,7 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
                       ? "rgba(247, 251, 255, 0.28)"
                       : "rgba(5, 7, 13, 0.42)",
                   color: textColor,
-                  fontSize: "clamp(5px, 9cqw, 9px)",
+                  fontSize: "clamp(5px, calc(9cqw * var(--mumbox-label-scale, 1)), calc(9px * var(--mumbox-label-scale, 1)))",
                   lineHeight: 1.2,
                   opacity: 0.72,
                   overflow: "hidden",
@@ -757,7 +780,15 @@ const WorkspaceGridCell = memo(function WorkspaceGridCell({
                 wordBreak: "break-word",
                 hyphens: "auto",
                 textAlign: "center",
-                fontSize: "clamp(9px, min(15cqw, 18cqh), 16px)",
+                // Scaled by the "размер подписей" setting. A multiplier on the existing container-relative
+                // clamp rather than a second set of sizes, so the responsive behaviour that makes a
+                // 12x12 cell readable at all is preserved at every step.
+                // The scale multiplies the PREFERRED and MAXIMUM sizes, never the 9 px floor:
+                // that floor is a readability bound on a 12x12 grid, and `app-shell.spec.ts` pins
+                // it. A multiplier outside the clamp would take xs to 7 px and pass, because the
+                // default factor is 1 and the test never changes it.
+                fontSize:
+                  "clamp(9px, calc(min(15cqw, 18cqh) * var(--mumbox-label-scale, 1)), calc(16px * var(--mumbox-label-scale, 1)))",
                 lineHeight: 1.05
               }}
             >
@@ -787,6 +818,9 @@ export function WorkspaceGrid({
   onAudioDrop,
   onMediaDrop
 }: WorkspaceGridProps) {
+  // One subscription for the whole grid, not one per cell: 144 `useSyncExternalStore` calls would
+  // put the cost back where memoising the cell took it out.
+  const warmthDisplay = resolveWarmthDisplay(useAppSettings());
   const [dragOverCellId, setDragOverCellId] = useState<string | null>(null);
   const [draggingCellId, setDraggingCellId] = useState<string | null>(null);
   const [touchDrag, setTouchDrag] = useState<TouchDragState | null>(null);
@@ -1123,6 +1157,7 @@ export function WorkspaceGrid({
               isPlaying={isPlaying}
               cellKey={cellKey}
               warmState={warmState}
+              warmthDisplay={warmthDisplay}
               isSelected={isSelected}
               multiSelected={multiSelected}
               selectionMode={selectionMode}

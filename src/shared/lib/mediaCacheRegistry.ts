@@ -52,9 +52,23 @@ export function purgeMediaCaches(mediaIds: readonly string[]): void {
   }
 }
 
-export function clearMediaCaches(): void {
+/**
+ * Empties every registered cache, or every one but the named ones.
+ *
+ * `except` exists for the settings screen's «очистить память декодирования». The media PROBE cache
+ * is not memory the user is asking for back — it is a few tens of kilobytes — but it holds the
+ * measured decoder offset and the per-media "this file is off the byte-range path" flag. Dropping
+ * those makes every file verify again, and a file that fails verification adds to the tally behind
+ * the per-browser verdict: pressing the button a few times on a project with one bad file could
+ * tip that ratio and take byte-range decoding off the whole browser profile, costing far more
+ * memory than the button reclaimed.
+ */
+export function clearMediaCaches(options?: { except?: readonly string[] }): void {
+  const except = new Set(options?.except ?? []);
   for (const sink of sinks.values()) {
-    sink.clear();
+    if (!except.has(sink.name)) {
+      sink.clear();
+    }
   }
   for (const listener of purgeListeners) {
     listener(null);

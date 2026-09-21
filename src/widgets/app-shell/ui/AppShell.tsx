@@ -1,5 +1,5 @@
 import FileOpenIcon from "@mui/icons-material/FileOpen";
-import DeleteIcon from "@mui/icons-material/Delete";
+import TuneIcon from "@mui/icons-material/Tune";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import LibraryMusicIcon from "@mui/icons-material/LibraryMusic";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
@@ -39,11 +39,20 @@ import { useRegisterSW } from "virtual:pwa-register/react";
 
 import type { AppState } from "../../../app/model/appState";
 import type { PersistenceHandle } from "../../../app/model/appStateStorage";
+import { writeStoredSettings } from "../../../app/model/appStateStorage";
+import { applyPlaybackSettings } from "../../../features/playback/model/playbackSettings";
+import { readBudgetOverride } from "../../../shared/lib/diagnostics";
+import { hasPartialQueryFlag } from "../../../shared/lib/partialDecodePolicy";
+import { setAppSettings, useAppSettings } from "../../../shared/lib/appSettingsStore";
+import { parseSettings } from "../../../shared/lib/appSettings";
+import type { AppSettings } from "../../../shared/lib/appSettings";
 import {
   autoImportAudioFiles,
   clearStoredAppData,
   deleteStoredMedia,
   getMediaBlob,
+  listStoredMediaKeys,
+  MEDIA_BLOB_PREFIX,
   MediaStorageProgress,
   serializeState,
   useAppStore,
@@ -69,6 +78,7 @@ import {
 } from "../../../features/file-config";
 import { getFreeCellIds } from "../../../entities/cell/model/copyCells";
 import { isConfiguredCell } from "../../../entities/cell/model/isConfiguredCell";
+import { AppSettingsDialog } from "../../../features/app-settings";
 import { MediaLibraryDialog } from "../../../features/media-library";
 import {
   countHiddenMediaCells,
@@ -223,6 +233,8 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
     persistence,
     storageFailed
   });
+  const settings = useAppSettings();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [fileAnchor, setFileAnchor] = useState<HTMLElement | null>(null);
   const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
   const [pendingAudioFiles, setPendingAudioFiles] = useState<File[]>([]);
@@ -793,6 +805,27 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
     },
     []
   );
+
+  /**
+   * Applies a settings draft: to the engine, to the document, to the store and to disk.
+   *
+   * The write is fire-and-forget on purpose. A settings record that fails to save costs a
+   * preference on the next launch, and blocking the dialog on it — or worse, refusing to apply
+   * what the user just chose — would trade a visible failure for an invisible one.
+   */
+  const applySettings = useCallback((draft: AppSettings) => {
+    // Through the parser, not straight from the dialog. The number fields accept anything the
+    // keyboard produces — `min`/`max` on an input are hints, not enforcement — and the clamping
+    // used to happen only on the way back IN. A budget of -5 MB or a warm-up budget of 0 would then
+    // behave one way for the whole session and another after a reload, which is the worst shape a
+    // bug can have: the user cannot reproduce what they just saw.
+    const next = parseSettings(draft);
+    applyPlaybackSettings(next);
+    setAppSettings(next);
+    void writeStoredSettings(next).catch(() => {
+      setSaveMessage("Настройки применены, но не сохранены на устройстве");
+    });
+  }, []);
 
   const deleteMediaFromLibrary = useCallback(
     (mediaIds: string[]) => {
@@ -1704,23 +1737,21 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
           <Divider />
           <MenuItem
             onClick={() => {
+              setSettingsOpen(true);
+              closeFileMenu();
+            }}
+          >
+            <TuneIcon fontSize="small" />
+            <Typography sx={{ ml: 1 }}>Настройки приложения</Typography>
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
               setFaqOpen(true);
               closeFileMenu();
             }}
           >
             <HelpOutlineIcon fontSize="small" />
             <Typography sx={{ ml: 1 }}>ЧАВО</Typography>
-          </MenuItem>
-          <Divider />
-          <MenuItem
-            onClick={() => {
-              setResetConfirmOpen(true);
-              closeFileMenu();
-            }}
-            sx={{ color: "error.main" }}
-          >
-            <DeleteIcon fontSize="small" />
-            <Typography sx={{ ml: 1 }}>Стереть все данные</Typography>
           </MenuItem>
           {updateAvailable ? (
             <>
@@ -1968,6 +1999,35 @@ export function AppShell({ initialState, persistence, storageFailed = false }: A
           setOperationProgress(null);
         }}
       />
+      {settingsOpen ? (
+        <AppSettingsDialog
+          open={settingsOpen}
+          settings={settings}
+          media={state.media}
+          cellsByPanel={state.cellsByPanel}
+          panelCount={state.panels.length}
+          persistenceFailed={persistenceFailed}
+          budgetEditable={!readBudgetOverride().present}
+          partialEditable={!hasPartialQueryFlag()}
+          listStoredMediaKeys={listStoredMediaKeys}
+          mediaBlobPrefix={MEDIA_BLOB_PREFIX}
+          onClose={() => {
+            setSettingsOpen(false);
+          }}
+          onApply={applySettings}
+          onEraseAllData={() => {
+            // The settings dialog closes first: the confirmation that follows is about the whole
+            // project, and leaving the settings open behind it would frame an irreversible erase as
+            // one more preference.
+            setSettingsOpen(false);
+            setResetConfirmOpen(true);
+          }}
+          onDeleteMedia={deleteMediaFromLibrary}
+          onClearDecodedCache={() => {
+            setSaveMessage("Память декодирования очищена");
+          }}
+        />
+      ) : null}
       <MediaLibraryDialog
         open={mediaLibraryOpen}
         media={state.media}

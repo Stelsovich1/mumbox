@@ -3,6 +3,9 @@
 }
 
 :root {
+  /* Declared here as well as written inline by the settings applier, so a consumer that forgets
+     the fallback still resolves before the boot gate has read anything. */
+  --mumbox-label-scale: 1;
   --app-height: 100vh;
   --app-safe-area-top: env(safe-area-inset-top, 0px);
   --app-safe-area-right: env(safe-area-inset-right, 0px);
@@ -151,4 +154,63 @@ select {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/*
+ * The in-app "уменьшить движение" switch.
+ *
+ * A separate rule rather than a re-use of the media query above, because the two are different
+ * questions: the media query is what the operating system was told, this is what the app was told.
+ * The system preference stays the stronger of the two — nothing here can turn motion back ON for
+ * someone who switched it off system-wide, because this rule only ever removes motion.
+ *
+ * `!important` matches the media query it mirrors: both have to beat Emotion's own declarations,
+ * which live on a single class.
+ */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.01ms !important;
+}
+
+/*
+ * Cells keep their state readable without the pulse: collapsing an animation to a single frame
+ * deletes the information and leaves a twitch, so the state is re-stated statically here.
+ *
+ * Gated on `data-warmth`, like every warm-state rule in `WorkspaceGrid`. Ungated it was (0,4,0) and
+ * beat the component's own rules, so a panel whose warmth is `off` — the default under every
+ * warm-up mode but `full` — still dimmed and dashed its cells the moment reduced motion was on,
+ * which is the permanently dim grid `off` exists to prevent.
+ */
+:root[data-motion="reduced"] [data-cell-id][data-warmth="full"][data-warm-state="warming"],
+:root[data-motion="reduced"] [data-cell-id][data-warmth="static"][data-warm-state="warming"] {
+  animation: none !important;
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+/*
+ * «Упрощённая графика».
+ *
+ * Measured on a 12x12 panel of 144 configured cells under a 6x CPU throttle and pinned as
+ * `visuals-default-grid144@6x` / `visuals-flat-grid144@6x` in `tests/perf/baseline.json`: with the
+ * state animations, the 160 ms transitions they drive and the glow filters in place the warm-up
+ * took 19 330 ms at 1.7 fps; without them 4 888 ms at 6.4 fps. The decode work was identical in
+ * both arms — 24 decodes either way — so on a large grid this is the single biggest lever the app
+ * has on a weak machine, larger than anything in the decoding settings.
+ *
+ * Applied as a root attribute so nothing in React re-renders when it changes. `:root` is a
+ * pseudo-class, so the selector is (0,3,0) against Emotion's single class (0,1,0) — enough on its
+ * own, with `!important` kept only on the four properties that carry the cost, where Emotion may
+ * write the same property from several rules.
+ */
+:root[data-visuals="flat"] [data-cell-id],
+:root[data-visuals="flat"] [data-cell-id] * {
+  animation: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+  transition: none !important;
 }
